@@ -11,6 +11,15 @@ what each setting was at any time.</p>
 <p class=note>Names are CAPITALS_WITH_UNDERSCORES. A flow step uses one as <code>{{vars.home}}</code> after mapping it in the step (e.g. home → HOME_AREA).</p>
 <h2>History</h2>
 <div id=history class=note></div>
+<section id=signins hidden>
+<h2>Sign-ins</h2>
+<p class=note>Owner only. Link an email so that signing in with it (Google or an emailed link) opens this account, not a
+separate email account. The address is hashed on the hub and never stored; the shared record keeps only its SHA-256
+fingerprint as an <code>account.link</code> event, and unlinking adds another event (nothing is overwritten).</p>
+<p><label>Also sign in as me with: <input id=link-email type=email size=28 autocomplete=email placeholder="you@gmail.com"></label>
+<button id=link>Link</button> <button id=unlink class=link>unlink instead</button> <span id=link-status></span></p>
+<p class=note id=linked></p>
+</section>
 </main>
 <script>
 (() => {
@@ -69,5 +78,27 @@ what each setting was at any time.</p>
     catch (err) { $("status").textContent = err.message; }
   };
   load().catch((err) => { $("status").textContent = err.message; });
+  // F-two-accounts-one-person: link an email sign-in to this account (owners only; the page asks the hub, which hashes it)
+  async function loadSignins() {
+    const me = await api("me");
+    if (!me.owner) return;
+    $("signins").hidden = false;
+    const p = await api("profiles").catch(() => null);
+    const ids = (p?.account?.identities || []).filter((i) => i.startsWith("email:sha256:"));
+    $("linked").textContent = ids.length ? "Linked emails (fingerprints): " + ids.map((i) => i.slice(13, 25) + "…").join(", ") : "No email linked yet.";
+  }
+  async function linkEmail(unlink) {
+    const email = $("link-email").value.trim();
+    if (!email) { $("link-status").textContent = "Type the email first."; return; }
+    try {
+      const r = await api("link-sign-in", { email, unlink });
+      $("link-email").value = "";
+      $("link-status").textContent = unlink ? "Unlinked (" + r.unlinked + ")." : "Linked (" + r.linked + "). Sign out and sign in with it to check.";
+      await loadSignins();
+    } catch (err) { $("link-status").textContent = err.message; }
+  }
+  $("link").onclick = () => linkEmail(false);
+  $("unlink").onclick = () => linkEmail(true);
+  loadSignins().catch(() => {});
 })();
 </script>
