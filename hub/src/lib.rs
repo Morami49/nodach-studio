@@ -575,7 +575,7 @@ impl Record {
                 vars.insert(k.clone(), serde_json::json!(val));
             }
         }
-        // Busy models (429/500/503) are retried after a pause, then the lighter model is tried (F-75): Gemini's
+        // Busy models (429, 500, 502-504, 520-524, 529, network errors: flows::ai_retryable) are retried after a pause, then the lighter model is tried (F-75): Gemini's
         // free tier answers "high demand" often enough that one refusal shouldn't stop a whole flow.
         let mut models = vec![model.to_string()];
         if model != "gemini-flash-lite-latest" { models.push("gemini-flash-lite-latest".into()); }
@@ -593,7 +593,7 @@ impl Record {
                             Ok(t) => { text = Some(t); used = Some(m.clone()); break 'models; }
                             Err((status, msg)) => {
                                 last = format!("the AI ({m}) answered {status}: {msg}");
-                                if !matches!(status, 429 | 500 | 502 | 503 | 504) { return Err(last); }
+                                if !flows::ai_retryable(status) { return Err(last); }
                             }
                         }
                     }

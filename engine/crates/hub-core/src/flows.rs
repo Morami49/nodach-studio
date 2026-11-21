@@ -279,6 +279,14 @@ pub fn secret_var(name: &str) -> Option<String> {
 
 /// Only https, and never the hub's own hosts (a flow can't call its own API with someone else's rights).
 /// The hub answers on its workers.dev addresses and on nodach.com and every subdomain (studio., staging., …).
+/// Whether an AI step should wait and try again (then the lighter model) after this answer status.
+/// Busy or briefly unreachable models: 429, 500 and 502-504, Cloudflare's 520-524 (524 = the origin took too long, seen on the
+/// 21 Nov 18:00 job flow), Google's 529 overload, 408, and 0 for a network error before any status. Anything else
+/// (400 bad request, 401/403 key, 404 model) is a real fault and stops the flow at once.
+pub fn ai_retryable(status: u16) -> bool {
+    matches!(status, 0 | 408 | 429 | 500 | 502..=504 | 520..=524 | 529)
+}
+
 pub fn url_allowed(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else { return false };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
