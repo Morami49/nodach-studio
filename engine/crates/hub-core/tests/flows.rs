@@ -191,3 +191,14 @@ fn private_vars_render_in_the_prompt_but_never_reach_the_item() {
     assert_eq!(hub_core::flows::render("from {{vars.home}} to {{locationName}}", &view), "from North Pole to Hounslow");
     assert!(it.get("vars").is_none());
 }
+
+#[test]
+fn ai_step_retries_busy_and_timed_out_models_only() {
+    // 21 Nov 18:00 job flow stopped on "the AI (gemini-flash-latest) answered 524": a timeout, worth another try.
+    for s in [0u16, 408, 429, 500, 502, 503, 504, 520, 522, 524, 529] {
+        assert!(hub_core::flows::ai_retryable(s), "{s} should be retried");
+    }
+    for s in [200u16, 400, 401, 403, 404, 413, 501, 505, 525, 530] {
+        assert!(!hub_core::flows::ai_retryable(s), "{s} should stop the flow");
+    }
+}
