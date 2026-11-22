@@ -6,6 +6,7 @@
  *   db      shared "events" ↔ the hub's record (/studio/api/events), genesis ↔ /studio/api/genesis.
  *           Private paths (data/users/<id>/...) ↔ /studio/api/private (I1): kept on the hub encrypted with your
  *           own key, apart from the shared record; this browser keeps a copy and anything not yet sent.
+ *           Every write sends x-nodach-profile: the profile this window works as (B-profile-windows).
  *   user    the GitHub login you signed in with (id "github:<login>", the same id the connector uses).
  *   mcp     none: the page is already talking to the hub, so there is nothing to sync.
  *   assets  none yet (uploads are not part of S1).
@@ -23,7 +24,13 @@
     try { r = await fetch(API + path, { credentials: "same-origin", cache: "no-store", ...opts }); }
     catch { throw { code: "unavailable", message: "can't reach the hub" }; }
     if (r.status === 401) { toLogin(); throw { code: "unauthenticated", message: "signed out" }; }
-    if (r.status === 400 || r.status === 403) { const t = await r.text().catch(() => ""); throw { code: "invalid_argument", message: t }; }
+    if (r.status === 400 || r.status === 403) {
+      const t = await r.text().catch(() => "");
+      // B-profile-windows: the hub refused this window's profile; the page shows the hub's message (not "view only")
+      let j = null; try { j = JSON.parse(t); } catch {}
+      if (j && j.profile_mismatch) throw { code: "invalid_argument", profile_mismatch: true, message: String(j.error || t) };
+      throw { code: "invalid_argument", message: t };
+    }
     if (!r.ok) throw { code: "unavailable", status: r.status, message: "hub answered " + r.status };
     return r.json();
   }
@@ -68,13 +75,16 @@
     document.addEventListener("visibilitychange", () => { if (!document.hidden) pull().catch(() => {}); });
   }
 
+  // B-profile-windows: every write names the window's profile (the page sets window.__nodachProfile)
+  const profileHeader = () => (window.__nodachProfile ? { "x-nodach-profile": String(window.__nodachProfile) } : {});
+
   const newId = () => "w" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 
   async function writeShared(id, ev) {
     const event = { ...ev }; delete event._id;
     await api("events", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-nodach-studio": "1" },
+      headers: { "content-type": "application/json", "x-nodach-studio": "1", ...profileHeader() },
       body: JSON.stringify({ doc_id: id, event }),
     });
     if (!seen.has(id)) { seen.add(id); shared.push({ ...event, _id: id }); }
@@ -104,7 +114,7 @@
   }
   async function sendPrivate(path, ev) {
     const d = { ...ev }; const doc_id = d._id; delete d._id;
-    await api("private", { method: "POST", headers: { "content-type": "application/json", "x-nodach-studio": "1" },
+    await api("private", { method: "POST", headers: { "content-type": "application/json", "x-nodach-studio": "1", ...profileHeader() },
       body: JSON.stringify({ path, doc_id, event: d }) });
   }
   async function flushPending() {

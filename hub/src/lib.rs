@@ -33,6 +33,9 @@
 //! GET  /studio/api/genesis  the genesis seed
 //! GET  /studio/api/events   ?after=N&limit=M → {events:[{doc_id,event}], next, total} (same as the connector's read_events)
 //! POST /studio/api/events   {doc_id, event}: one Studio event, imported with the importer key like Studio Web's sync.
+//!                            x-nodach-profile: <id> (B-profile-windows) names the window's profile; one that isn't an
+//!                            active profile of the signed-in account is refused 403 {profile_mismatch: true} on every
+//!                            POST /studio/api/* route and logged as outcome "profile mismatch".
 //! GET  /studio/api/private  ?path=data/users/<you>/... → {events:[{doc_id,event}]}: your private items (I1, Q53 A)
 //! POST /studio/api/private  {path, doc_id, event}: one private event, sealed with your own key (hub_core::private)
 //! POST /studio/api/private/batch  {items:[{path, key, event}]}: up to 200 private events, checked whole (M1 d)
@@ -1016,7 +1019,20 @@ impl Record {
                 let login = self.signed_in(req, &cfg, now);
                 let who = login.clone().unwrap_or_else(|| "-".into());
                 let env = self.env.var("NODACH_ENV").map(|v| v.to_string()).unwrap_or_default();
+                // B-profile-windows (98b b): every Studio write names the window's profile (x-nodach-profile). A profile
+                // that isn't one of the signed-in account's active profiles is refused here, for every write route, and
+                // logged as "profile mismatch". No header: an older page or another client; it counts as Personal.
+                let profile_hdr = req.headers().get(hub_core::authorship::PROFILE_HEADER).ok().flatten();
+                let profile_refused = match (&login, &profile_hdr) {
+                    (Some(l), Some(h)) if method == Method::Post && p.starts_with("/studio/api/") =>
+                        hub_core::authorship::profile_refusal(&self.hub.borrow().as_ref().unwrap().profiles(), l, h),
+                    _ => None,
+                };
                 let r = match (method, p, login) {
+                    (Method::Post, _, Some(l)) if profile_refused.is_some() => {
+                        self.log(now, p, "write", "profile mismatch", &l);
+                        json_status(&serde_json::json!({"error": profile_refused, "refused": true, "profile_mismatch": true}), 403)?
+                    }
                     (Method::Get, "/studio" | "/studio/", None) => Response::redirect(Url::parse(&format!("{}/studio/login", cfg.issuer))?)?,
                     (Method::Get, "/studio" | "/studio/", Some(_)) => studio_page(&env)?,
                     (Method::Get, "/studio/import", None) => Response::redirect(Url::parse(&format!("{}/studio/login", cfg.issuer))?)?,
@@ -1122,8 +1138,13 @@ impl Record {
                             // F-profile-kinds-spoofable: profile and access kinds only as yourself; members only as
                             // themselves and inside their spaces (hub_core::authorship)
                             let refused = hub_core::authorship::refusal(&self.hub.borrow().as_ref().unwrap().access(), &l, &ev);
+                            // B-profile-windows: the event's author.profile must agree with the window and be the author's
+                            let wrong_profile = hub_core::authorship::write_profile_refusal(&self.hub.borrow().as_ref().unwrap().profiles(), &l, profile_hdr.as_deref(), &ev);
                             if !valid_doc_id(&doc_id) || !ok_ev {
                                 json_status(&serde_json::json!({"error": "need {doc_id, event:{kind, ts, ...}}"}), 400)?
+                            } else if let Some(e) = wrong_profile {
+                                self.log(now, "/studio/api/events", &kind, "profile mismatch", &l);
+                                json_status(&serde_json::json!({"error": e, "refused": true, "profile_mismatch": true}), 403)?
                             } else if let Some(e) = refused {
                                 self.log(now, "/studio/api/events", &kind, "refused: author", &l);
                                 json_status(&serde_json::json!({"error": e, "refused": true}), 403)?
@@ -1273,6 +1294,7 @@ impl Record {
                 for m in &msgs {
                     let method = m.get("method").and_then(|v| v.as_str()).unwrap_or("-").to_string();
                     let tool = if method == "tools/call" { m.pointer("/params/name").and_then(|v| v.as_str()).unwrap_or("-").to_string() } else { method.clone() };
+                    let mut profile_mismatch = false;
                     let r = if tool == "hub_log" && m.get("id").is_some() {
                         let limit = m.pointer("/params/arguments/limit").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200) as usize;
                         // logged before reading, so the call that asks for the log appears in it
@@ -1402,9 +1424,14 @@ impl Record {
                         let args = m.pointer("/params/arguments").cloned().unwrap_or_default();
                         // F-profile-kinds-spoofable: the whole batch is refused if any doc claims an author it may not
                         let refused = |docs: &Vec<(String, serde_json::Value)>| hub_core::authorship::batch_refusal(&self.hub.borrow().as_ref().unwrap().access(), &login, docs);
+                        // B-profile-windows: an event's author.profile must be one of its author's own active profiles
+                        let wrong_profile = |docs: &Vec<(String, serde_json::Value)>| hub_core::authorship::batch_profile_refusal(&self.hub.borrow().as_ref().unwrap().profiles(), &login, docs);
                         let v = match mcp::import_docs(&args) {
                             Err(e) => mcp::tool_result(serde_json::json!({"error": e}), true),
-                            Ok(docs) => if let Some(e) = refused(&docs) {
+                            Ok(docs) => if let Some(e) = wrong_profile(&docs) {
+                                profile_mismatch = true;
+                                mcp::tool_result(serde_json::json!({"error": e, "refused": true, "profile_mismatch": true}), true)
+                            } else if let Some(e) = refused(&docs) {
                                 mcp::tool_result(serde_json::json!({"error": e, "refused": true}), true)
                             } else {
                                 let sent = docs.len();
@@ -1425,6 +1452,7 @@ impl Record {
                         mcp::handle(b.as_mut().unwrap(), &login, &key, m, now)
                     };
                     let outcome = match &r {
+                        _ if profile_mismatch => "profile mismatch".to_string(),
                         None => "notification".to_string(),
                         // a client probing for a method this hub does not offer (e.g. server/discover) is not a failure
                         Some(v) if v.pointer("/error/code") == Some(&serde_json::json!(-32601)) => "not offered".to_string(),

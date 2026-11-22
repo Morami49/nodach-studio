@@ -1498,7 +1498,8 @@ async def s56_sections_reach_views(b):
     """NAV-2: every one of the 13 views is reachable from the new bar. Private holds ActionMap, List, Version tree, My
     queue, Ask, Capture and Pack; Teamspaces holds Builders, Money, Hub and Show; Settings holds Runs, Developer mode,
     theme, Point, branch and Classic tabs; Search goes to an address or adds a command (Command map); Explore is a
-    placeholder; the avatar menu has the account, profiles and a disabled new-window entry; as-of sits on the canvas."""
+    placeholder; the avatar menu has the account and profiles (inside claude.ai there is no profile list, so the new-window
+    entry is disabled there; s60 covers it served by the hub); as-of sits on the canvas."""
     st = Store(); p = await open_page(b, st, {"classic": False})
     want = {"private": ["map", "list", "tree", "queue", "ask", "capture", "pack"], "teams": ["builders", "money", "hub"], "settings": ["runs", "self"]}
     reached, missing = [], []
@@ -1522,7 +1523,7 @@ async def s56_sections_reach_views(b):
     asof_on_canvas = await p.evaluate("!!document.querySelector('#v-map #asof') && !!document.querySelector('#asof').offsetParent")
     await p.click("#avatarBtn"); await p.wait_for_timeout(150)
     menu = await p.evaluate("""() => { const m = document.querySelector('#avatarMenu'), w = document.querySelector('#profWindow');
-      return !m.hidden && w.disabled && w.title === 'after profile windows ship' && m.querySelectorAll('#profList li').length >= 1 && !!m.querySelector('#signOut') && m.textContent.includes('Signed in'); }""")
+      return !m.hidden && w.disabled && w.title === 'No profile to open' && m.querySelectorAll('#profList li').length >= 1 && !!m.querySelector('#signOut') && m.textContent.includes('Signed in'); }""")
     await p.keyboard.press("Escape"); await p.wait_for_timeout(100)
     ok = (not missing and len(reached) == 13 and show_in_teams and settings_ctl and dev_named and explore and went and cmd and asof_on_canvas and menu and not p.errors)
     return ok, (f"views reached={len(reached)}/13 missing={missing}, Live and Show in Teamspaces={show_in_teams}, Settings controls={settings_ctl}, Developer mode={dev_named}, "
@@ -1599,6 +1600,158 @@ async def s59_dev_mode_proposes(b):
     ok = props == ["SCHEMA-types", "SET-ui-theme"] and untouched and no_apply_here and n_apply == 2 and applied and not (p.errors + s.errors)
     return ok, f"proposals={props}, nothing applied in production={untouched}, no apply button there={no_apply_here}, apply buttons on staging={n_apply}, applied on staging={applied}, errors={(p.errors + s.errors)[:1]}"
 
+# ---------------------------------------------------------------- B-profile-windows (98b b): one profile per window
+PROFILES = [{"id": "P-morami49", "kind": "personal", "label": "Personal", "implicit": True, "revoked": None},
+            {"id": "P-work", "kind": "work", "label": "Lift work", "implicit": False, "revoked": None},
+            {"id": "P-old", "kind": "venture", "label": "Old venture", "implicit": False, "revoked": "2026-11-20T10:00:00.000Z"}]
+
+
+async def open_profile_hub(browser, query="", refuse=(), profiles=None, ctx=None):
+    """Studio served by a stand-in hub that knows the signed-in person's profiles (/studio/api/profiles) and, like the
+    real hub, refuses a write whose x-nodach-profile is in `refuse` with 403 {profile_mismatch} and the hub's words.
+    Every window opened from the page shares the stand-in (same context), so new windows are real windows here."""
+    import urllib.parse
+    H = {"docs": [], "posts": [], "headers": [], "refused": [], "profiles": profiles or PROFILES, "refuse": set(refuse)}
+    html = ('<!doctype html><html lang=en><head><meta charset=utf-8><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style>'
+            '<script>window.__nodachBuild="test";window.__nodachEnv="production";window.__nodachPollMs=60000;</script>'
+            f'<script>{SHIM.read_text()}</script></head><body>{PAGE.read_text()}</body></html>')
+
+    async def serve(route):
+        req = route.request; u = urllib.parse.urlparse(req.url); path = u.path; q = urllib.parse.parse_qs(u.query)
+        js = lambda v, status=200: route.fulfill(status=status, body=json.dumps(v), content_type="application/json")
+        if path in ("/studio", "/studio/"):
+            return await route.fulfill(body=html, content_type="text/html")
+        if path == "/health":
+            return await route.fulfill(body="ok test", content_type="text/plain")
+        if path == "/studio/api/me":
+            return await js({"login": "Morami49", "id": "github:Morami49", "owner": True})
+        if path == "/studio/api/profiles":
+            return await js({"account": {"id": "acct:github:morami49"}, "profiles": H["profiles"], "connections": []})
+        if path == "/studio/api/genesis":
+            return await js(GENESIS)
+        if path == "/studio/api/events" and req.method == "GET":
+            after, lim = int(q.get("after", ["0"])[0]), int(q.get("limit", ["500"])[0])
+            page = H["docs"][after:after + lim]
+            return await js({"events": page, "next": after + len(page), "total": len(H["docs"])})
+        if path.startswith("/studio/api/") and req.method == "POST":
+            prof = req.headers.get("x-nodach-profile")
+            b = json.loads(req.post_data or "{}")
+            H["headers"].append(prof)
+            if prof in H["refuse"]:
+                H["refused"].append(prof)
+                return await js({"error": f"profile {prof} isn't one of yours (signed in as Morami49); this window can only write as your own profiles. Nothing was saved.",
+                                 "refused": True, "profile_mismatch": True}, 403)
+            if path == "/studio/api/events":
+                H["posts"].append(b)
+                if not any(d["doc_id"] == b["doc_id"] for d in H["docs"]):
+                    H["docs"].append({"doc_id": b["doc_id"], "event": b["event"]})
+                return await js({"id": b["doc_id"], "imported": 1})
+        if path == "/studio/api/private":
+            return await js({"error": "no private store"}, 503)
+        return await route.fulfill(status=404, body="")
+    if ctx is None:
+        ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
+        await ctx.add_init_script(nav_init(False))
+        await ctx.route("http://hub.test/**", serve)
+    page = await ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    await page.goto("http://hub.test/studio" + query)
+    await page.wait_for_timeout(1200)
+    page.errors = errors; page.hub = H; page.ctx = ctx
+    return page
+
+
+STRIP = """() => { const el = document.querySelector('#profStrip'); const c = el.hidden ? null : NodachProfile.colours(el.dataset.profile);
+  return {shown: !el.hidden && el.getBoundingClientRect().height > 8, text: el.innerText, id: el.dataset.profile || null, bg: getComputedStyle(el).backgroundColor,
+    fg: getComputedStyle(el).color, ratio: c && c.ratio, dark: c && c.dark, below: el.getBoundingClientRect().top >= document.querySelector('#navBar').getBoundingClientRect().bottom - 1,
+    session: (() => { try { return sessionStorage.getItem('nodach.profile'); } catch (e) { return 'x'; } })(), url: location.search}; }"""
+
+
+async def s60_profile_new_window(b):
+    """B-profile-windows: like Chrome profiles, each profile opens in its own window. The avatar menu lists the person's
+    own profiles (revoked ones left out), and "New window" opens Studio at ?profile=<id> in a new window that works as
+    that profile, while the first window keeps its own. "Use here" switches the profile of this window only."""
+    p = await open_profile_hub(b)
+    await nav_open(p); await p.click("#avatarBtn"); await p.wait_for_timeout(150)
+    listed = await p.evaluate("[...document.querySelectorAll('#profList [data-prof]')].map(x => x.dataset.prof)")
+    first = (await p.evaluate(STRIP))["id"]
+    btn_on = await p.evaluate("!document.querySelector('#profWindow').disabled")
+    async with p.ctx.expect_page() as info:
+        await p.click('[data-profwin="P-work"]')
+    w = await info.value
+    w.errors = []; w.on("pageerror", lambda e: w.errors.append(str(e)))
+    await w.wait_for_load_state(); await w.wait_for_timeout(1300)
+    ws = await w.evaluate(STRIP); ps = await p.evaluate(STRIP)
+    # switching within the same window
+    await nav_open(p); await p.click("#avatarBtn") if await p.evaluate("document.querySelector('#avatarMenu').hidden") else None
+    await p.wait_for_timeout(100)
+    await p.click('[data-profuse="P-work"]'); await p.wait_for_timeout(200)
+    here = await p.evaluate(STRIP)
+    await p.reload(); await p.wait_for_timeout(1300)
+    kept = (await p.evaluate(STRIP))["id"]
+    ok = (listed == ["P-morami49", "P-work"] and first == "P-morami49" and btn_on and "profile=P-work" in w.url and ws["id"] == "P-work"
+          and ws["session"] == "P-work" and ps["id"] == "P-morami49" and here["id"] == "P-work" and here["url"] == "?profile=P-work" and kept == "P-work"
+          and not (p.errors + w.errors))
+    return ok, (f"listed={listed}, default={first}, button on={btn_on}, new window url={w.url[-20:]} works as {ws['id']} (tab keeps {ws['session']}), "
+                f"first window still {ps['id']}, use here -> {here['id']} {here['url']}, after reload {kept}, errors={(p.errors + w.errors)[:1]}")
+
+
+async def s61_profile_strip_shown(b):
+    """B-profile-windows: a thin strip under the bar names the window's profile. Its colour is a stable hash of the
+    profile id (the same id gets the same colour in every window, two profiles differ), the text is the --ink token
+    at 4.5:1 or better, and it follows the dark theme. A profile in the URL that isn't the person's falls back to their
+    first profile, with a note."""
+    p = await open_profile_hub(b, "?profile=P-work")
+    a = await p.evaluate(STRIP)
+    q = await open_profile_hub(b, "?profile=P-work", ctx=p.ctx)
+    same = (await q.evaluate(STRIP))["bg"] == a["bg"]
+    r = await open_profile_hub(b, "?profile=P-morami49", ctx=p.ctx)
+    differs = (await r.evaluate(STRIP))["bg"] != a["bg"]
+    await p.evaluate("document.documentElement.dataset.theme = 'dark'"); await p.wait_for_timeout(150)
+    d = await p.evaluate(STRIP)
+    await p.screenshot(path=str(OUT / "profile-strip-dark.png"))
+    x = await open_profile_hub(b, "?profile=P-someone-else", ctx=p.ctx)
+    fb = await x.evaluate(STRIP); note = "isn't one of yours" in await visible_text(x)
+    ok = (a["shown"] and "Lift work" in a["text"] and a["below"] and a["ratio"] >= 4.5 and not a["dark"] and same and differs
+          and d["shown"] and d["dark"] and d["ratio"] >= 4.5 and d["bg"] != a["bg"] and fb["id"] == "P-morami49" and note
+          and not (p.errors + q.errors + r.errors + x.errors))
+    return ok, (f"strip={a['shown']} {a['text']!r} under bar={a['below']} contrast={a['ratio']}, same id same colour={same}, other profile differs={differs}, "
+                f"dark={d['dark']} contrast={d['ratio']} {d['bg']}, unknown profile falls back to {fb['id']} with note={note}, errors={(p.errors + x.errors)[:1]}")
+
+
+async def s62_write_carries_profile(b):
+    """B-profile-windows: every write names the window's profile, in the x-nodach-profile header and in the event's
+    author.profile, so the hub can check it and the record shows which profile wrote it. Two windows, two profiles."""
+    p = await open_profile_hub(b, "?profile=P-work")
+    w = await open_profile_hub(b, "?profile=P-morami49", ctx=p.ctx)
+    for page, text in ((p, "from the work window"), (w, "from the personal window")):
+        await page.evaluate(f"write('comment', 'D-001', {{text: {json.dumps(text)}}})"); await page.wait_for_timeout(300)
+    H = p.hub if p.hub["posts"] else w.hub
+    posts = p.hub["posts"] + w.hub["posts"]
+    by_text = {x["event"]["body"]["text"]: x["event"]["author"].get("profile") for x in posts}
+    hdrs = p.hub["headers"] + w.hub["headers"]
+    ok = (by_text == {"from the work window": "P-work", "from the personal window": "P-morami49"} and sorted(hdrs) == ["P-morami49", "P-work"]
+          and not (p.errors + w.errors))
+    return ok, f"author.profile by write={by_text}, headers={hdrs}, errors={(p.errors + w.errors)[:1]}"
+
+
+async def s63_refused_write_shows_message(b):
+    """B-profile-windows: when the hub refuses a write because the window's profile isn't the signed-in account's
+    (revoked in another window, or someone else's), the page shows the hub's words, saves nothing, and does not turn
+    the whole Studio view-only: switching to an own profile writes again."""
+    p = await open_profile_hub(b, "?profile=P-work", refuse={"P-work"})
+    await p.evaluate("write('comment', 'D-001', {text: 'should be refused'})"); await p.wait_for_timeout(400)
+    txt = await visible_text(p)
+    shown = "isn't one of yours" in txt and "Nothing was saved" in txt
+    saved = len(p.hub["posts"])
+    still = await p.evaluate("S.canWrite !== false")
+    flagged = await p.evaluate("document.querySelector('#profStrip').dataset.refused === 'true'")
+    await p.evaluate("NodachProfile.use('P-morami49', true)")
+    await p.evaluate("write('comment', 'D-001', {text: 'as personal'})"); await p.wait_for_timeout(400)
+    ok = shown and saved == 0 and p.hub["refused"] == ["P-work"] and still and flagged and len(p.hub["posts"]) == 1 and not p.errors
+    return ok, f"message shown={shown}, saved while refused={saved}, still writable={still}, strip marked={flagged}, then saved as personal={len(p.hub['posts'])}, errors={p.errors[:1]}"
+
 SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock, s05_branch_awareness, s06_view_only_client,
              s07_names, s08_long_history, s09_ai_relay, s10_keyboard_list, s11_offline_capture, s12_member_rights,
              s13_two_people_at_once, s14_phone, s15_undo_old_status, s16_overwhelm, s17_disagreement, s18_clock_skew, s19_private_area,
@@ -1609,7 +1762,7 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s49_show_pause_clock, s50_show_states, s51_show_marks_follow_canvas,
              s52_live_connector_reply_in_seconds, s53_live_states,
              s54_sign_out_switch_account, s55_nav_collapsed_expanded, s56_sections_reach_views, s57_esc_touch_keyboard, s58_classic_tabs,
-             s59_dev_mode_proposes]
+             s59_dev_mode_proposes, s60_profile_new_window, s61_profile_strip_shown, s62_write_carries_profile, s63_refused_write_shows_message]
 
 
 async def main():

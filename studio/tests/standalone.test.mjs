@@ -24,6 +24,9 @@ function fakeHub({ signedIn = true, docs = [], privateStore = true } = {}) {
     }
     if (u.pathname === "/studio/api/events" && opts.method === "POST") {
       if (opts.headers?.["x-nodach-studio"] !== "1") return json({ error: "csrf" }, 403);
+      H.profiles = [...(H.profiles || []), opts.headers?.["x-nodach-profile"] ?? null];
+      if (H.refuseProfile && opts.headers?.["x-nodach-profile"] === H.refuseProfile)
+        return json({ error: `profile ${H.refuseProfile} isn't one of yours`, refused: true, profile_mismatch: true }, 403);
       const b = JSON.parse(opts.body); H.posts.push(b);
       if (!H.docs.some(d => d.doc_id === b.doc_id)) H.docs.push({ doc_id: b.doc_id, event: b.event });
       return json({ id: b.doc_id, imported: 1 });
@@ -223,6 +226,22 @@ test("same build: no banner", async () => {
   const ctx = boot(H, { __nodachBuild: "aaaaaaa", document: dom });
   assert.equal((await ctx.window.__nodach.checkVersion()).stale, false);
   assert.equal(dom.getElementById("nodach-update"), null);
+});
+
+test("B-profile-windows: a write names the window's profile; a refused profile comes back as profile_mismatch with the hub's words", async () => {
+  const H = fakeHub();
+  const ctx = boot(H, { __nodachProfile: "P-work" });
+  const db = await ctx.window.claude.use("db");
+  await db.collection("events").add({ ts: "2026-11-22T10:00:00.000Z", kind: "comment", item: "D-001", body: { text: "hi" } });
+  assert.deepEqual(H.profiles, ["P-work"]);
+  H.refuseProfile = "P-work";
+  let err = null;
+  try { await db.collection("events").add({ ts: "2026-11-22T10:00:01.000Z", kind: "comment", item: "D-001", body: { text: "again" } }); } catch (e) { err = e; }
+  assert.equal(err?.profile_mismatch, true);
+  assert.match(err.message, /isn't one of yours/);
+  ctx.window.__nodachProfile = undefined;
+  await db.collection("events").add({ ts: "2026-11-22T10:00:02.000Z", kind: "comment", item: "D-001", body: { text: "no profile" } });
+  assert.equal(H.profiles.at(-1), null, "no profile chosen: no header (the hub counts it as Personal)");
 });
 
 test("staging always wears a ribbon; production never does", async () => {
