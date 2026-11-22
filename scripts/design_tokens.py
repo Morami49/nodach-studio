@@ -10,6 +10,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOKENS = ROOT / "design" / "tokens.json"
 CSS = ROOT / "design" / "tokens.css"
+RESERVED = {"name", "version", "color", "type", "spacing", "radius", "meta"}
 HEADER = "/* Nodach — generated from design/tokens.json. Edit tokens.json, then regenerate; never edit this file by hand. */"
 
 
@@ -23,7 +24,7 @@ def render(t: dict) -> str:
             v = v if isinstance(v, str) else v.get(theme, v[themes[0]])
             lines.append(f"  --{tok['name']}: {v};")
         if theme == themes[0]:
-            for fam in ("spacing", "radius"):
+            for fam in ("spacing", "radius") + tuple(k for k in t if k not in RESERVED):
                 for tok in t[fam]["tokens"]:
                     lines.append(f"  --{tok['name']}: {tok['value']};")
             for k, v in t["type"]["families"].items():

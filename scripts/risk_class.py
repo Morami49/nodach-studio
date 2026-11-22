@@ -3,7 +3,7 @@ staging pass; anything else waits for Nowed. When in doubt a file is high risk.
 
 Low: Studio pages (not sign-in), tests, fixtures, docs, the public front page, ActionMap.
 High: everything else, including workflows, hub and engine code, wrangler.toml, the watch baseline, legal pages,
-LICENSE and TRADEMARKS. Usage: python scripts/risk_class.py < changed-files.txt  (prints low|high, reasons on stderr)
+LICENSE, TRADEMARKS and everything under design/ (the brand source of truth). Usage: python scripts/risk_class.py < changed-files.txt  (prints low|high, reasons on stderr)
 """
 import fnmatch
 import sys
@@ -20,6 +20,7 @@ HIGH_EVEN_IF_LOW = [
     "studio/login.html",          # sign-in
     "LICENSE", "TRADEMARKS.md", "SECURITY.md",
     "site/privacy.html", "site/terms.html",
+    "design/*", "design/**",      # brand source of truth: AI review, then Nowed approves (TOK-3)
 ]
 
 
