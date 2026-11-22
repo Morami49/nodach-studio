@@ -29,6 +29,8 @@
       // B-profile-windows: the hub refused this window's profile; the page shows the hub's message (not "view only")
       let j = null; try { j = JSON.parse(t); } catch {}
       if (j && j.profile_mismatch) throw { code: "invalid_argument", profile_mismatch: true, message: String(j.error || t) };
+      // BQ-1 step 2: a teamspace rule refused this one write (a role, a guest, a share level): show why, stay writable
+      if (j && j.teamspace_refused) throw { code: "permission_denied", teamspace_refused: true, message: String(j.error || t) };
       throw { code: "invalid_argument", message: t };
     }
     if (!r.ok) throw { code: "unavailable", status: r.status, message: "hub answered " + r.status };

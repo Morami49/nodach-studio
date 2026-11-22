@@ -27,7 +27,10 @@ function fakeHub({ signedIn = true, docs = [], privateStore = true } = {}) {
       H.profiles = [...(H.profiles || []), opts.headers?.["x-nodach-profile"] ?? null];
       if (H.refuseProfile && opts.headers?.["x-nodach-profile"] === H.refuseProfile)
         return json({ error: `profile ${H.refuseProfile} isn't one of yours`, refused: true, profile_mismatch: true }, 403);
-      const b = JSON.parse(opts.body); H.posts.push(b);
+      const b = JSON.parse(opts.body);
+      if (H.refuseTeamspace && b.event?.kind === "member.role")
+        return json({ error: `only an owner of ${b.event.item} can change roles`, refused: true, teamspace_refused: true }, 403);
+      H.posts.push(b);
       if (!H.docs.some(d => d.doc_id === b.doc_id)) H.docs.push({ doc_id: b.doc_id, event: b.event });
       return json({ id: b.doc_id, imported: 1 });
     }
@@ -242,6 +245,19 @@ test("B-profile-windows: a write names the window's profile; a refused profile c
   ctx.window.__nodachProfile = undefined;
   await db.collection("events").add({ ts: "2026-11-22T10:00:02.000Z", kind: "comment", item: "D-001", body: { text: "no profile" } });
   assert.equal(H.profiles.at(-1), null, "no profile chosen: no header (the hub counts it as Personal)");
+});
+
+test("BQ-1 step 2: a teamspace refusal comes back as teamspace_refused with the hub's words, not as view-only", async () => {
+  const H = fakeHub(); H.refuseTeamspace = true;
+  const ctx = boot(H);
+  const db = await ctx.window.claude.use("db");
+  let err = null;
+  try { await db.collection("events").add({ ts: "2026-11-22T10:00:00.000Z", kind: "member.role", item: "TS-a", body: { teamspace: "TS-a", profile: "P-x", role: "owner" } }); } catch (e) { err = e; }
+  assert.equal(err?.teamspace_refused, true);
+  assert.notEqual(err?.code, "invalid_argument", "a refused role change must not turn Studio view-only");
+  assert.match(err.message, /only an owner of TS-a can change roles/);
+  await db.collection("events").add({ ts: "2026-11-22T10:00:01.000Z", kind: "comment", item: "D-001", body: { text: "still writes" } });
+  assert.equal(H.posts.length, 1);
 });
 
 test("staging always wears a ribbon; production never does", async () => {

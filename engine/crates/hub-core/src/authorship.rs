@@ -15,7 +15,7 @@ use serde_json::Value;
 
 /// Kinds whose meaning depends on who wrote them.
 pub fn signer_only(kind: &str) -> bool {
-    profiles::KINDS.contains(&kind) || access::KINDS.contains(&kind)
+    profiles::KINDS.contains(&kind) || access::KINDS.contains(&kind) || crate::teamspaces::KINDS.contains(&kind)
 }
 
 fn authored_by(ev: &Value, login: &str) -> bool {
@@ -30,13 +30,28 @@ pub fn refusal(acc: &access::State, login: &str, ev: &Value) -> Option<String> {
     if signer_only(kind) && !own {
         return Some(format!("{kind} must be written by the signed-in account itself"));
     }
+    // BQ-1 step 2: teamspace roles bind everyone, the hub owner included, judged on the event's own author
+    if let Some(e) = teamspace_refusal(acc, ev) {
+        return Some(e);
+    }
     if acc.is_owner(login) {
         return None;
     }
     if !own {
         return Some("you can only write events authored by yourself".into());
     }
-    acc.check_write(login, kind, access::subject(ev).as_deref()).err()
+    acc.check_event(login, ev).err()
+}
+
+/// Why teamspace rules refuse this event (only an owner changes roles; guests touch only what is shared with them;
+/// a write into a teamspace needs member or editor rights), or None. The hub logs these as "refused: teamspace".
+pub fn teamspace_refusal(acc: &access::State, ev: &Value) -> Option<String> {
+    match acc.teams_decide(ev) { Some(Err(e)) => Some(e), _ => None }
+}
+
+/// The first teamspace refusal in a batch, naming the doc.
+pub fn batch_teamspace_refusal(acc: &access::State, docs: &[(String, Value)]) -> Option<String> {
+    docs.iter().find_map(|(id, ev)| teamspace_refusal(acc, ev).map(|r| format!("{id}: {r}")))
 }
 
 /// The first refusal in a batch, naming the doc, or None if every doc may be written.

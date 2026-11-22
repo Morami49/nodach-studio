@@ -27,6 +27,8 @@ pub struct State {
     grants: BTreeMap<String, Grant>,
     /// Email accounts an owner invited: login → the label the owner gave them (never the address).
     invites: BTreeMap<String, String>,
+    /// BQ-1 step 2: teamspace roles and node shares (set by Hub::access; None in plain folds and older tests).
+    teams: Option<Box<crate::teamspaces::State>>,
 }
 
 fn lc(s: &str) -> String { s.trim().to_ascii_lowercase() }
@@ -50,7 +52,7 @@ fn strings(v: Option<&Value>) -> Vec<String> {
 
 impl State {
     pub fn fold(owners: &[String], events: &[Value]) -> State {
-        let mut st = State { owners: owners.iter().map(|o| lc(o)).filter(|o| !o.is_empty()).collect(), grants: BTreeMap::new(), invites: BTreeMap::new() };
+        let mut st = State { owners: owners.iter().map(|o| lc(o)).filter(|o| !o.is_empty()).collect(), grants: BTreeMap::new(), invites: BTreeMap::new(), teams: None };
         for ev in events { st.observe(ev); }
         st
     }
@@ -96,11 +98,35 @@ impl State {
         g.items.contains(item) || g.prefixes.iter().any(|p| item.starts_with(p.as_str()))
     }
 
-    /// May `login` see this event? Owners see all; members see granted items and their own writes.
+    /// Add teamspace roles and node shares to these access rules (BQ-1 step 2).
+    pub fn with_teams(mut self, teams: crate::teamspaces::State) -> Self { self.teams = Some(Box::new(teams)); self }
+
+    pub fn teams(&self) -> Option<&crate::teamspaces::State> { self.teams.as_deref() }
+
+    /// May `login` see this event? Owners see all; members see their own writes, then what teamspaces say (a node in a
+    /// teamspace only for its members, or for whoever it is shared with), then granted items.
     pub fn visible(&self, login: &str, ev: &Value) -> bool {
         if self.is_owner(login) { return true; }
         if author_login(ev).as_deref() == Some(lc(login).as_str()) { return true; }
+        if let Some(b) = self.teams.as_ref().and_then(|t| t.visible(login, ev)) { return b; }
         subject(ev).map(|s| self.granted(login, &s)).unwrap_or(false)
+    }
+
+    /// The teamspace verdict on an event, judged on its own author (None when no teamspace or share is involved).
+    pub fn teams_decide(&self, ev: &Value) -> Option<Result<(), String>> {
+        self.teams.as_ref().and_then(|t| t.decide(ev))
+    }
+
+    /// May `login` put this whole event on the record? Teamspace rules first (for everyone, on the event's author),
+    /// then, for members, the spaces they were given.
+    pub fn check_event(&self, login: &str, ev: &Value) -> Result<(), String> {
+        match self.teams_decide(ev) {
+            Some(Err(e)) => return Err(e),
+            Some(Ok(())) if !self.is_owner(login) => return Ok(()),
+            _ => {}
+        }
+        let kind = ev.get("kind").and_then(Value::as_str).unwrap_or("");
+        self.check_write(login, kind, subject(ev).as_deref())
     }
 
     /// May `login` write an event of `kind` about `item`? Grants are owner-only; members write only inside grants.

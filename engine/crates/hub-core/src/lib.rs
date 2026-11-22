@@ -29,6 +29,7 @@ pub mod guard;
 pub mod access;
 pub mod digest;
 pub mod authorship;
+pub mod teamspaces;
 
 pub const IMPORT_KIND: &str = "studio.event";
 /// A Studio-shaped write made on a node other than Studio Web (PC, phone, an AI via the hub).
@@ -210,7 +211,15 @@ impl Hub {
     pub fn access(&self) -> access::State {
         let (docs, _, _, _) = self.studio_events(0, usize::MAX);
         let evs: Vec<Value> = docs.iter().filter_map(|d| d.get("event").cloned()).collect();
-        access::State::fold(&self.owners, &evs)
+        // BQ-1 step 2: teamspace roles and node shares, folded over the same events with the accounts from `profiles`
+        let pairs: Vec<(&str, &Value)> = docs.iter().filter_map(|d| Some((d.get("doc_id")?.as_str()?, d.get("event")?))).collect();
+        let teams = teamspaces::State::fold(self.profiles(), &self.owners, pairs);
+        access::State::fold(&self.owners, &evs).with_teams(teams)
+    }
+
+    /// Teamspace roles and shares alone (for /studio/api/teamspaces).
+    pub fn teamspaces(&self) -> teamspaces::State {
+        self.access().teams().cloned().unwrap_or_default()
     }
 
     /// One page of the shared record as `login` may see it: same cursor and total, members get only what's theirs.
