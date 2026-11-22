@@ -134,14 +134,25 @@ class Store:
                     await asyncio.sleep(0.1 * (attempt + 1))
 
 
-async def open_page(browser, store: Store, cfg: dict, width=1440, height=900, name="p"):
-    ctx = await browser.new_context(viewport={"width": width, "height": height})
+def nav_init(classic=True, env=None):
+    """NAV-2: the scenarios written before the new bar drive Studio through Classic tabs (Settings → Classic tabs), which
+    must keep working until each move is verified; s55–s58 drive the new bar itself (cfg classic=False). env="staging"
+    makes the page behave as the staging hub serves it (NVS-4: only there do Developer-mode saves apply)."""
+    # only on a context's first load, so a scenario can reload and see the choice kept
+    act = 'localStorage.setItem("studio.classicTabs","1")' if classic else 'localStorage.removeItem("studio.classicTabs")'
+    js = 'try{if(!sessionStorage.getItem("navInit")){sessionStorage.setItem("navInit","1");' + act + '}}catch(e){}'
+    return js + (f'window.__nodachEnv={json.dumps(env)};' if env else '')
+
+
+async def open_page(browser, store: Store, cfg: dict, width=1440, height=900, name="p", touch=False, reduced=False):
+    ctx = await browser.new_context(viewport={"width": width, "height": height}, has_touch=touch, reduced_motion="reduce" if reduced else "no-preference")
     page = await ctx.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     full = {"genesis": GENESIS, "me": "u_nowed", "owner": True, "canEdit": True, "canWrite": True,
             "names": {"u_nowed": "Nowed", "u_rad": "Rad"}, **cfg, "paths": store.paths}
     await page.expose_function("__bridgeAdd", store.add)
+    await page.add_init_script(nav_init(full.get("classic", True), full.get("env")))
     await page.add_init_script("window.__cfg = " + json.dumps(full) + ";" + MOCK)
     await page.goto(WRAPPED.as_uri())
     await page.wait_for_timeout(900)
@@ -639,8 +650,8 @@ async def s32_private_files_and_views(b):
 
 
 async def s33_studio_edits_studio(b):
-    """D-152/153: Nowed adds an item type and changes the look from Studio's own Studio tab; both take effect live and are versions; a change request can be proposed and approved."""
-    st = Store([]); p = await open_page(b, st, {})
+    """D-152/153: on staging, Nowed adds an item type and changes the look from Developer mode; both take effect at once and are versions; a change request can be proposed and approved. (Away from staging these saves are proposals: s59.)"""
+    st = Store([]); p = await open_page(b, st, {"env": "staging"})
     await p.click("#tabs button[data-v=self]")
     await p.fill("#tyKey", "venue"); await p.fill("#tyLabel", "Venue"); await p.click("#tyAdd"); await p.wait_for_timeout(400)
     in_capture = await p.evaluate("[...document.querySelectorAll('#capType option')].some(o => o.value === 'venue')")
@@ -653,7 +664,7 @@ async def s33_studio_edits_studio(b):
     cid = await p.evaluate("[...F.items.values()].find(i => i.type === 'change')?.id")
     await p.select_option(f'[data-crstage="{cid}"]', "approved"); await p.wait_for_timeout(400)
     status = await p.evaluate(f"F.items.get('{cid}').status")
-    q = await open_page(b, st, {}); fresh_accent = await q.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
+    q = await open_page(b, st, {"env": "staging"}); fresh_accent = await q.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
     ok = in_capture and in_filters and accent == "#aa0000" and "#aa0000" in saved and status == "approved" and fresh_accent == "#aa0000" and not p.errors
     return ok, f"type in capture={in_capture}, in types={in_filters}, accent live={accent}, saved={'#aa0000' in saved}, change approved={status}, other page sees look={fresh_accent}"
 
@@ -941,6 +952,7 @@ async def open_canvas_page(browser, store: Store, cfg: dict):
     full = {"genesis": GENESIS, "me": "u_nowed", "owner": True, "canEdit": True, "canWrite": True,
             "names": {"u_nowed": "Nowed"}, **cfg, "paths": store.paths}
     await page.expose_function("__bridgeAdd", store.add)
+    await page.add_init_script(nav_init(full.get("classic", True), full.get("env")))
     await page.add_init_script("window.__cfg = " + json.dumps(full) + ";" + MOCK)
     await page.goto("http://studio.test/page.html")
     await page.wait_for_selector(".react-flow__node-item", timeout=20000)
@@ -1293,6 +1305,7 @@ async def open_hub_page(browser, docs, poll_ms=60000, fast_ms=600, me=None, widt
             return await js({"error": "no private store"}, 503)
         return await route.fulfill(status=404, body="")
     ctx = await browser.new_context(viewport={"width": width, "height": height})
+    await ctx.add_init_script(nav_init(True))   # NAV-2: drives Studio through Classic tabs
     await ctx.route("http://hub.test/**", serve)
     page = await ctx.new_page()
     errors = []
@@ -1363,7 +1376,7 @@ async def s53_live_states(b):
     return ok, f"states={seq}, trace={tr}, errors={p.errors[:1]}"
 
 
-async def open_served_studio(browser, me):
+async def open_served_studio(browser, me, classic=True):
     """Studio as the hub serves it: the real host shim (standalone.js) over a stand-in hub with sign-in and sign-out.
     The stand-in keeps a session cookie; /studio/logout clears it, and /studio/api/* then answers 401."""
     import urllib.parse
@@ -1399,6 +1412,7 @@ async def open_served_studio(browser, me):
             return await js({"error": "no private store"}, 503)
         return await route.fulfill(status=404, body="")
     ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
+    await ctx.add_init_script(nav_init(classic))
     await ctx.route("http://hub.test/**", serve)
     page = await ctx.new_page()
     errors = []
@@ -1428,6 +1442,163 @@ async def s54_sign_out_switch_account(b):
     return ok, f"account={acct!r}, link shown={shown}, signed out={out}, went {order[:2]}, member shows {macct!r}, hidden in claude.ai={hidden_in_claude}, errors={(p.errors + m.errors)[:1]}"
 
 
+# ---------------------------------------------------------------- NAV-2 (D-nav-hover, 101c a): the hover-reveal bar
+NAV_STATE = """() => { const h = document.querySelector('#hdr'), r = el => el && el.getBoundingClientRect(), op = sel => +getComputedStyle(document.querySelector(sel)).opacity;
+  return {open: h.dataset.open, sections: op('#sections'), word: op('.nb-word'), hint: op('.nb-hint'), bg: getComputedStyle(h).backgroundColor,
+    border: getComputedStyle(h).borderBottomWidth, tabs: !!document.querySelector('#tabs').offsetParent,
+    mark: r(document.querySelector('.nb-mark')).width > 20, avatar: r(document.querySelector('#avatarBtn')).width > 20,
+    markColor: getComputedStyle(document.querySelector('.nb-lockup')).color, wordColor: getComputedStyle(document.querySelector('.nb-word')).color,
+    order: ['.nb-mark', '.nb-word', '[data-s=explore]', '[data-s=private]', '[data-s=teams]', '[data-s=settings]', '#goAddr', '#avatarBtn'].map(s => Math.round(r(document.querySelector(s)).left)),
+    menu: !document.querySelector('#avatarMenu').hidden}; }"""
+
+
+TIMER_JS = """() => { const T = window.__navT = {}, h = document.querySelector('#hdr'), bar = document.querySelector('#navBar');
+  bar.addEventListener('pointerenter', () => { T.enter ??= performance.now(); }); bar.addEventListener('pointerleave', () => { T.leave ??= performance.now(); });
+  new MutationObserver(() => { T[h.dataset.open === 'true' ? 'open' : 'close'] ??= performance.now(); }).observe(h, {attributes: true, attributeFilter: ['data-open']}); }"""
+
+
+async def nav_open(p):
+    box = await p.locator(".nb-mark").bounding_box()
+    await p.mouse.move(box["x"] + 5, box["y"] + 5); await p.wait_for_timeout(500)
+
+
+async def s55_nav_collapsed_expanded(b):
+    """NAV-2: Studio opens with a quiet bar (the N mark, three node dots, the avatar; no background or divider). Resting
+    the pointer on it opens the full bar after 150 ms (lockup, Explore, Private, Teamspaces, Settings, Search, avatar, in
+    that order, the lockup all green, cream in the dark theme); leaving it closes it 400 ms later."""
+    st = Store(); p = await open_page(b, st, {"classic": False})
+    c = await p.evaluate(NAV_STATE)
+    collapsed = (c["open"] == "false" and c["sections"] == 0 and c["word"] == 0 and c["hint"] == 1 and c["mark"] and c["avatar"]
+                 and not c["tabs"] and c["bg"] == "rgba(0, 0, 0, 0)" and c["border"] == "0px")
+    # timings measured inside the page, so a slow runner can't make them flaky
+    await p.evaluate(TIMER_JS)
+    box = await p.locator(".nb-mark").bounding_box()
+    await p.mouse.move(box["x"] + 5, box["y"] + 5); await p.wait_for_timeout(600)
+    o = await p.evaluate(NAV_STATE)
+    T = await p.evaluate("window.__navT")
+    early = "false" if T.get("open") and T["open"] - T["enter"] >= 140 else "true"
+    green = "rgb(14, 74, 61)"
+    opened = (early == "false" and o["open"] == "true" and o["sections"] == 1 and o["word"] == 1 and o["hint"] == 0
+              and o["order"] == sorted(o["order"]) and o["markColor"] == green and o["wordColor"] == green)
+    await p.evaluate("window.scrollTo(0, 500); document.querySelector('#v-map').scrollTop = 400")
+    still_clear = (await p.evaluate(NAV_STATE))["bg"] == "rgba(0, 0, 0, 0)"
+    await p.mouse.move(700, 700); await p.wait_for_timeout(900)
+    T = await p.evaluate("window.__navT")
+    lingers = "true" if T.get("close") and T["close"] - T["leave"] >= 390 else "false"
+    closed = (await p.evaluate(NAV_STATE))["open"]
+    await p.evaluate("document.documentElement.dataset.theme = 'dark'")
+    d = await p.evaluate(NAV_STATE); cream = "rgb(243, 227, 204)"
+    await p.screenshot(path=str(OUT / "nav2-collapsed.png"))
+    ok = collapsed and opened and still_clear and lingers == "true" and closed == "false" and d["markColor"] == cream and d["wordColor"] == cream and not p.errors
+    return ok, (f"collapsed={collapsed}, opened early={early}, opened={opened} order={o['order']}, lockup {o['markColor']}/{o['wordColor']}, "
+                f"clear on scroll={still_clear}, waited 400 ms to close={lingers}, closed later={closed == 'false'}, dark lockup={d['markColor']}, errors={p.errors[:1]}")
+
+
+async def s56_sections_reach_views(b):
+    """NAV-2: every one of the 13 views is reachable from the new bar. Private holds ActionMap, List, Version tree, My
+    queue, Ask, Capture and Pack; Teamspaces holds Builders, Money, Hub and Show; Settings holds Runs, Developer mode,
+    theme, Point, branch and Classic tabs; Search goes to an address or adds a command (Command map); Explore is a
+    placeholder; the avatar menu has the account, profiles and a disabled new-window entry; as-of sits on the canvas."""
+    st = Store(); p = await open_page(b, st, {"classic": False})
+    want = {"private": ["map", "list", "tree", "queue", "ask", "capture", "pack"], "teams": ["builders", "money", "hub"], "settings": ["runs", "self"]}
+    reached, missing = [], []
+    for sec, views in want.items():
+        await nav_open(p); await p.click(f"#sections [data-s={sec}]"); await p.wait_for_timeout(150)
+        for v in views:
+            await p.click(f"#subnav [data-sv={v}]"); await p.wait_for_timeout(120)
+            ok_v = await p.evaluate(f"S.view === '{v}' && !document.querySelector('#v-{v}').hidden && S.section === '{sec}'")
+            (reached if ok_v else missing).append(v)
+    show_in_teams = await p.evaluate("['#showBtn', '#liveBtn'].every(s => document.querySelector('#subnav [data-sub=teams] ' + s))")
+    settings_ctl = await p.evaluate("['#theme','#pointBtn','#branch','#classicTabs','#conn'].every(s => document.querySelector('#subnav [data-sub=settings] ' + s))")
+    dev_named = "Developer mode" in await p.inner_text("#v-self h2")
+    await nav_open(p); await p.click("#sections [data-s=explore]"); await p.wait_for_timeout(150)
+    explore = "Explore is being designed" in await p.inner_text("#v-explore")
+    await nav_open(p); await p.fill("#goAddr", "D-001"); await p.press("#goAddr", "Enter"); await p.wait_for_timeout(300)
+    went = await p.evaluate("S.sel") == "D-001"
+    await p.fill("#goAddr", "capture idea venue list"); await p.press("#goAddr", "Enter"); await p.wait_for_timeout(500)
+    cmd = await p.evaluate("S.view === 'command' && commands().length === 1 && commands()[0].raw === 'capture idea venue list'")
+    reached += ["command"] if cmd else []
+    await nav_open(p); await p.click("#sections [data-s=private]"); await p.click("#subnav [data-sv=map]"); await p.wait_for_timeout(100)
+    asof_on_canvas = await p.evaluate("!!document.querySelector('#v-map #asof') && !!document.querySelector('#asof').offsetParent")
+    await p.click("#avatarBtn"); await p.wait_for_timeout(150)
+    menu = await p.evaluate("""() => { const m = document.querySelector('#avatarMenu'), w = document.querySelector('#profWindow');
+      return !m.hidden && w.disabled && w.title === 'after profile windows ship' && m.querySelectorAll('#profList li').length >= 1 && !!m.querySelector('#signOut') && m.textContent.includes('Signed in'); }""")
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(100)
+    ok = (not missing and len(reached) == 13 and show_in_teams and settings_ctl and dev_named and explore and went and cmd and asof_on_canvas and menu and not p.errors)
+    return ok, (f"views reached={len(reached)}/13 missing={missing}, Live and Show in Teamspaces={show_in_teams}, Settings controls={settings_ctl}, Developer mode={dev_named}, "
+                f"Explore placeholder={explore}, search address={went}, search command={cmd}, as-of on canvas={asof_on_canvas}, avatar menu={menu}, errors={p.errors[:1]}")
+
+
+async def s57_esc_touch_keyboard(b):
+    """NAV-2: keyboard focus opens the bar and Esc closes it (and the avatar menu); on a phone a tap on the bar opens
+    and closes it; with reduced motion there is no fade."""
+    st = Store(); p = await open_page(b, st, {"classic": False})
+    await p.evaluate("document.activeElement?.blur(); document.body.focus()")
+    for _ in range(4):
+        await p.keyboard.press("Tab"); await p.wait_for_timeout(30)
+        if await p.evaluate("document.querySelector('#navBar').contains(document.activeElement)"): break
+    focus_opens = await p.evaluate("document.querySelector('#hdr').dataset.open") == "true"
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(100)
+    esc_closes = await p.evaluate("document.querySelector('#hdr').dataset.open") == "false"
+    await nav_open(p); await p.click("#avatarBtn"); await p.wait_for_timeout(100)
+    menu_open = await p.evaluate("!document.querySelector('#avatarMenu').hidden")
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(100)
+    menu_esc = await p.evaluate("document.querySelector('#avatarMenu').hidden && document.querySelector('#hdr').dataset.open === 'false'")
+    t = await open_page(b, st, {"classic": False}, width=390, height=800, touch=True)
+    await t.tap(".nb-hint", position={"x": 2, "y": 2}, force=True); await t.wait_for_timeout(100)
+    tap_opens = await t.evaluate("document.querySelector('#hdr').dataset.open") == "true"
+    await t.tap(".nb-lockup"); await t.wait_for_timeout(100)
+    tap_closes = await t.evaluate("document.querySelector('#hdr').dataset.open") == "false"
+    overflow = await t.evaluate("document.documentElement.scrollWidth > innerWidth")
+    await t.screenshot(path=str(OUT / "nav2-phone.png"))
+    r = await open_page(b, st, {"classic": False}, reduced=True)
+    no_fade = await r.evaluate("getComputedStyle(document.querySelector('#sections')).transitionDuration") in ("0s", "0s, 0s")
+    ok = focus_opens and esc_closes and menu_open and menu_esc and tap_opens and tap_closes and not overflow and no_fade and not (p.errors + t.errors + r.errors)
+    return ok, (f"focus opens={focus_opens}, Esc closes={esc_closes}, avatar menu Esc={menu_open and menu_esc}, tap opens={tap_opens}, tap closes={tap_closes}, "
+                f"phone overflow={overflow}, reduced motion no fade={no_fade}, errors={(p.errors + t.errors + r.errors)[:1]}")
+
+
+async def s58_classic_tabs(b):
+    """NAV-2: the old tab row stays reachable under Settings → Classic tabs until each move is verified: turning it on
+    shows all 13 tabs and the old rail (each works), the choice survives a reload, and turning it off brings the bar back."""
+    st = Store(); p = await open_page(b, st, {"classic": False})
+    await nav_open(p); await p.click("#sections [data-s=settings]"); await p.wait_for_timeout(100)
+    await p.check("#classicTabs"); await p.wait_for_timeout(150)
+    tabs = await p.evaluate("[...document.querySelectorAll('#tabs button')].map(x => x.dataset.v)")
+    works = []
+    for v in tabs:
+        await p.click(f"#tabs button[data-v={v}]"); await p.wait_for_timeout(80)
+        if await p.evaluate(f"S.view === '{v}' && !document.querySelector('#v-{v}').hidden"): works.append(v)
+    in_rail = await p.evaluate("['#pointBtn','#showBtn','#liveBtn','#theme','#branch','#asof','#classicTabs'].every(s => document.querySelector('#rail ' + s))")
+    await p.reload(); await p.wait_for_timeout(900)
+    kept = await p.evaluate("document.querySelector('#hdr').classList.contains('classic') && !!document.querySelector('#tabs').offsetParent")
+    await p.uncheck("#classicTabs"); await p.wait_for_timeout(150)
+    back = await p.evaluate("!document.querySelector('#tabs').offsetParent && !!document.querySelector('#subnav [data-sub=settings] #pointBtn') && !!document.querySelector('#v-map #asof')")
+    ok = len(tabs) == 13 and works == tabs and in_rail and kept and back and not p.errors
+    return ok, f"tabs={len(tabs)}, working={len(works)}, old rail={in_rail}, kept after reload={kept}, off restores bar={back}, errors={p.errors[:1]}"
+
+
+async def s59_dev_mode_proposes(b):
+    """NVS-4: in production a look or schema save from Developer mode no longer applies for everyone: it writes a
+    proposal (a change item, status proposed, naming the setting and value) and nothing changes. On staging the
+    proposal can be applied, which writes the setting version and marks the proposal shipped."""
+    st = Store([]); p = await open_page(b, st, {"classic": False})
+    await p.evaluate("show('self')"); await p.wait_for_timeout(150)
+    await p.fill("#tyKey", "venue"); await p.fill("#tyLabel", "Venue"); await p.click("#tyAdd"); await p.wait_for_timeout(400)
+    await p.evaluate("""() => { const i = document.querySelector('[data-tok="--accent"]'); i.value = '#aa0000'; i.dispatchEvent(new Event('input')); }""")
+    await p.click("#lkSave"); await p.wait_for_timeout(400)
+    props = await p.evaluate("[...F.items.values()].filter(i => i.type === 'change' && i.status === 'proposed' && i.meta?.target).map(i => i.meta.target).sort()")
+    untouched = await p.evaluate("!F.items.has('SCHEMA-types') && !F.items.has('SET-ui-theme') && !('venue' in TYPES) && getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() !== '#aa0000'")
+    no_apply_here = await p.locator("[data-crapply]").count() == 0
+    s = await open_page(b, st, {"classic": False, "env": "staging"})
+    await s.evaluate("show('self')"); await s.wait_for_timeout(200)
+    n_apply = await s.locator("[data-crapply]").count()
+    cid = await s.evaluate("[...F.items.values()].find(i => i.type === 'change' && i.meta?.target === 'SCHEMA-types').id")
+    await s.click(f'[data-crapply="{cid}"]'); await s.wait_for_timeout(400)
+    applied = await s.evaluate(f"F.items.has('SCHEMA-types') && TYPES.venue === 'Venue' && F.items.get('{cid}').status === 'shipped'")
+    ok = props == ["SCHEMA-types", "SET-ui-theme"] and untouched and no_apply_here and n_apply == 2 and applied and not (p.errors + s.errors)
+    return ok, f"proposals={props}, nothing applied in production={untouched}, no apply button there={no_apply_here}, apply buttons on staging={n_apply}, applied on staging={applied}, errors={(p.errors + s.errors)[:1]}"
+
 SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock, s05_branch_awareness, s06_view_only_client,
              s07_names, s08_long_history, s09_ai_relay, s10_keyboard_list, s11_offline_capture, s12_member_rights,
              s13_two_people_at_once, s14_phone, s15_undo_old_status, s16_overwhelm, s17_disagreement, s18_clock_skew, s19_private_area,
@@ -1437,7 +1608,8 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s46_live_session_stream, s47_live_browser_speech_opt_in, s48_live_member_lines,
              s49_show_pause_clock, s50_show_states, s51_show_marks_follow_canvas,
              s52_live_connector_reply_in_seconds, s53_live_states,
-             s54_sign_out_switch_account]
+             s54_sign_out_switch_account, s55_nav_collapsed_expanded, s56_sections_reach_views, s57_esc_touch_keyboard, s58_classic_tabs,
+             s59_dev_mode_proposes]
 
 
 async def main():

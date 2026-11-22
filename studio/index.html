@@ -1,7 +1,7 @@
 <title>Nodach Studio</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <link rel="stylesheet" href="/studio/vendor/xyflow.css">
 <style>
@@ -25,6 +25,17 @@
   --accent:#6fb0de; --accent-ink:#0d1517;
   --t-decision:#6fb0de; --t-question:#e3a15f; --t-term:#5fc2ad; --t-story:#c39ad8; --t-asset:#a5b2af; --t-idea:#8fcf75; --t-finding:#ec7f72; --t-lead:#e2c45a; --t-setting:#a99cf0; --t-change:#4fd1c5;
   --ok:#6cc08d; --warn:#e3a15f; --bad:#ec7f72; --band:#2e2416; --band-ink:#f0d2a6; color-scheme:dark }
+/* Brand tokens, mirrored from design/tokens.css (the hub embeds this one file, so it can't link that sheet). Only names
+   that don't collide with Studio's own palette are copied; --nb-brand is the lockup colour: green, cream in the dark theme. */
+:root{
+  --nodach-green:#0E4A3D; --nodach-cream:#F3E3CC; --nb-brand:var(--nodach-green);
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --radius-sm:4px; --radius-md:8px;
+  --duration-nav-open-delay:150ms; --duration-nav-open:250ms; --duration-nav-close-delay:400ms; --duration-nav-close:200ms; --duration-hover:180ms;
+  --easing-out:cubic-bezier(0, 0, 0.58, 1); --easing-in:cubic-bezier(0.42, 0, 1, 1);
+  --font-display:"Space Grotesk", system-ui, sans-serif; --font-sans:"Space Grotesk", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --nb-brand:var(--nodach-cream) }}
+:root[data-theme="dark"]{ --nb-brand:var(--nodach-cream) }
 html,body{height:100%}
 body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--body);margin:0;display:flex;flex-direction:column}
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
@@ -39,15 +50,73 @@ textarea{width:100%;resize:vertical;box-sizing:border-box}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .mono{font-family:var(--mono);font-size:12px}
 .mute{color:var(--mute)}
-header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line);
-  padding-block:10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
-  display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
+header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:transparent;border-bottom:0;
+  padding-block:6px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:4px}
+/* NAV-2 (D-nav-hover, decided in Figma 22 Nov): hover-reveal bar. Motion and brand values are design/tokens.css tokens. */
+.nb{position:relative;display:flex;align-items:center;gap:var(--space-4);min-height:36px;min-width:0}
+.nb-lockup{display:inline-flex;align-items:flex-start;gap:9px;color:var(--nb-brand);flex:none;user-select:none}
+.nb-mark{width:43px;height:18px;display:block}   /* 240 : 100, never reshaped (brand rule 1); gap = half the mark's height */
+.nb-word{font:700 21px/15px var(--font-display);letter-spacing:-.03em;margin-top:-1px}
+.nb-reveal{opacity:0;pointer-events:none;transition:opacity var(--duration-nav-close) var(--easing-in)}
+#hdr[data-open="true"] .nb-reveal{opacity:1;pointer-events:auto;transition:opacity var(--duration-nav-open) var(--easing-out)}
+.nb-hint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;gap:5px;align-items:center;pointer-events:none;
+  opacity:1;transition:opacity var(--duration-nav-open) var(--easing-out)}
+.nb-hint i,.nb-dots i{width:5px;height:5px;border-radius:50%;background:var(--nb-brand);display:block}
+#hdr[data-open="true"] .nb-hint{opacity:0;transition:opacity var(--duration-nav-close) var(--easing-in)}
+.nb-sections{display:flex;gap:var(--space-1);min-width:0;overflow-x:auto;scrollbar-width:none}
+.nb-sections button,#subnav .sub>button{position:relative;border:0;background:transparent;border-radius:0;padding:8px 10px 6px;white-space:nowrap;color:var(--ink)}
+/* H1 underline: grows from the centre over duration-hover */
+.nb-sections button::after,#subnav .sub>button::after{content:"";position:absolute;left:50%;right:50%;bottom:1px;height:2px;background:var(--nb-brand);
+  transition:left var(--duration-hover) var(--easing-out),right var(--duration-hover) var(--easing-out)}
+.nb-sections button:hover::after,.nb-sections button:focus-visible::after,#subnav .sub>button:hover::after,#subnav .sub>button:focus-visible::after,
+#subnav .sub>button[aria-current="true"]::after{left:10px;right:10px}
+/* C3 node dots: three small nodes over the current section */
+.nb-sections button[aria-current="true"]::before{content:"";position:absolute;left:50%;top:1px;width:17px;height:5px;transform:translateX(-50%);
+  background:radial-gradient(circle,var(--nb-brand) 2px,transparent 2.4px) 0 0/6px 5px repeat-x}
+.nb-sections button[aria-current="true"]{font-weight:600}
+.nb-slot{display:flex;flex:1 1 140px;min-width:80px;justify-content:flex-end}
+.nb-slot #goForm{width:100%;max-width:340px}
+#goAddr{width:100%;box-sizing:border-box}
+.nb-avatar{flex:none;margin-left:auto;width:32px;height:32px;padding:0;border-radius:50%;background:var(--nodach-green);color:var(--nodach-cream);border:0;font:600 13px/32px var(--font-sans)}
+.nb-avatar:hover:not(:disabled){border:0;box-shadow:0 0 0 2px var(--nb-brand)}
+#avatarMenu{position:absolute;right:max(16px,env(safe-area-inset-right,0px));top:46px;z-index:12;background:var(--raise);border:1px solid var(--line);border-radius:var(--radius-md);
+  padding:var(--space-3);width:min(300px,calc(100vw - 32px));box-sizing:border-box;display:flex;flex-direction:column;gap:6px;box-shadow:0 6px 24px rgba(0,0,0,.15)}
+#avatarMenu[hidden]{display:none}
+#avatarMenu #acct{align-self:flex-start}
+#subnav{display:flex;min-width:0}
+#subnav .sub{display:flex;flex-wrap:wrap;gap:2px 6px;align-items:center;min-width:0}
+#subnav .sub[hidden]{display:none}
+#subnav .sub>button{padding:4px 8px 6px;font-size:13px}
+#subnav .sub>button[aria-current="true"]{font-weight:600}
+.nb-group{display:inline-flex;gap:6px;align-items:center}
+.nb-group label,.nb-toggle{font-size:12px;color:var(--mute)}
+.nb-toggle{display:inline-flex;gap:4px;align-items:center}
+[data-slot]:empty{display:none}
+[data-slot]{display:contents}
+.nb-slot[data-slot]{display:flex}   /* a real box, so the reveal fade applies to the search field */
+@media (max-width:600px){   /* phones: the open bar puts the sections on their own row; closed, it stays one row */
+  .nb{flex-wrap:wrap;row-gap:2px}
+  .nb-sections{order:3;flex-basis:100%}
+  .nb-slot[data-slot]{order:2}
+  .nb-avatar{order:2}
+  #hdr[data-open="false"] .nb-sections,#hdr[data-open="false"] .nb-slot[data-slot]{display:none}
+  .nb-hint{top:18px}
+}
+#classicRow{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
+#classicRow[hidden]{display:none}
+#hdr.classic{background:var(--surface);border-bottom:1px solid var(--line)}
+#hdr.classic #subnav{display:none}
+#classicRow form{display:flex;gap:4px}
+#classicRow #goAddr{width:300px;max-width:100%}
+.asof-tool{position:absolute;right:12px;bottom:14px;z-index:6;display:flex;gap:6px;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:12px}
+.asof-tool:not(:has(#asofCtl)){display:none}
 .brand{display:flex;align-items:baseline;gap:8px}
 .brand h1{font:700 20px/1 var(--display);margin:0;letter-spacing:-.01em}
 .brand .ver{font:500 11px var(--mono);color:var(--mute)}
-nav{display:flex;gap:4px;overflow-x:auto;max-width:100%}
-nav button{border:0;background:transparent;padding:6px 10px;border-radius:999px;white-space:nowrap}
-nav button[aria-current="true"]{background:var(--ink);color:var(--surface)}
+#tabs{display:flex;gap:4px;overflow-x:auto;max-width:100%}
+#tabs button{border:0;background:transparent;padding:6px 10px;border-radius:999px;white-space:nowrap}
+#tabs button[aria-current="true"]{background:var(--ink);color:var(--surface)}
 .badge{display:inline-block;min-width:18px;padding:0 5px;margin-left:4px;border-radius:999px;background:var(--warn);color:var(--surface);font:600 11px/18px var(--mono);text-align:center}
 .spacer{flex:1}
 .rail{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -172,8 +241,52 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
 @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
 </style>
 
-<header data-nodach-part="studio.header">
-  <div class="brand"><h1>Nodach Studio</h1><span class="ver" id="ver">v1.1</span></div>
+<header data-nodach-part="studio.header" id="hdr" data-open="false">
+  <!-- NAV-2 (D-nav-hover, 101c a): hover-reveal bar. Collapsed: the N mark, three node dots, the avatar. Open: lockup, sections, search, avatar. -->
+  <div class="nb" id="navBar" data-nodach-part="studio.nav">
+    <span class="nb-lockup" aria-label="nodach studio" role="img">
+      <svg class="nb-mark" viewBox="0 0 240 100" aria-hidden="true"><path d="M8 0 H133 V58 Q133 70 142 62 L204 0 H232 Q240 0 240 8 V92 Q240 100 232 100 H107 V42 Q107 30 98 38 L36 100 H8 Q0 100 0 92 V8 Q0 0 8 0 Z" fill="currentColor"/></svg>
+      <span class="nb-word nb-reveal">nodach</span>
+    </span>
+    <span class="nb-hint" aria-hidden="true"><i></i><i></i><i></i></span>
+    <nav class="nb-sections nb-reveal" id="sections" aria-label="Sections" data-nodach-part="studio.sections">
+      <button data-s="explore">Explore</button>
+      <button data-s="private" aria-current="true">Private</button>
+      <button data-s="teams">Teamspaces</button>
+      <button data-s="settings">Settings</button>
+    </nav>
+    <span class="nb-slot nb-reveal" data-slot="search"></span>
+    <button id="avatarBtn" class="nb-avatar" aria-haspopup="menu" aria-expanded="false" aria-controls="avatarMenu" aria-label="Account and profiles">·</button>
+  </div>
+  <div id="avatarMenu" role="menu" aria-label="Account" hidden data-nodach-part="studio.account">
+    <div class="eyebrow">Signed in</div>
+    <div id="acctName" class="mono"></div>
+    <span data-slot="acct"></span>
+    <div class="eyebrow" style="margin-top:6px">Profiles</div>
+    <ul id="profList" class="log" aria-label="Profiles (read-only for now)"></ul>
+    <button id="profWindow" role="menuitem" disabled title="after profile windows ship">Open profile in new window</button>
+    <span data-slot="signout"></span>
+  </div>
+  <div id="subnav" data-nodach-part="studio.subnav">
+    <div class="sub" data-sub="private" role="toolbar" aria-label="Private">
+      <button data-sv="map">ActionMap</button><button data-sv="list">List</button><button data-sv="tree">Version tree</button><button data-sv="queue">My queue</button><button data-sv="ask">Ask</button><button data-sv="capture">Capture</button><button data-sv="pack">Pack</button>
+    </div>
+    <div class="sub" data-sub="teams" role="toolbar" aria-label="Teamspaces" hidden>
+      <button data-sv="builders">Builders</button><button data-sv="money">Money</button><button data-sv="hub">Hub</button><span data-slot="live"></span><span data-slot="show"></span>
+    </div>
+    <div class="sub" data-sub="settings" role="toolbar" aria-label="Settings" hidden>
+      <button data-sv="runs">Runs</button><button data-sv="self">Developer mode</button>
+      <span data-slot="theme"></span><span data-slot="point"></span><span data-slot="branch"></span>
+      <span data-slot="classic"></span>
+      <span data-slot="status"></span>
+    </div>
+    <div class="sub" data-sub="search" role="toolbar" aria-label="Search" hidden>
+      <button data-sv="command">Command map</button><span class="mute" style="font-size:12px">Search takes an address (D-063@2, R-261105-2#3.1, repo/sha:path#L10) or a command.</span>
+    </div>
+    <div class="sub" data-sub="explore" role="toolbar" aria-label="Explore" hidden><button data-sv="explore">Explore</button></div>
+  </div>
+  <div id="classicRow" hidden data-nodach-part="studio.classic">
+  <div class="brand"><h1>Nodach Studio</h1><span data-slot="ver"></span></div>
   <nav id="tabs" aria-label="Views" data-nodach-part="studio.tabs">
     <button data-v="map" aria-current="true">Map</button>
     <button data-v="command">Command</button>
@@ -187,23 +300,26 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <button data-v="hub">Hub</button>
     <button data-v="runs">Runs</button>
     <button data-v="builders">Builders</button>
-    <button data-v="self">Studio</button>
+    <button data-v="self">Developer mode</button>
   </nav>
-  <form id="goForm" data-nodach-part="studio.goto" class="row" style="gap:4px" role="search"><input id="goAddr" class="mono" placeholder="Go to: D-063@2 · R-261105-2#3.1 · repo/sha:path#L10" aria-label="Go to an address" style="width:300px;max-width:100%"><button>Go</button></form>
+  <span data-slot="c-search"></span>
   <span class="spacer"></span>
-  <div class="rail" data-nodach-part="studio.rail">
-    <label for="branch">branch</label>
-    <select id="branch"><option value="main">main</option></select>
-    <label for="asof">as of</label>
-    <input id="asof" type="range" min="0" max="0" value="0" aria-label="View as of an earlier change">
-    <span class="status live" id="when">live</span>
-    <span class="status" id="conn">connecting…</span>
-    <span class="status mono" id="acct" hidden title="Signed in as"></span>
-    <a id="signOut" href="/studio/logout" hidden title="Sign out of Studio on this browser, then sign in again (with another account if you like)">Sign out / switch account</a>
-    <button id="pointBtn" aria-pressed="false" title="Point mode: click any part of Studio and leave a note on it. Esc stops.">⌖ Point</button>
-    <button id="liveBtn" aria-pressed="false" title="Live session: talk (or type) and point while Claude and builders reply in the same stream. Lines starting task: or build: become draft tasks.">◉ Live</button>
-    <button id="showBtn" aria-pressed="false" title="Show mode: record a demonstration (clicks, drawn strokes, notes, cursor) that chosen people can follow live and replay later. Esc stops.">● Show</button>
-    <button id="theme" aria-label="Toggle theme" title="Toggle theme">◐</button>
+  <div class="rail" id="rail" data-nodach-part="studio.rail"></div>
+  </div>
+  <!-- Controls: one element each. placeControls() moves them between the NAV-2 homes and the classic rail. -->
+  <div id="parked" hidden>
+    <span class="ver" id="ver" data-home="status" data-classic="ver">v1.1</span>
+    <form id="goForm" data-nodach-part="studio.goto" role="search" data-home="search" data-classic="c-search"><input id="goAddr" class="mono" type="search" placeholder="Search: D-063@2 · R-261105-2#3.1 · or a command" aria-label="Search: go to an address, or type a command" autocomplete="off"></form>
+    <span class="nb-group" id="branchCtl" data-home="branch" data-classic="rail"><label for="branch">branch</label> <select id="branch"><option value="main">main</option></select></span>
+    <span class="nb-group" id="asofCtl" data-home="asof" data-classic="rail"><label for="asof">as of</label> <input id="asof" type="range" min="0" max="0" value="0" aria-label="View as of an earlier change"> <span class="status live" id="when">live</span></span>
+    <span class="status" id="conn" data-home="status" data-classic="rail">connecting…</span>
+    <span class="status mono" id="acct" hidden title="Signed in as" data-home="acct" data-classic="rail"></span>
+    <a id="signOut" href="/studio/logout" hidden title="Sign out of Studio on this browser, then sign in again (with another account if you like)" data-home="signout" data-classic="rail">Sign out / switch account</a>
+    <button id="pointBtn" aria-pressed="false" title="Point mode: click any part of Studio and leave a note on it. Esc stops." data-home="point" data-classic="rail">⌖ Point</button>
+    <button id="liveBtn" aria-pressed="false" title="Live session: talk (or type) and point while Claude and builders reply in the same stream. Lines starting task: or build: become draft tasks." data-home="live" data-classic="rail">◉ Live</button>
+    <button id="showBtn" aria-pressed="false" title="Show mode: record a demonstration (clicks, drawn strokes, notes, cursor) that chosen people can follow live and replay later. Esc stops." data-home="show" data-classic="rail">● Show</button>
+    <button id="theme" aria-label="Toggle theme" title="Toggle theme" data-home="theme" data-classic="rail">◐</button>
+    <label class="nb-toggle" for="classicTabs" id="classicCtl" data-home="classic" data-classic="rail" title="The old tab row, kept until each move to the new sections is verified"><input type="checkbox" id="classicTabs"> Classic tabs</label>
   </div>
 </header>
 <div id="banners" aria-live="polite" data-nodach-part="studio.banners"></div>
@@ -211,8 +327,14 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
 <main>
   <section class="view" id="v-map">
     <div class="mapbar" id="filters" data-nodach-part="map.filters"></div>
+    <div class="asof-tool" data-nodach-part="map.asof"><span data-slot="asof"></span></div>
     <div id="canvas" data-nodach-part="map.canvas" hidden aria-label="Canvas of decisions, questions and other items. Drag to arrange, drag from a dot to link. The List view has the same items for keyboard and screen readers."></div>
     <div id="cy" data-nodach-part="map.classic" aria-label="Map of decisions, questions, terms, stories, assets and findings. The List view has the same items for keyboard and screen readers."></div>
+  </section>
+
+  <section class="view" id="v-explore" hidden data-nodach-part="studio.explore">
+    <div class="card" style="max-width:560px"><h3>Explore</h3><p style="margin:0">Explore is being designed.</p>
+      <p class="mute" style="margin:0">Private holds everything you can reach today; Teamspaces holds what you share.</p></div>
   </section>
 
   <section class="view" id="v-list" hidden>
@@ -370,8 +492,9 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
 
   <section class="view" id="v-self" hidden>
     <div class="stack" style="max-width:1000px">
-      <h2>Develop Studio from Studio</h2>
-      <p class="mute" style="margin:0">Look and schema changes take effect the moment you save them, for everyone, and each one is a version you can go back to (D-152). Anything that needs new code becomes a <b>change request</b>: once you approve it, the change-intake job turns it into a GitHub issue for whichever AI or person is building, and the result comes back through tests and a deploy you can see in Runs (D-149, D-153). Nothing here can break the record: Studio only reads these settings, it never rewrites history.</p>
+      <h2>Developer mode</h2>
+      <p style="margin:0" id="selfMode" data-nodach-part="self.mode"></p>
+      <p class="mute" style="margin:0">Develop Studio from Studio. A look or schema save is a proposal first (NVS-4); applied on staging, it becomes a version you can go back to (D-152). Anything that needs new code becomes a <b>change request</b>: once you approve it, the change-intake job turns it into a GitHub issue for whichever AI or person is building, and the result comes back through tests and a deploy you can see in Runs (D-149, D-153). Nothing here can break the record: Studio only reads these settings, it never rewrites history.</p>
       <div class="card"><h3>Change requests</h3>
         <div class="stack"><input id="crTitle" placeholder="What should Studio do? (one line)" aria-label="Change title">
           <div class="row" style="flex-wrap:wrap"><select id="crKind" aria-label="Kind of change"><option value="code">new feature or fix (code)</option><option value="flow">automation or executor (flow)</option><option value="schema">data or item types (schema)</option><option value="look">look and layout</option></select>
@@ -380,10 +503,10 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
           <textarea id="crTest" rows="2" placeholder="How we'll know it works (the test the builder must pass)"></textarea>
           <div class="row"><button class="primary" id="crAdd">Propose change</button><span class="mute" id="crNote"></span></div></div>
         <ul class="log" id="crList"></ul></div>
-      <div class="card"><h3>Look</h3><p class="mute" style="margin:0">Colours for the mode you're viewing now (<span id="lkMode"></span>). Save makes a new version of SET-ui-theme.</p>
+      <div class="card"><h3>Look</h3><p class="mute" style="margin:0">Colours for the mode you're viewing now (<span id="lkMode"></span>). Save proposes a new version of SET-ui-theme; on staging it applies at once.</p>
         <div class="row" id="lkTokens" style="flex-wrap:wrap;gap:10px"></div>
         <div class="row"><button id="lkSave">Save look</button><button id="lkReset">Back to defaults</button><span class="mute" id="lkNote"></span></div></div>
-      <div class="card"><h3>Item types</h3><p class="mute" style="margin:0">Add the kinds of thing you track (a tracker row, a partner, a venue…). New types appear in capture, filters and the map at once. Built-in types can't be removed. Saved as versions of SCHEMA-types.</p>
+      <div class="card"><h3>Item types</h3><p class="mute" style="margin:0">Add the kinds of thing you track (a tracker row, a partner, a venue…). Once applied (on staging), new types appear in capture, filters and the map. Built-in types can't be removed. Saved as versions of SCHEMA-types.</p>
         <ul class="log" id="tyList"></ul>
         <div class="row" style="flex-wrap:wrap"><input id="tyKey" placeholder="key, e.g. venue" style="width:130px" aria-label="Type key"><input id="tyLabel" placeholder="Label, e.g. Venue" style="width:150px" aria-label="Type label"><input id="tyColor" type="color" value="#7a5c3e" aria-label="Type colour"><button id="tyAdd">Add type</button><span class="mute" id="tyNote"></span></div></div>
       <div class="card"><h3>Executors and their policies</h3><p class="mute" style="margin:0">The automations that act for Studio, the policy each follows, and their last run. Change a policy in Hub → Policies.</p><ul class="log" id="exList"></ul></div>
@@ -1653,6 +1776,23 @@ async function saveJsonSetting(id, title, body, value){
   const v = JSON.stringify(value);
   return F.items.has(id) ? write("item.edit", id, {value:v}) : write("item.create", null, {id, type:"setting", title, body, status:"agreed", refs:["D-152"], value:v});
 }
+/* NVS-4: a look or schema save from Developer mode used to apply live, for everyone. Now it writes a proposal (a change
+   item, status proposed, carrying the target setting and its new value). Applying stays possible only on staging. */
+const ON_STAGING = () => window.__nodachEnv === "staging";
+async function proposeSelf(target, title, body, value, kind, summary){
+  if (ON_STAGING()) return {id: await saveJsonSetting(target, title, body, value), applied:true};
+  const id = "CR-" + Date.now().toString(36);
+  const r = await write("item.create", null, {id, type:"change", title:summary, body:`Proposed from Developer mode: a new version of ${target}. It applies only after it's tried on staging (NVS-4).`,
+    status:"proposed", refs:["D-152","D-153"], meta:{kind, size:"small", test:"Apply it on staging and check it there first", target, value:JSON.stringify(value), setting_title:title, setting_body:body}});
+  return {id:r, proposed:id};
+}
+async function applyProposal(cid){
+  const c = F.items.get(cid); if (!c?.meta?.target || !ON_STAGING()) return;
+  let v; try { v = JSON.parse(c.meta.value); } catch { toast("This proposal's value can't be read."); return; }
+  const a = await saveJsonSetting(c.meta.target, c.meta.setting_title || c.meta.target, c.meta.setting_body || "", v);
+  const b = a && await write("status", cid, {status:"shipped", via:"applied on staging"});
+  if (b) toast(`Applied ${cid} on staging`, [a, b]);
+}
 const CR_STAGES = [["proposed","Proposed"],["approved","Approved: goes to the builder"],["building","Building"],["shipped","Shipped"],["declined","Declined"]];
 function renderSelf(){
   // change requests
@@ -1663,9 +1803,12 @@ function renderSelf(){
       ${c.meta?.test ? `<br><span class="mute">Test: ${esc(c.meta.test)}</span>` : ""}
       <span class="row" style="margin-top:4px;flex-wrap:wrap"><select data-crstage="${esc(c.id)}" ${S.owner ? "" : "disabled"} aria-label="Stage">${CR_STAGES.map(([k, l]) => `<option value="${k}" ${k===c.status?"selected":""}>${esc(l)}</option>`).join("")}</select>
       ${issue ? `<a href="${esc(issue)}" target="_blank" rel="noopener">Issue ↗</a>` : c.status === "approved" ? `<span class="mute">waiting for change intake</span>` : ""}
+      ${c.meta?.target ? (ON_STAGING() && S.owner && c.status !== "shipped" ? `<button data-crapply="${esc(c.id)}">Apply on staging</button>` : `<span class="mute mono">→ ${esc(c.meta.target)}</span>`) : ""}
       <button data-bopen="${esc(c.id)}">Open</button></span></span></li>`; }).join("") : `<li><span></span><span class="mute">No change requests yet.</span></li>`;
   L.querySelectorAll("[data-crstage]").forEach(sel => sel.onchange = async () => { const id = await write("status", sel.dataset.crstage, {status: sel.value}); if (id) toast(`Change ${sel.value}`, [id]); });
   L.querySelectorAll("[data-bopen]").forEach(b => b.onclick = () => select(b.dataset.bopen));
+  L.querySelectorAll("[data-crapply]").forEach(b => b.onclick = () => applyProposal(b.dataset.crapply));
+  $("#selfMode").textContent = ON_STAGING() ? "This is staging: look and schema saves apply here at once, and proposals can be applied." : "Look and schema saves become proposals (status proposed). They apply only on staging.";
   // look
   const mode = darkNow() ? "dark" : "light"; $("#lkMode").textContent = mode;
   const T = $("#lkTokens"); if (!T.dataset.mode || T.dataset.mode !== mode || !T.children.length){ T.dataset.mode = mode;
@@ -1692,29 +1835,108 @@ $("#crAdd").onclick = async () => {
 $("#lkSave").onclick = async () => {
   const mode = darkNow() ? "dark" : "light", theme = jsonValue("SET-ui-theme", {}), t = {};
   $("#lkTokens").querySelectorAll("[data-tok]").forEach(inp => t[inp.dataset.tok] = inp.value);
-  const id = await saveJsonSetting("SET-ui-theme", "Studio look", "Colours per mode (light, dark), edited in Studio → Studio → Look.", {...theme, [mode]: t});
-  if (id){ $("#lkNote").textContent = `Saved the ${mode} look.`; toast("Look saved", [id]); } };
+  const {id, proposed} = await proposeSelf("SET-ui-theme", "Studio look", "Colours per mode (light, dark), edited in Studio → Developer mode → Look.", {...theme, [mode]: t}, "look", `Look: new ${mode} colours`);
+  if (id){ $("#lkNote").textContent = proposed ? `Proposed as ${proposed}. It applies only on staging.` : `Saved the ${mode} look.`; toast(proposed ? "Look proposed" : "Look saved", [id]); if (proposed) applySelf(); } };
 $("#lkReset").onclick = async () => {
   const mode = darkNow() ? "dark" : "light", theme = jsonValue("SET-ui-theme", {}); delete theme[mode];
-  const id = await saveJsonSetting("SET-ui-theme", "Studio look", "Colours per mode (light, dark), edited in Studio → Studio → Look.", theme);
-  for (const [k] of LOOK_TOKENS) document.documentElement.style.removeProperty(k); $("#lkTokens").innerHTML = "";
-  if (id) toast("Back to the default look", [id]); };
+  const {id, proposed} = await proposeSelf("SET-ui-theme", "Studio look", "Colours per mode (light, dark), edited in Studio → Developer mode → Look.", theme, "look", `Look: back to the default ${mode} colours`);
+  if (!proposed) for (const [k] of LOOK_TOKENS) document.documentElement.style.removeProperty(k);
+  $("#lkTokens").innerHTML = ""; applySelf();
+  if (id) toast(proposed ? "Reset proposed" : "Back to the default look", [id]); };
 $("#tyAdd").onclick = async () => {
   const key = $("#tyKey").value.trim().toLowerCase(), label = $("#tyLabel").value.trim(), color = $("#tyColor").value;
   if (!/^[a-z][a-z0-9-]{1,23}$/.test(key)){ $("#tyNote").textContent = "Key: 2-24 lowercase letters, digits or dashes, starting with a letter."; return; }
   if (key in TYPES){ $("#tyNote").textContent = `${key} already exists.`; return; }
   if (!label){ $("#tyNote").textContent = "Give it a label."; return; }
   const list = jsonValue("SCHEMA-types", []).filter(t => t.key !== key).concat([{key, label, color}]);
-  const id = F.items.has("SCHEMA-types") ? await write("item.edit", "SCHEMA-types", {value:JSON.stringify(list)})
-    : await write("item.create", null, {id:"SCHEMA-types", type:"setting", title:"Item types added in Studio", body:"Extra kinds of item, edited in Studio → Studio → Item types.", status:"agreed", refs:["D-152"], value:JSON.stringify(list)});
-  if (id){ for (const k of ["#tyKey","#tyLabel"]) $(k).value = ""; $("#tyNote").textContent = `Added ${label}.`; toast(`Type ${label} added`, [id]); } };
+  const {id, proposed} = await proposeSelf("SCHEMA-types", "Item types added in Studio", "Extra kinds of item, edited in Studio → Developer mode → Item types.", list, "schema", `Schema: add item type ${label}`);
+  if (id){ for (const k of ["#tyKey","#tyLabel"]) $(k).value = ""; $("#tyNote").textContent = proposed ? `Proposed as ${proposed}. It applies only on staging.` : `Added ${label}.`; toast(proposed ? `Type ${label} proposed` : `Type ${label} added`, [id]); } };
 
 /* ---------------------------------------------------------------- views + time */
-const VIEWS = ["map","command","list","ask","queue","capture","tree","pack","money","hub","runs","builders","self"];
+const VIEWS = ["map","command","list","ask","queue","capture","tree","pack","money","hub","runs","builders","self","explore"];
+/* NAV-2: sections are saved filters over one graph. Private is home and reaches everything; each view has one section. */
+const SECTIONS = {private:["map","list","tree","queue","ask","capture","pack"], teams:["builders","money","hub"], settings:["runs","self"],
+  search:["command"], explore:["explore"]};
+const SECTION_OF = Object.fromEntries(Object.entries(SECTIONS).flatMap(([k, vs]) => vs.map(v => [v, k])));
 function show(v){ if (!VIEWS.includes(v)) v = "map"; S.view=v; document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-current", b.dataset.v===v));
   for (const x of VIEWS) $("#v-"+x).hidden = x!==v;
+  navSection(SECTION_OF[v], v);
   if (v==="map" && cy) cy.resize(); if (v==="capture") sizePad(); refreshView(); store.set("view", v); }
+function navSection(sec, v){
+  S.section = sec; if (v) store.set("view." + sec, v);
+  document.querySelectorAll("#sections [data-s]").forEach(b => b.setAttribute("aria-current", String(b.dataset.s === sec)));
+  document.querySelectorAll("#subnav .sub").forEach(d => d.hidden = d.dataset.sub !== sec);
+  document.querySelectorAll("#subnav [data-sv]").forEach(b => b.setAttribute("aria-current", String(b.dataset.sv === S.view)));
+}
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => show(b.dataset.v));
+document.querySelectorAll("#subnav [data-sv]").forEach(b => b.onclick = () => show(b.dataset.sv));
+document.querySelectorAll("#sections [data-s]").forEach(b => b.onclick = () => { const sec = b.dataset.s, last = store.get("view." + sec);
+  show(SECTIONS[sec].includes(last) ? last : SECTIONS[sec][0]); });
+
+/* NAV-2 bar: collapsed (mark, node dots, avatar) until the pointer rests on it, focus enters it, or it's tapped; Esc closes.
+   Timings come from the motion tokens, so a token change retimes it; reduced motion drops the fade (the global rule). */
+const NAV = (() => {
+  const hdr = $("#hdr"), bar = $("#navBar"), menu = $("#avatarMenu"), av = $("#avatarBtn");
+  const ms = (name, d) => { const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim(); const n = parseFloat(v); return isNaN(n) ? d : /ms$/.test(v) ? n : n * 1000; };
+  let tOpen = null, tClose = null, hush = false;   // hush: closed with Esc while hovered; the pointer must leave before hover reopens it
+  const isOpen = () => hdr.dataset.open === "true";
+  const classic = () => hdr.classList.contains("classic");
+  const clear = () => { clearTimeout(tOpen); clearTimeout(tClose); tOpen = tClose = null; };
+  function open(){ clear(); hdr.dataset.open = "true"; }
+  function close(force){ clear(); if (classic()) return;
+    if (!force && (bar.querySelector(":focus-visible") || !menu.hidden)) return;   // keyboard focus or the menu keeps it open
+    hdr.dataset.open = "false"; menuOpen(false); }
+  function menuOpen(v){ menu.hidden = !v; av.setAttribute("aria-expanded", String(v)); if (v) renderAvatarMenu(); }
+  const rest = e => { if (e.pointerType === "touch") return; clearTimeout(tClose); tClose = null;
+    if (!isOpen() && !tOpen && !hush) tOpen = setTimeout(open, ms("--duration-nav-open-delay", 150)); };
+  bar.addEventListener("pointerenter", rest); bar.addEventListener("pointermove", rest);
+  const leave = e => { if (e.pointerType === "touch") return; clearTimeout(tOpen); tOpen = null; hush = false;
+    if (isOpen() && !classic()) { clearTimeout(tClose); tClose = setTimeout(() => close(false), ms("--duration-nav-close-delay", 400)); } };
+  bar.addEventListener("pointerleave", leave);
+  menu.addEventListener("pointerenter", () => { clearTimeout(tClose); tClose = null; });
+  menu.addEventListener("pointerleave", leave);
+  // touch: a tap on the bar itself (not on a control in it) opens or closes it
+  bar.addEventListener("click", e => { if (classic() || e.target.closest("button,a,input,select,label,form")) return; isOpen() ? close(true) : open(); });
+  bar.addEventListener("focusin", open);
+  hdr.addEventListener("focusout", () => setTimeout(() => { if (!hdr.contains(document.activeElement) && menu.hidden && !bar.matches(":hover")) close(false); }, 0));
+  av.onclick = () => { open(); menuOpen(menu.hidden); };
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Escape" || e.defaultPrevented || classic()) return;
+    if (!isOpen() && menu.hidden) return;
+    if (document.body.classList.contains("pointing") || window.NodachShow?.active?.()) return;
+    e.preventDefault();
+    if (hdr.contains(document.activeElement)) document.activeElement.blur();
+    close(true); hush = bar.matches(":hover");
+  });
+  document.addEventListener("pointerdown", e => { if (menu.hidden || menu.contains(e.target) || av.contains(e.target)) return;
+    menuOpen(false); if (!bar.contains(e.target)) close(false); }, true);
+  return {open, close, isOpen, menuOpen};
+})();
+function renderAvatarMenu(){
+  const nm = S.me ? (S.names[S.me] || (S.owner ? "Nowed" : "a member")) : "";
+  $("#acctName").textContent = nm ? nm + (S.owner ? " · owner" : " · member") : (window.claude?.use ? "signing in…" : "offline preview");
+  $("#profList").innerHTML = `<li><span class="n">1</span><span>Private <span class="mute">· you, everything you can reach</span></span></li>` +
+    `<li><span class="n"></span><span class="mute">More profiles are listed here, read-only, until profile windows ship.</span></li>`;
+}
+function avatarInitial(){ const nm = S.me ? (S.names[S.me] || (S.owner ? "Nowed" : "")) : "";
+  $("#avatarBtn").textContent = nm ? nm.trim()[0].toUpperCase() : "·"; }
+/* Classic tabs (Settings): the old tab row and rail, kept until each move is verified. One element per control: it moves. */
+function placeControls(){
+  const classic = !!$("#classicTabs").checked, hdr = $("#hdr");
+  hdr.classList.toggle("classic", classic); $("#classicRow").hidden = !classic;
+  if (classic) hdr.dataset.open = "true"; else { hdr.dataset.open = "false"; NAV.menuOpen(false); }
+  for (const el of [...document.querySelectorAll("[data-home]")]){
+    const slot = classic ? el.dataset.classic : el.dataset.home;
+    const to = slot === "rail" ? $("#rail") : document.querySelector(`[data-slot="${slot}"]`);
+    if (to && el.parentElement !== to) to.append(el);
+  }
+  const go = $("#goForm .goBtn");   // classic keeps its Go button
+  if (classic && !go) $("#goForm").insertAdjacentHTML("beforeend", '<button class="goBtn">Go</button>'); else if (!classic && go) go.remove();
+}
+$("#classicTabs").checked = store.get("classicTabs") === "1";
+$("#classicTabs").onchange = () => { store.set("classicTabs", $("#classicTabs").checked ? "1" : null); placeControls();
+  toast($("#classicTabs").checked ? "Classic tabs on. Turn them off in the same place." : "Classic tabs off. Sections are in the bar."); };
+placeControls();
 $("#branch").onchange = e => { S.branch = e.target.value; refresh(); };
 $("#asof").oninput = e => { const evs=[...S.events].sort(byTsThenId); const v=+e.target.value;
   S.asof = v>=evs.length ? null : (v===0 ? "0" : evs[v-1].ts); refresh(); };
@@ -1731,7 +1953,7 @@ function refresh(){
   $("#ver").textContent = `${VERSION} · ${F.items.size} items · ${n} changes`;
   const bs = branches(), names = Object.keys(bs), sel = $("#branch");
   sel.innerHTML = names.map(x => `<option value="${esc(x)}">${esc(x)}${bs[x].merged?" (merged)":""}</option>`).join(""); if (!names.includes(S.branch)) S.branch = "main"; sel.value = S.branch;
-  renderBanners(); buildFilters(); badge(); refreshView(); if (S.sel) renderInspector();
+  renderBanners(); buildFilters(); badge(); refreshView(); if (S.sel) renderInspector(); avatarInitial();
   window.NodachLive?.render();
 }
 
@@ -1772,7 +1994,13 @@ function showLink(url){
   d.innerHTML = `<span>Code on GitHub:</span> <a href="${esc(url)}" target="_blank" rel="noopener" style="color:inherit">${esc(url.replace(REPO+"/blob/",""))}</a>`;
   document.body.append(d); setTimeout(()=>d.remove(), 12000);
 }
-$("#goForm").onsubmit = e => { e.preventDefault(); if (openAddress($("#goAddr").value)) $("#goAddr").value = ""; };
+// NAV-2 Search: one field for Go to and Command. An address that resolves opens; words become a command (Command map).
+$("#goForm").onsubmit = e => { e.preventDefault(); const raw = $("#goAddr").value.trim(); if (!raw) return;
+  const a = parseAddress(raw);
+  if (!a || (!a.repo && !F.items.has(a.id) && /\s/.test(raw))){ $("#goAddr").value = ""; show("command"); addCommand(raw, "search"); return; }
+  if (openAddress(raw)) $("#goAddr").value = ""; };
+$("#goAddr").addEventListener("focus", () => { if (!$("#hdr").classList.contains("classic")) navSection("search"); });
+$("#goAddr").addEventListener("blur", () => setTimeout(() => { if (S.section === "search" && SECTION_OF[S.view] !== "search") navSection(SECTION_OF[S.view]); }, 200));
 addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h && F.items.has(h)) select(h); });
 
 /* ---------------------------------------------------------------- money rules (D-078–D-084): same arithmetic as engine/crates/exchange-core */
