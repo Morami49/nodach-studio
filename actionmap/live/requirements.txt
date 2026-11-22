@@ -1,0 +1,5 @@
+# Nodach Live client (Windows). Voice is optional: without these it runs typed-only.
+faster-whisper>=1.1      # local speech-to-text on the CPU (the model downloads once, then works offline)
+sounddevice>=0.5         # microphone
+numpy>=1.26
+pynput>=1.7              # optional keyboard shortcut (Ctrl+Alt+J); the window works without it

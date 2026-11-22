@@ -75,6 +75,14 @@ body.pointing, body.pointing *{cursor:crosshair!important}
 .live-badge{color:#c62828;font:600 11px var(--mono,monospace)}
 .showlog li.reply .what{border-left:3px solid var(--accent);padding-left:6px}
 body.showing, body.showing *{cursor:crosshair!important}
+#liveBtn[aria-pressed="true"]{background:#1565c0;color:#fff}
+#livePanel{position:fixed;right:14px;bottom:14px;z-index:42;width:min(420px,calc(100% - 28px));max-height:min(70vh,640px);display:flex;flex-direction:column;gap:6px;background:var(--surface);color:var(--ink);border:1px solid var(--mute);border-radius:10px;padding:10px;box-shadow:0 6px 24px rgba(0,0,0,.25);font-size:13px}
+#livePanel .livestream{flex:1;min-height:80px;overflow:auto;margin:0}
+#livePanel input[type=text]{flex:1;min-width:0}
+.livestream li.line .what{border-left:3px solid #1565c0;padding-left:6px}
+.livestream .chip{display:inline-block;font:500 11px var(--mono,monospace);border:1px solid var(--line);border-radius:999px;padding:0 6px;margin:2px 4px 0 0;color:var(--mute)}
+.livestream .chip.task{color:var(--accent);border-color:var(--accent)}
+body.livepick, body.livepick *{cursor:crosshair!important}
 #asof{width:160px;accent-color:var(--accent)}
 .status{font:500 11px var(--mono);padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mute)}
 .status.live{color:var(--ok);border-color:var(--ok)}
@@ -100,6 +108,12 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 380px}
 .nd-pick{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:6;background:var(--raise);border:1px solid var(--line);border-radius:10px;padding:10px 12px;box-shadow:0 6px 24px rgba(0,0,0,.15);font-size:13px}
 .nd-pick .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .react-flow__node-frame{z-index:-1!important}
+/* F-idle-wires (21 Nov): step wires ran the dash animation forever, about 80% of a CPU core per open map (CI s51 slowed
+   until a recorded stroke was late in its replay). They now flow for 4 s when the map draws, and again while hovered
+   or selected; none with reduced motion. */
+.react-flow .react-flow__edge.animated path{animation-iteration-count:8}
+.react-flow .react-flow__edge.animated:hover path,.react-flow .react-flow__edge.animated.selected path{animation-iteration-count:infinite}
+@media (prefers-reduced-motion:reduce){.react-flow .react-flow__edge.animated path{animation:none}}
 .nd-step{width:200px;padding:6px 10px;border-radius:12px;border:2px solid var(--accent);background:var(--raise);color:var(--ink);font:12px/1.3 var(--sans,"IBM Plex Sans",system-ui);box-shadow:0 2px 6px rgba(0,0,0,.08)}
 .nd-step.sel{border-width:3px;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 25%,transparent)}
 .nd-run{margin-top:4px;font:500 10px var(--mono,monospace);color:var(--mute)}.nd-run.ok{color:var(--ok)}.nd-run.bad{color:var(--bad)}
@@ -187,6 +201,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <span class="status mono" id="acct" hidden title="Signed in as"></span>
     <a id="signOut" href="/studio/logout" hidden title="Sign out of Studio on this browser, then sign in again (with another account if you like)">Sign out / switch account</a>
     <button id="pointBtn" aria-pressed="false" title="Point mode: click any part of Studio and leave a note on it. Esc stops.">⌖ Point</button>
+    <button id="liveBtn" aria-pressed="false" title="Live session: talk (or type) and point while Claude and builders reply in the same stream. Lines starting task: or build: become draft tasks.">◉ Live</button>
     <button id="showBtn" aria-pressed="false" title="Show mode: record a demonstration (clicks, drawn strokes, notes, cursor) that chosen people can follow live and replay later. Esc stops.">● Show</button>
     <button id="theme" aria-label="Toggle theme" title="Toggle theme">◐</button>
   </div>
@@ -462,17 +477,18 @@ function fold(){
   const gone = new Set(evs.filter(e => e.kind==="retract").map(e => e.body.of));
   const reverted = new Set(evs.filter(e => e.body?.revert_of).map(e => e.body.revert_of));
   for (const e of evs){
-    const h = {id:e._id, ts:e.ts, kind:e.kind, author:e.author, body:e.body, branch:e.branch, gone:gone.has(e._id), reverted:reverted.has(e._id)};
+    const h = {id:e._id, ts:e.ts, kind:e.kind, author:e.author, body:e.body, branch:e.branch, via:e.via||null, gone:gone.has(e._id), reverted:reverted.has(e._id)};
     if (e.kind==="item.create" && items.has(e.body.id)){ h.dup = true; items.get(e.body.id).history.push(h); continue; } // F-19: a second create never replaces an item
     if (e.kind==="item.create"){ items.set(e.body.id, {id:e.body.id, type:e.body.type, title:e.body.title, body:e.body.body||"", status:e.body.status||"open",
-      refs:e.body.refs||[], sketch:e.body.sketch||null, source:e.body.source||null, private:!!e._private, value:e.body.value, meta:e.body.meta||null, point:e.body.point||null, show:e.body.show||null, answers:[], comments:[], history:[h], by:e.author}); continue; }
+      refs:e.body.refs||[], sketch:e.body.sketch||null, source:e.body.source||null, private:!!e._private, value:e.body.value, meta:e.body.meta||null, point:e.body.point||null, show:e.body.show||null, live:e.body.live||null, answers:[], comments:[], lines:[], history:[h], by:e.author}); continue; }
     const it = items.get(e.item); if (!it) continue;
     if (e.kind==="retract"){ it.history.push(h); continue; }
     it.history.push(h);
     if (h.gone) continue;
     if (e.kind==="answer") it.answers.push(h);
     if (e.kind==="comment") it.comments.push(h);
-    if (e.kind==="item.edit"){ if (e.body.title!=null) it.title=e.body.title; if (e.body.body!=null) it.body=e.body.body; if (e.body.value!=null) it.value=e.body.value; if (e.body.meta) it.meta={...(it.meta||{}), ...e.body.meta}; if (e.body.show) it.show=e.body.show; }
+    if (e.kind==="live.line") it.lines.push(h);
+    if (e.kind==="item.edit"){ if (e.body.title!=null) it.title=e.body.title; if (e.body.body!=null) it.body=e.body.body; if (e.body.value!=null) it.value=e.body.value; if (e.body.meta) it.meta={...(it.meta||{}), ...e.body.meta}; if (e.body.show) it.show=e.body.show; if (e.body.live) it.live={...(it.live||{}), ...e.body.live}; }
     if (e.kind==="status"){ h.prev = it.status; it.status = e.body.status; }
     if (e.kind==="link") it.refs = [...new Set([...it.refs, ...(e.body.refs||[])])];
   }
@@ -504,7 +520,7 @@ async function write(kind, item, body, opts={}){
 }
 async function revert(eventId){
   const e = S.events.find(x => x._id === eventId); if (!e) return;
-  if (e.kind==="answer" || e.kind==="comment" || e.kind==="link") return write("retract", e.item, {of:eventId});
+  if (e.kind==="answer" || e.kind==="comment" || e.kind==="link" || e.kind==="live.line") return write("retract", e.item, {of:eventId});
   if (e.kind==="status"){ const h = F.items.get(e.item)?.history.find(x => x.id===eventId);
     return write("status", e.item, {status:h?.prev || "open", revert_of:eventId}); }
   if (e.kind==="item.create") return write("status", e.body.id, {status:"withdrawn", revert_of:eventId});
@@ -821,12 +837,13 @@ function describe(h){
     h.kind==="flow.node" ? (b.deleted ? `removed step ${esc(b.id)}` : `step ${esc(b.title||b.id)} ${b.step ? "added" : "changed"}`) :
     h.kind==="flow.wire" ? (b.deleted ? `unwired ${esc(b.from||"")} → ${esc(b.to||"")}` : `wired ${esc(b.from)} → ${esc(b.to)}`) :
     h.kind==="flow.run" ? `${b.slot ? "ran on schedule (" + esc(b.slot.replace("T"," ")) + ":00 UK)" : "ran a flow"} from ${esc(b.start)}: ${b.ok ? "worked" : "stopped"}` :
+    h.kind==="live.line" ? (b.text ? `said “${esc(b.text)}”` : "pointed") + (b.point ? " " + esc(livePointWords(b.point)) : "") :
     h.kind==="canvas.layout" ? `arranged ${Object.keys(b.moves||{}).length} item(s) on the canvas` :
     h.kind==="canvas.frame" ? (b.deleted ? `removed group “${esc(b.title||b.id)}”` : `group “${esc(b.title||b.id)}” placed or resized`) : h.kind==="genesis" ? "recorded from the chats (genesis)" : esc(h.kind);
 }
 function line(n, h, withUndo){
   const can = withUndo && writable() && h.id && !h.gone && !h.reverted && h.kind!=="retract" && !h.body?.revert_of &&
-              (["answer","comment","status","link"].includes(h.kind) || (h.kind==="item.edit" && h.body?.value!=null)) && (h.author?.id===S.me || editor());
+              (["answer","comment","status","link","live.line"].includes(h.kind) || (h.kind==="item.edit" && h.body?.value!=null)) && (h.author?.id===S.me || editor());
   return `<li class="${h.gone||h.reverted?"gone":""}"><span class="n">${n}</span><span><span class="mono mute">${esc((h.ts||"").slice(0,16).replace("T"," "))} · ${esc(who(h.author))}${h.branch&&h.branch!=="main"?" · "+esc(h.branch):""}</span>
     ${can?`<button class="link" data-revert="${esc(h.id)}">${h.kind==="status"?"Revert":"Take back"}</button>`:""}<br><span class="what">${describe(h)}</span>${h.gone?' <span class="mute">(taken back)</span>':h.reverted?' <span class="mute">(reverted)</span>':""}</span></li>`;
 }
@@ -836,7 +853,7 @@ function showSteps(it){
   if (it.show?.steps?.length && it.status !== "live") return it.show.steps;
   return it.comments.filter(c => c.body?.step).map(c => c.body.step);
 }
-function isReply(h){ const a = h.author || {}; return a.id === "claude" || a.role === "agent" || a.role !== "owner"; }
+function isReply(h){ const a = h.author || {}; return a.id === "claude" || a.role === "agent" || a.role !== "owner" || h.via === "claude-connector"; }   // the connector writes as the signed-in owner
 function showSection(it){
   if (it.source !== "show" && !it.show) return "";
   const live = it.status === "live", steps = showSteps(it);
@@ -849,6 +866,44 @@ function showSection(it){
     <div class="row"><span class="eyebrow">Show${it.show?.duration_ms ? " · " + Math.round(it.show.duration_ms/1000) + "s" : ""} · ${steps.length} step(s)</span>${live ? '<span class="live-badge" id="showLive">● live</span>' : ""}<span class="spacer"></span>
       ${steps.length || it.show?.cursor?.length ? `<button id="showReplayBtn">▶ Replay</button>` : ""}</div>
     ${rows.length ? `<ol class="log showlog">${rows.map(li).join("")}</ol>` : '<span class="empty">No steps yet.</span>'}</div>`;
+}
+/* Live sessions (live.v1, B-live-session, Q-LIVE1): spoken or typed lines (live.line events on the session item) and
+   comments from Claude, builders or watchers, in one stream by time. Lines may carry a point (pointer.v1: a part of
+   Studio, or a desktop element from the Nodach pointer). A line starting "task:" or "build:" becomes a draft change
+   item linked to the session (status draft: never built until an owner approves it). */
+const LIVE_TASK = /^\s*(task|build)\s*[:,.\-\u2013\u2014]\s*(\S[\s\S]*)$/i;
+function liveTask(text){ const m = String(text || "").match(LIVE_TASK); return m ? {kind:m[1].toLowerCase(), title:m[2].trim().replace(/\s+/g, " ")} : null; }
+function livePointWords(p){
+  if (!p) return "";
+  if (p.kind === "pointer.desktop") return `⌖ ${p.app || "desktop"} › ${p.element?.name || p.element?.type || "element"}`;
+  return `⌖ ${p.part || "studio"} › ${p.element || ""}${p.text ? " “" + String(p.text).slice(0, 40) + "”" : ""}`;
+}
+function liveDrafts(sessionId){
+  const m = new Map();
+  for (const x of F.items.values()) if (x.meta?.from_session === sessionId && x.meta?.from_line) m.set(x.meta.from_line, x);
+  return m;
+}
+function liveRows(it){
+  const drafts = liveDrafts(it.id), canDraft = writable() && S.owner;
+  const rows = [...(it.lines || []).map(h => ({h, line:true})), ...it.comments.filter(c => !c.body?.step).map(h => ({h}))]
+    .sort((a, b) => a.h.ts < b.h.ts ? -1 : a.h.ts > b.h.ts ? 1 : 0);
+  return rows.map(({h, line}) => {
+    const b = h.body || {}, t = line ? liveTask(b.text) : null, d = drafts.get(h.id);
+    const chips = (b.point ? `<span class="chip" title="${esc(JSON.stringify(b.point).slice(0, 300))}">${esc(livePointWords(b.point))}</span>` : "") +
+      (d ? `<button class="chip task link" data-go="${esc(d.id)}">→ ${esc(d.id)} (${esc(d.status)})</button>`
+         : t ? (canDraft ? `<button class="chip task" data-live-draft="${esc(h.id)}">Draft ${esc(t.kind)}</button>` : `<span class="chip task">${esc(t.kind)}?</span>`) : "") +
+      (b.via ? `<span class="chip">${esc(b.via)}</span>` : "");
+    return `<li class="${line ? "line" : isReply(h) ? "reply" : ""}" data-live-row="${esc(h.id || "")}"><span class="n">${line ? "says" : "reply"}</span><span><span class="mono mute">${esc((h.ts||"").slice(11,19))} · ${esc(who(h.author))}${h.via === "claude-connector" ? " · via Claude" : ""}</span><br>
+      <span class="what">${b.text ? esc(b.text) : line ? '<span class="mute">(pointed)</span>' : ""}</span>${chips ? "<br>" + chips : ""}</span></li>`;
+  }).join("");
+}
+function liveSection(it){
+  if (it.source !== "live" && !it.live) return "";
+  const live = it.status === "live", n = (it.lines || []).length;
+  return `<div class="stack" data-nodach-part="item.live" style="margin-top:10px">
+    <div class="row"><span class="eyebrow">Live session · ${n} line(s)</span>${live ? '<span class="live-badge" id="liveBadge">● live</span>' : ""}<span class="spacer"></span>
+      ${live ? `<button id="liveJoinBtn">Open in Live panel</button>` : ""}</div>
+    <ol class="log showlog livestream" id="inspLive">${liveRows(it) || '<li class="empty">No lines yet.</li>'}</ol></div>`;
 }
 function stepWords(st){
   const t = st.target || {}, what = t.text ? "“" + String(t.text).slice(0, 60) + "”" : (t.element || "the page");
@@ -871,6 +926,7 @@ function renderInspector(){
     <div class="body" id="inspBody" data-nodach-part="item.body">${bodyLines(it.body)}</div>
     ${it.sketch?`<img src="${it.sketch}" alt="Sketch attached to ${esc(it.id)}" style="border:1px solid var(--line);border-radius:8px">`:""}
     ${showSection(it)}
+    ${liveSection(it)}
     <div class="stack" style="margin-top:14px">
       <div class="eyebrow" data-nodach-part="item.links">Links</div>
       <div class="refs">${[...(it.refs||[])].map(r=>`<button data-go="${esc(r)}">${esc(r)} →</button>`).join("")}${back.map(r=>`<button data-go="${esc(r)}">← ${esc(r)}</button>`).join("") || (it.refs?.length?"":'<span class="empty">None yet.</span>')}</div>
@@ -886,6 +942,8 @@ function renderInspector(){
       <ol class="log" data-nodach-part="item.history">${it.history.map((h,i)=>line(i+1,h,true)).join("")}</ol>
     </div>`;
   const rp = $("#showReplayBtn"); if (rp) rp.onclick = () => window.NodachShow?.replay(it.id);
+  const lj = $("#liveJoinBtn"); if (lj) lj.onclick = () => window.NodachLive?.open(it.id);
+  $("#insp").querySelectorAll("[data-live-draft]").forEach(b => b.onclick = () => window.NodachLive?.draft(it.id, b.dataset.liveDraft));
   $("#copyAddr").onclick = async () => { const a = `studio/${it.id}@${it.history.length-1}`;
     try { await navigator.clipboard.writeText(a); toast("Copied "+a); } catch { toast(a); } };
   if (S.line){ const el = document.getElementById("L-"+S.line); if (el){ el.classList.add("hit"); el.scrollIntoView({block:"center"}); } S.line = null; }
@@ -1674,6 +1732,7 @@ function refresh(){
   const bs = branches(), names = Object.keys(bs), sel = $("#branch");
   sel.innerHTML = names.map(x => `<option value="${esc(x)}">${esc(x)}${bs[x].merged?" (merged)":""}</option>`).join(""); if (!names.includes(S.branch)) S.branch = "main"; sel.value = S.branch;
   renderBanners(); buildFilters(); badge(); refreshView(); if (S.sel) renderInspector();
+  window.NodachLive?.render();
 }
 
 /* ---------------------------------------------------------------- addresses (D-074): space/item@version#line */
@@ -1852,6 +1911,15 @@ const SHOW_TABLE = {
   saved:     {close:"idle"},
 };
 
+/* Live panel: closed → idle (panel open, no live session) → live (following a live session) ⇄ listening (browser
+   speech on). end = he ended it here; lost = it ended elsewhere (another tab, the desktop client, a connector). */
+const LIVE_TABLE = {
+  closed:    {open:"idle"},
+  idle:      {start:"live", select:"live", close:"closed"},
+  live:      {listen:"listening", end:"idle", lost:"idle", select:"live", close:"closed"},
+  listening: {unlisten:"live", end:"idle", lost:"idle", close:"closed"},
+};
+
 /* ---------------------------------------------------------------- pointer.v1 targets (shared by point mode and show mode)
    One way to say "this part of Studio": the named region (data-nodach-part, stable across renames and edits), the
    element and its text, the view, and the screen position. The desktop pointer and ActionMap use the same shape. */
@@ -2000,7 +2068,7 @@ const PTR = {
      left out of the on-screen timer, every step's t_ms and the cursor trail times; the save box holds the clock too. */
   const M = NodachFSM.machine("show", SHOW_TABLE, "idle");
   let R = null, bar = null, layer = null, noteBox = null, stopBox = null, ticks = [], marks = [], placeRaf = 0;
-  const ours = el => !!el?.closest?.("#showBar,#showNoteBox,#showStop,#showBtn,.toast");
+  const ours = el => !!el?.closest?.("#showBar,#showNoteBox,#showStop,#showBtn,.toast,#livePanel,#liveBtn");
   const now = () => R?.clock ? R.clock.elapsed() : 0;
   const fmt = ms => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
   const svgNS = "http://www.w3.org/2000/svg";
@@ -2367,23 +2435,224 @@ const PTR = {
     active: () => !!R?.active,
     replay,
     replaying: () => !!RP,
+    knownLogins, meInfo,
     /* a readout for tests and graphs: the machine's state, the clock and the transitions so far */
     state: () => ({state:M.state, id:R?.id || null, elapsed_ms:now(), paused_ms:R?.clock ? R.clock.pausedMs() : 0,
                    steps:R?.steps.length || 0, live:R?.nLive || 0, paused_steps:R?.nPaused || 0, timer:bar?.querySelector("#showTime")?.textContent || null,
                    trace:M.trace(), edges:M.edges()}),
     /* where each replay badge is now (screen px), for tests: [{n, x, y}] */
     replayMarks: () => RP ? RP.marks.filter(m => m.badge).map(m => ({n:m.s.n, x:parseFloat(m.badge.style.left) + 9, y:parseFloat(m.badge.style.top) + 9})) : [],
-    /* ======== HOOK: local transcript lines (Q-SHOW1 3b) ========
-       Voice is transcribed on Nowed's own PC only. This page never listens: there is no browser speech recognition
-       here, on purpose. The desktop pointer / ActionMap bridge (2c) will call NodachShow.addTranscriptLine(text, t_ms?)
-       for each finished line while a show is recording; each becomes a note step (via "transcript"), shared live like
-       any other step. Nothing calls it yet. Returns false when no show is recording. */
+    /* ======== HOOK: transcript lines (Q-SHOW1 3b) ========
+       Private voice is transcribed on Nowed's own PC (actionmap/live). Show mode itself never listens. The Live panel
+       calls NodachShow.addTranscriptLine(text, t_ms?) for each line sent while a show is recording, so the line also
+       becomes a note step (via "transcript"), shared live like any other step. Returns false when no show is recording. */
     addTranscriptLine(text, t_ms){
       if (!R?.active || R.stopping || !String(text || "").trim()) return false;
       addStep({kind:"note", t_ms:t_ms ?? now(), text:String(text).trim().slice(0, 2000), via:"transcript"});
       return true;
     },
   };
+})();
+
+/* ---------------------------------------------------------------- Live session (B-live-session, Q-LIVE1)
+   Talk and point; Claude and builders answer in the same stream. A session is an item (source "live", status "live",
+   live.v1) that the owner starts; each line is a live.line event on it {session, speaker, text, ts, point?, via}.
+   Claude, builders and watchers reply with ordinary comments on the session item, shown inline by time. The people
+   ticked in Audience are granted that one item, as in Show mode, so they follow live and may add lines too.
+   Lines come from: typing here; the desktop client (actionmap/live: audio transcribed on Nowed's PC, only text sent);
+   or, if ticked, this browser's speech recognition (off by default: Chrome and Edge send the audio to their vendor).
+   ⌖ picks one part of Studio; that point (pointer.v1) rides on the next line, or alone if the line is empty.
+   While a show is recording, each line is also a transcript note step on the show.
+   "task: …" / "build: …" lines become draft change items (status draft, refs the session, meta.from_line) written
+   by whoever sent the line, if they're an owner; other people's task lines get a Draft button for an owner. */
+(() => {
+  const btn = $("#liveBtn"); if (!btn) return;
+  const SRx = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let panel = null, L = {id:null, point:null, picking:false, q:Promise.resolve(), rec:null, granted:new Set()};
+  const M = NodachFSM.machine("live", LIVE_TABLE, "closed");
+  /* F-live-replies-late (20 Nov): served by the hub, Studio pulls new events every 15 s, so a reply Claude wrote
+     through the connector could take that long to show. While a live session is open here (in this panel or the
+     item panel) it pulls every FAST_MS instead; the normal poll takes over again when nothing live is open. */
+  const FAST_MS = window.__nodachFastPollMs ?? 2500;
+  let fastT = null;
+  function follow(){
+    const pull = window.__nodach?.pull, it = cur();
+    const want = !!pull && ((!!panel && it?.status === "live") || F.items?.get?.(S.sel)?.status === "live");
+    if (want && !fastT){ fastT = setInterval(() => { if (!document.hidden) window.__nodach.pull().catch(() => {}); }, FAST_MS); pull().catch(() => {}); }
+    else if (!want && fastT){ clearInterval(fastT); fastT = null; }
+  }
+  const queue = fn => (L.q = L.q.then(fn).catch(() => {}));
+  const sessions = () => [...F.items.values()].filter(i => i.source === "live" && i.status === "live")
+    .sort((a, b) => (b.history[0]?.ts || "").localeCompare(a.history[0]?.ts || ""));
+  const cur = () => L.id ? F.items.get(L.id) : null;
+
+  function open(id){
+    if (id) L.id = id;
+    if (M.state === "closed") M.send("open");
+    if (!panel){
+      panel = document.createElement("div"); panel.id = "livePanel"; panel.dataset.nodachPart = "live.panel";
+      panel.setAttribute("role", "region"); panel.setAttribute("aria-label", "Live session");
+      const logins = window.NodachShow?.knownLogins?.() || [];
+      panel.innerHTML = `<div class="row"><b>◉ Live</b><select id="liveSel" aria-label="Session to follow"></select><span class="spacer"></span><button id="liveClose" aria-label="Close the Live panel">✕</button></div>
+        <div class="row" id="liveIdle">${S.owner ? `<button class="primary" id="liveStart">● Start a session</button>
+          <details id="liveAud"><summary>Audience (<span id="liveAudN">0</span>)</summary><div class="stack" style="gap:4px">
+            <span class="mute" style="font-size:12px">Who can follow live and add lines (they get this session only)</span>
+            ${logins.map(l => `<label class="row" style="gap:6px"><input type="checkbox" data-login="${esc(l)}"> <span class="mono">${esc(l)}</span></label>`).join("")}
+            <input id="liveAudText" type="text" placeholder="logins, comma separated" aria-label="More logins, comma separated"></div></details>`
+          : `<span class="mute" style="font-size:12px">Only an owner starts sessions. Ones you were given show above.</span>`}</div>
+        <ol class="log showlog livestream" id="liveStream" aria-live="polite"></ol>
+        <div class="row" id="livePointChip" hidden><span class="chip"></span><button class="link" id="livePointClear">remove</button></div>
+        <div class="row"><button id="livePoint" title="Pick one part of Studio; it rides on your next line" aria-pressed="false">⌖</button>
+          <input id="liveText" type="text" placeholder="Say or type a line · task: … or build: … drafts a task" aria-label="Line"><button id="liveSend" class="primary">Send</button></div>
+        <div class="row" style="gap:6px"><label class="row" style="gap:4px" title="Off by default"><input type="checkbox" id="liveSpeechOk" ${SRx ? "" : "disabled"}> Browser speech</label>
+          <button id="liveMic" aria-pressed="false" disabled>🎙 Listen</button><span class="spacer"></span><button id="liveEnd">■ End session</button></div>
+        <span class="mute" style="font-size:11px" id="liveSpeechNote">${SRx ? "Browser speech sends your audio to the browser maker's speech service (Google for Chrome, Microsoft for Edge). For private speech use the desktop client: audio stays on your PC, only text is sent."
+          : "This browser has no speech recognition. Type, or use the desktop client (audio stays on your PC)."}</span>`;
+      document.body.append(panel);
+      panel.querySelector("#liveClose").onclick = close;
+      panel.querySelector("#liveSel").onchange = e => { L.id = e.target.value || null; if (cur()?.status === "live" && M.state !== "closed") M.send("select"); render(); };
+      panel.querySelector("#liveStart")?.addEventListener("click", start);
+      panel.querySelector("#liveSend").onclick = sendTyped;
+      panel.querySelector("#liveText").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendTyped(); } };
+      panel.querySelector("#livePoint").onclick = () => setPicking(!L.picking);
+      panel.querySelector("#livePointClear").onclick = () => { L.point = null; render(); };
+      panel.querySelector("#liveSpeechOk").onchange = e => { const on = e.target.checked; panel.querySelector("#liveMic").disabled = !on; if (!on) stopMic(); };
+      panel.querySelector("#liveMic").onclick = () => L.rec ? stopMic() : startMic();
+      panel.querySelector("#liveEnd").onclick = end;
+      panel.querySelectorAll("[data-login]").forEach(c => c.onchange = audChanged);
+      const t = panel.querySelector("#liveAudText"); if (t) t.onchange = audChanged;
+      btn.setAttribute("aria-pressed", "true");
+    }
+    if (!L.id) L.id = sessions()[0]?.id || null;
+    render();
+  }
+  function close(){ stopMic(); setPicking(false); panel?.remove(); panel = null; btn.setAttribute("aria-pressed", "false"); M.send("close"); follow(); }
+  btn.onclick = () => panel ? close() : open();
+
+  function audience(){
+    if (!panel) return [];
+    const ticked = [...panel.querySelectorAll("[data-login]:checked")].map(c => c.dataset.login);
+    const typed = (panel.querySelector("#liveAudText")?.value || "").split(/[\s,]+/).map(x => x.trim().replace(/^@/, "")).filter(Boolean);
+    return [...new Set([...ticked, ...typed])];
+  }
+  function grant(id, list){   // owner only: each watcher is given this one session, nothing else
+    if (!S.owner || !id) return;
+    for (const l of list){ const k = id + "|" + l; if (L.granted.has(k)) continue; L.granted.add(k); queue(() => write("access.grant", null, {login:l, items:[id]})); }
+  }
+  function audChanged(){ const a = audience(), n = panel?.querySelector("#liveAudN"); if (n) n.textContent = a.length; const it = cur(); if (it?.status === "live") grant(it.id, a); }
+
+  async function start(){
+    if (!writable()){ toast("Live needs a signed-in, live Studio you can write to."); return null; }
+    if (!S.owner){ toast("Only an owner can start a live session."); return null; }
+    const id = PTR.stamp("LV"), started = new Date().toISOString(), aud = audience();
+    const ok = await write("item.create", null, {id, type:"idea", title:"Live session " + started.slice(0, 16).replace("T", " "),
+      body:"Live session in progress. Lines arrive as live.line events; replies as comments on this item.", refs:[], status:"live", source:"live",
+      live:{schema:"live.v1", started, audience:aud}});
+    if (!ok) return null;
+    L.id = id; grant(id, aud); if (M.state !== "closed") M.send(M.state === "idle" ? "start" : "select");
+    toast(`Live session ${id} started${aud.length ? " for " + aud.length + " watcher(s)" : ""}.`);
+    render(); return id;
+  }
+  async function end(){
+    const it = cur(); if (!it || it.status !== "live") return;
+    if (!S.owner){ toast("Only an owner can end a session."); return; }
+    stopMic(); await L.q; L.ending = it.id;
+    const n = (it.lines || []).length, drafts = [...liveDrafts(it.id).keys()].length, ended = new Date().toISOString();
+    const a = await write("item.edit", it.id, {title:it.title.replace(/^Live session/, "Live session (ended)"),
+      body:`Live session from ${(it.live?.started || "").slice(0, 16).replace("T", " ")} to ${ended.slice(0, 16).replace("T", " ")} UTC: ${n} line(s), ${drafts} draft task(s). The stream is below; each line keeps its own history entry.`,
+      live:{ended, lines:n}});
+    const b = a && await write("status", it.id, {status:"open"});
+    if (L.ending === it.id && (M.state === "live" || M.state === "listening")) M.send("end");
+    L.ending = null;
+    if (a && b) toast(`Ended ${it.id}.`);
+  }
+
+  function sendTyped(){ const ta = panel?.querySelector("#liveText"); if (!ta) return; const v = ta.value; if (send(v, {via:"typed"})) ta.value = ""; }
+  /* one line: the live.line event, then (owner only) a draft for task:/build:, then the show's transcript hook */
+  function send(text, opts = {}){
+    text = String(text || "").replace(/\s+/g, " ").trim().slice(0, 2000);
+    const it = cur(), point = opts.point || L.point || null;
+    if (!text && !point) return false;
+    if (!it || it.status !== "live"){ toast(S.owner ? "Start a session first." : "No live session to add to."); return false; }
+    if (!writable()){ toast("This Studio is view only for you."); return false; }
+    const id = it.id, ts = new Date().toISOString(), speaker = S.owner ? "Nowed" : "Member";   // the same label write() puts on the author; never an address
+    const body = {session:id, speaker, text, ts, via:opts.via || "typed"}; if (point) body.point = point;
+    L.point = null;
+    queue(async () => {
+      const ref = await write("live.line", id, body);
+      const t = liveTask(text);
+      if (ref && t && S.owner) await draftFrom(id, ref, t, ts);
+    });
+    if (text && window.NodachShow?.active()) window.NodachShow.addTranscriptLine(text);
+    render(); return true;
+  }
+  async function draftFrom(sessionId, lineId, t, ts){
+    const id = PTR.stamp("TK");
+    return write("item.create", null, {id, type:"change", title:(t.kind === "build" ? "Build: " : "Task: ") + t.title.slice(0, 90),
+      body:`${t.title}\n\nDrafted from a live line (${sessionId}, ${ts}). Draft only: nothing is built until an owner approves it.`,
+      status:"draft", refs:[sessionId], source:"live", meta:{kind:t.kind, from_session:sessionId, from_line:lineId}});
+  }
+  function draft(sessionId, lineId){   // an owner drafts a task someone else said
+    const it = F.items.get(sessionId), h = it?.lines.find(x => x.id === lineId), t = h && liveTask(h.body?.text);
+    if (!t || liveDrafts(sessionId).has(lineId)) return;
+    queue(() => draftFrom(sessionId, lineId, t, h.body?.ts || h.ts));
+  }
+
+  /* ⌖ pick one part of Studio for the next line (the same pointer.v1 target as Point and Show modes) */
+  function setPicking(v){
+    L.picking = v; document.body.classList.toggle("livepick", v);
+    panel?.querySelector("#livePoint")?.setAttribute("aria-pressed", String(v));
+    if (v){ window.__point?.off(); toast("Click the part of Studio you mean. Esc cancels."); }
+  }
+  addEventListener("click", e => {
+    if (!L.picking || e.target.closest?.("#livePanel,#liveBtn")) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    L.point = PTR.target(e.target); setPicking(false); render(); panel?.querySelector("#liveText")?.focus();
+  }, true);
+  addEventListener("keydown", e => { if (L.picking && e.key === "Escape"){ e.preventDefault(); e.stopImmediatePropagation(); setPicking(false); } }, true);
+
+  /* browser speech: only when ticked, never by default */
+  function startMic(){
+    if (!SRx || !panel?.querySelector("#liveSpeechOk")?.checked) return;
+    const r = new SRx(); r.lang = "en-GB"; r.interimResults = false; r.continuous = true;
+    r.onresult = e => { for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) send(e.results[i][0].transcript, {via:"browser-speech"}); };
+    r.onerror = e => { toast(e.error === "not-allowed" ? "Microphone not allowed for this page."
+      : (e.error === "network" && navigator.brave) ? "Brave has no speech service, so browser speech can't work here. Use the desktop client (audio stays on your PC), or Chrome/Edge."
+      : `Browser speech stopped (${e.error}).`); };
+    r.onend = () => { if (L.rec === r){ L.rec = null; if (M.state === "listening") M.send("unlisten"); render(); } };
+    try { r.start(); L.rec = r; M.send("listen"); } catch { L.rec = null; }
+    render();
+  }
+  function stopMic(){ const r = L.rec; L.rec = null; if (r){ try { r.stop(); } catch {} if (M.state === "listening") M.send("unlisten"); } render(); }
+
+  function render(){
+    follow();
+    if (!panel) return;
+    const list = sessions(), it = cur();
+    if (L.id && !it) L.id = null;
+    // keep the machine in step with the record: a session that ended elsewhere is "lost", picking a live one is "select"
+    const isLive = it?.status === "live";
+    if (!isLive && (M.state === "live" || M.state === "listening")) M.send(L.ending === it?.id && it ? "end" : "lost", {});
+    else if (isLive && M.state === "idle") M.send("select");
+    const opts = [...list]; if (it && !list.includes(it)) opts.unshift(it);
+    panel.querySelector("#liveSel").innerHTML = opts.length ? opts.map(s => `<option value="${esc(s.id)}" ${s.id === L.id ? "selected" : ""}>${esc(s.id)}${s.status === "live" ? " ● live" : ""}</option>`).join("")
+      : '<option value="">no live session</option>';
+    const live = it?.status === "live";
+    panel.querySelector("#liveIdle").hidden = live;
+    panel.querySelector("#liveEnd").hidden = !live || !S.owner;
+    for (const s of ["#liveText", "#liveSend", "#livePoint"]) panel.querySelector(s).disabled = !live || !writable();
+    const mic = panel.querySelector("#liveMic"); mic.setAttribute("aria-pressed", String(!!L.rec)); mic.textContent = L.rec ? "■ Stop listening" : "🎙 Listen";
+    const chip = panel.querySelector("#livePointChip"); chip.hidden = !L.point; if (L.point) chip.querySelector(".chip").textContent = livePointWords(L.point);
+    const box = panel.querySelector("#liveStream"), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    box.innerHTML = it ? (liveRows(it) || '<li class="empty">No lines yet. Type, or talk through the desktop client.</li>') : '<li class="empty">No session yet.</li>';
+    box.querySelectorAll("[data-go]").forEach(b => b.onclick = () => select(b.dataset.go));
+    box.querySelectorAll("[data-live-draft]").forEach(b => b.onclick = () => draft(it.id, b.dataset.liveDraft));
+    if (atEnd) box.scrollTop = box.scrollHeight;
+  }
+
+  window.NodachLive = {open, close, render, start, end, send, draft, session: () => L.id, listening: () => !!L.rec, parse: liveTask,
+    /* a readout for tests and graphs: the machine's state, the session, the fast pull and the transitions so far */
+    state: () => ({state:M.state, session:L.id, listening:!!L.rec, fast_poll_ms:fastT ? FAST_MS : 0, trace:M.trace(), edges:M.edges()})};
 })();
 </script>
 <script type="module">
