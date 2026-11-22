@@ -84,6 +84,17 @@ header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:tra
   padding:var(--space-3);width:min(300px,calc(100vw - 32px));box-sizing:border-box;display:flex;flex-direction:column;gap:6px;box-shadow:0 6px 24px rgba(0,0,0,.15)}
 #avatarMenu[hidden]{display:none}
 #avatarMenu #acct{align-self:flex-start}
+/* B-profile-windows (98b b): each window works as one profile, like Chrome profiles. A thin strip under the bar names it;
+   its colour comes from a stable hash of the profile id, its text is the --ink token, contrast checked (4.5:1) per theme. */
+#profStrip{align-self:flex-start;display:inline-flex;align-items:center;gap:6px;margin-top:-2px;padding:1px 10px;border-radius:var(--radius-sm);
+  font:600 12px/18px var(--font-sans);letter-spacing:.01em;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#profStrip[hidden]{display:none}
+#profStrip .k{font-weight:500;opacity:.8}
+#profList .prof{display:flex;align-items:center;gap:6px}
+#profList .prof .sw{flex:none;width:10px;height:10px;border-radius:50%}
+#profList .prof .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#profList .prof[aria-current="true"] .nm{font-weight:600}
+#profList .prof button{padding:1px 6px;font-size:12px}
 #subnav{display:flex;min-width:0}
 #subnav .sub{display:flex;flex-wrap:wrap;gap:2px 6px;align-items:center;min-width:0}
 #subnav .sub[hidden]{display:none}
@@ -258,13 +269,14 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <span class="nb-slot nb-reveal" data-slot="search"></span>
     <button id="avatarBtn" class="nb-avatar" aria-haspopup="menu" aria-expanded="false" aria-controls="avatarMenu" aria-label="Account and profiles">·</button>
   </div>
+  <div id="profStrip" role="status" aria-live="polite" hidden data-nodach-part="studio.profile" title="This window works as this profile. Every save carries it."></div>
   <div id="avatarMenu" role="menu" aria-label="Account" hidden data-nodach-part="studio.account">
     <div class="eyebrow">Signed in</div>
     <div id="acctName" class="mono"></div>
     <span data-slot="acct"></span>
     <div class="eyebrow" style="margin-top:6px">Profiles</div>
-    <ul id="profList" class="log" aria-label="Profiles (read-only for now)"></ul>
-    <button id="profWindow" role="menuitem" disabled title="after profile windows ship">Open profile in new window</button>
+    <ul id="profList" class="log" aria-label="Your profiles"></ul>
+    <button id="profWindow" role="menuitem" disabled title="Open this window's profile in a new window">Open profile in new window</button>
     <span data-slot="signout"></span>
   </div>
   <div id="subnav" data-nodach-part="studio.subnav">
@@ -632,10 +644,12 @@ async function write(kind, item, body, opts={}){
   const ts = new Date(Math.max(Date.now(), (isNaN(latest) ? 0 : latest) + 1)).toISOString();
   const ev = {ts, kind, item:item||null, branch:S.branch, body:body||{},
               author:{id:S.me||"unknown", role:S.owner?"owner":"member", label:S.owner?"Nowed":"Member"}};
+  if (S.profile) ev.author.profile = S.profile.id;   // B-profile-windows: every write names this window's profile
   const isPrivate = opts.private || (kind==="item.create" && body?.private) || (item && F.items.get(item)?.private);
   if (isPrivate && !privPath()){ toast("Your private area isn't available in this view. Nothing was saved."); return null; }
   try { const ref = await S.db.collection(isPrivate ? privPath() : "events").add(ev); return ref?.id || "pending"; }
   catch(err){
+    if (err.profile_mismatch){ NodachProfile.refused(err.message); return null; }
     if (err.code==="invalid_argument"){ S.canWrite = false; renderBanners(); refreshView(); toast("This Studio is view only for you. Nothing was changed."); }
     else toast(err.code==="quota_exceeded" ? "The Studio's storage is full. Nothing was saved." : "Couldn't save — check your connection. Your text is kept.");
     return null;
@@ -924,7 +938,7 @@ function runSummary(r){
 async function runFrom(id){
   $("#stOut").innerHTML = '<p class="mute">Running…</p>';
   try {
-    const r = await fetch("/studio/api/run", {method:"POST", credentials:"same-origin", headers:{"content-type":"application/json", "x-nodach-studio":"1"}, body:JSON.stringify({board:BOARD, start:id})});
+    const r = await fetch("/studio/api/run", {method:"POST", credentials:"same-origin", headers:{"content-type":"application/json", "x-nodach-studio":"1", ...NodachProfile.headers()}, body:JSON.stringify({board:BOARD, start:id})});
     const res = await r.json();
     $("#stOut").innerHTML = runSummary(res);
     window.__nodach?.pull?.();
@@ -1873,6 +1887,106 @@ document.querySelectorAll("#subnav [data-sv]").forEach(b => b.onclick = () => sh
 document.querySelectorAll("#sections [data-s]").forEach(b => b.onclick = () => { const sec = b.dataset.s, last = store.get("view." + sec);
   show(SECTIONS[sec].includes(last) ? last : SECTIONS[sec][0]); });
 
+/* ---------------------------------------------------------------- profile windows (B-profile-windows, 98b b)
+   A profile is not a sign-in: one person has several sign-ins and several profiles, and each window works as one
+   profile, like Chrome profiles. The window's profile comes from the URL (?profile=<id>) and is mirrored into this
+   tab's sessionStorage only (a reload keeps it; another window keeps its own). Default: the person's first profile,
+   or none. Every write carries it (author.profile, and the x-nodach-profile header when the hub serves Studio); the
+   hub refuses a profile that isn't the signed-in account's own and the page shows why. */
+const NodachProfile = (() => {
+  const KEY = "nodach.profile";
+  const ss = { get(){ try { return sessionStorage.getItem(KEY); } catch { return null; } },
+               set(v){ try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch {} } };
+  const fromUrl = () => { try { return new URLSearchParams(location.search).get("profile"); } catch { return null; } };
+  let mine = [];
+  // until the list loads, the window already works as what its URL (or this tab) says; the hub checks it either way
+  const early = fromUrl() || ss.get();
+  if (early){ S.profile = {id:early, label:early, kind:""}; window.__nodachProfile = early; }
+
+  /* colour: FNV-1a of the id → hue; lightness moved until the --ink token on it reaches 4.5:1 in this theme */
+  function hash(id){ let h = 0x811c9dc5; for (const c of String(id)){ h ^= c.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h >>> 0; }
+  function hsl(h, s, l){ s /= 100; l /= 100; const k = n => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))); return [f(0), f(8), f(4)].map(x => Math.round(x * 255)); }
+  function rgbOf(css){ const t = String(css).trim();
+    let m = t.match(/^#([0-9a-f]{6})$/i); if (m) return [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16));
+    m = t.match(/rgba?\(([^)]+)\)/); return m ? m[1].split(/[ ,]+/).slice(0, 3).map(Number) : [24, 32, 31]; }
+  const lum = rgb => { const [r, g, b] = rgb.map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+  function colours(id){
+    const tok = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+    const ink = rgbOf(tok("--ink") || "#18201f"), dark = lum(ink) > 0.4, hue = hash(id) % 360;
+    let l = dark ? 30 : 84, bg = hsl(hue, 55, l);
+    while (ratio(bg, ink) < 4.5 && l > 4 && l < 96){ l += dark ? -2 : 2; bg = hsl(hue, 55, l); }
+    return {bg:`rgb(${bg.join(",")})`, fg:tok("--ink") || "#18201f", ratio:Math.round(ratio(bg, ink) * 100) / 100, hue, dark};
+  }
+  const current = () => S.profile || null;
+  function url(id){ const u = new URL(location.href); u.searchParams.set("profile", id); return u.toString(); }
+  function renderStrip(){
+    const el = $("#profStrip"), p = current(); if (!el) return;
+    if (!p){ el.hidden = true; document.documentElement.style.removeProperty("--profile-colour"); return; }
+    const c = colours(p.id);
+    el.hidden = false; el.style.background = c.bg; el.style.color = c.fg; el.dataset.profile = p.id;
+    el.innerHTML = `<span class="k">Profile</span><span class="nm">${esc(p.label || p.id)}</span>`;
+    document.documentElement.style.setProperty("--profile-colour", c.bg);
+    try { document.title = (p.label || p.id) + " · Nodach Studio"; } catch {}
+  }
+  function use(id, quiet){
+    // an id not in the list is kept only when there is no list to check it against (the hub still checks it)
+    const p = id ? (mine.find(x => x.id === id) || (!mine.length ? {id, label:id, kind:""} : null)) : null;
+    S.profile = p; window.__nodachProfile = p ? p.id : undefined; ss.set(p ? p.id : null);
+    try { const u = new URL(location.href); if (p) u.searchParams.set("profile", p.id); else u.searchParams.delete("profile");
+          if (u.toString() !== location.href) history.replaceState(history.state, "", u.toString()); } catch {}
+    renderStrip(); if (!$("#avatarMenu").hidden) renderMenu();
+    if (p && !quiet) toast(`This window now works as ${p.label || p.id}.`);
+  }
+  function openWindow(id){
+    // noopener: the new window gets its own sessionStorage, so its profile is only what its URL says
+    const w = window.open(url(id), "_blank", "noopener");
+    S.lastOpened = url(id);
+    return w;
+  }
+  async function init(){
+    if (window.__nodach?.standalone){
+      try { const r = await fetch("/studio/api/profiles", {credentials:"same-origin", cache:"no-store"});
+            if (r.ok){ const v = await r.json(); mine = (v.profiles || []).filter(p => p && p.id && !p.revoked).map(p => ({id:p.id, label:p.label || p.kind || p.id, kind:p.kind || ""})); } } catch {}
+    }
+    const want = fromUrl() || ss.get();
+    if (want && mine.some(p => p.id === want)) use(want, true);
+    else if (want && mine.length){ use(mine[0].id, true); toast(`Profile ${want} isn't one of yours here, so this window works as ${mine[0].label}.`); }
+    else if (mine.length) use(mine[0].id, true);
+    else use(want || null, true);
+    return mine;
+  }
+  function renderMenu(){
+    const ul = $("#profList"), btn = $("#profWindow"), p = current();
+    if (!mine.length){
+      ul.innerHTML = `<li><span class="n"></span><span class="mute">${p ? "This window works as " + esc(p.label || p.id) + "." : "No profiles to choose from here."} ` +
+        `Profiles come from the hub when Studio is opened signed in.</span></li>`;
+    } else {
+      ul.innerHTML = mine.map(x => { const c = colours(x.id), on = p && p.id === x.id;
+        return `<li class="prof" data-prof="${esc(x.id)}" aria-current="${on}"><span class="sw" style="background:${c.bg}" aria-hidden="true"></span>` +
+          `<span class="nm" title="${esc(x.id)}">${esc(x.label)} <span class="mute">· ${esc(x.kind)}</span></span>` +
+          (on ? `<span class="mute" style="font-size:12px">this window</span>` : `<button data-profuse="${esc(x.id)}" role="menuitem" title="Work as this profile in this window">Use here</button>`) +
+          `<button data-profwin="${esc(x.id)}" role="menuitem" title="Open this profile in its own window">New window</button></li>`; }).join("");
+    }
+    ul.querySelectorAll("[data-profuse]").forEach(b => b.onclick = () => use(b.dataset.profuse));
+    ul.querySelectorAll("[data-profwin]").forEach(b => b.onclick = () => openWindow(b.dataset.profwin));
+    btn.disabled = !p; btn.title = p ? `Open ${p.label || p.id} in a new window` : "No profile to open";
+    btn.onclick = () => { if (current()) openWindow(current().id); };
+  }
+  function refused(message){
+    const msg = message ? (() => { try { return JSON.parse(message).error || message; } catch { return message; } })() : "This profile can't write here.";
+    S.lastRefusal = msg; toast(msg);
+    const el = $("#profStrip"); if (el && !el.hidden){ el.dataset.refused = "true"; el.title = msg; }
+  }
+  const headers = () => S.profile ? {"x-nodach-profile": S.profile.id} : {};
+  // theme: the strip follows light/dark (the toggle sets data-theme; the system setting can change too)
+  try { new MutationObserver(renderStrip).observe(document.documentElement, {attributes:true, attributeFilter:["data-theme"]}); } catch {}
+  try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderStrip); } catch {}
+  setTimeout(renderStrip, 0);
+  return {init, use, openWindow, renderMenu, renderStrip, refused, headers, colours, hash, list: () => mine.slice(), current};
+})();
+
 /* NAV-2 bar: collapsed (mark, node dots, avatar) until the pointer rests on it, focus enters it, or it's tapped; Esc closes.
    Timings come from the motion tokens, so a token change retimes it; reduced motion drops the fade (the global rule). */
 const NAV = (() => {
@@ -1915,8 +2029,7 @@ const NAV = (() => {
 function renderAvatarMenu(){
   const nm = S.me ? (S.names[S.me] || (S.owner ? "Nowed" : "a member")) : "";
   $("#acctName").textContent = nm ? nm + (S.owner ? " · owner" : " · member") : (window.claude?.use ? "signing in…" : "offline preview");
-  $("#profList").innerHTML = `<li><span class="n">1</span><span>Private <span class="mute">· you, everything you can reach</span></span></li>` +
-    `<li><span class="n"></span><span class="mute">More profiles are listed here, read-only, until profile windows ship.</span></li>`;
+  NodachProfile.renderMenu();
 }
 function avatarInitial(){ const nm = S.me ? (S.names[S.me] || (S.owner ? "Nowed" : "")) : "";
   $("#avatarBtn").textContent = nm ? nm.trim()[0].toUpperCase() : "·"; }
@@ -2074,6 +2187,7 @@ async function signOut(){
   }
   refresh();
   if (window.__nodach?.standalone) showAccount();
+  NodachProfile.init();
   db.doc("seed/genesis").onSnapshot(s => { if (s.exists){ S.genesis = s.data(); refresh(); if (!s.metadata.fromCache){ clearTimeout(timer); $("#conn").textContent = "saved · shared"; $("#conn").className="status live"; } }
       else if (!s.metadata.fromCache){ clearTimeout(timer); $("#conn").textContent = "waiting for genesis"; } },
     () => { clearTimeout(timer); $("#conn").textContent = "store unavailable"; });
