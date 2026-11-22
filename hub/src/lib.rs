@@ -785,6 +785,21 @@ impl Record {
         list
     }
 
+    /// The login an email sign-in gets (F-two-accounts-one-person): the account the email is linked to with
+    /// account.link, written in that account's casing from the allow-list, else the email's own `e-<hash16>` login.
+    /// `hash` is the full SHA-256 when known (Google, the email form); the emailed link carries only `e_login`.
+    fn email_sign_in_login(&self, cfg: &Config, hash: Option<&str>, e_login: &str) -> String {
+        let _ = self.load();
+        let linked = self.hub.borrow().as_ref().and_then(|h| {
+            let p = h.profiles();
+            match hash { Some(x) => p.linked_login_for_email_hash(x), None => Some(p.sign_in_login_for_email_login(e_login)) }
+        });
+        match linked {
+            Some(l) if !l.eq_ignore_ascii_case(e_login) => cfg.allowed_logins.iter().find(|a| a.eq_ignore_ascii_case(&l)).cloned().unwrap_or(l),
+            _ => e_login.to_string(),
+        }
+    }
+
     /// Ends a sign-in: mint the session for `login` if they may sign in, then go to Studio.
     fn finish_sign_in(&self, cfg: &Config, login: &str, now: i64, method: &str) -> Result<Option<(Response, String)>> {
         if !session::allowed(login, &self.sign_in_allowed(cfg)) {
@@ -888,7 +903,8 @@ impl Record {
                 Ok(e) => e,
                 Err(e) => return Ok(Some((page("Sign-in failed", &e.to_string(), 502)?, "-".into()))),
             };
-            return self.finish_sign_in(&cfg, &session::email_login(&email), now, "google");
+            let login = self.email_sign_in_login(&cfg, Some(&session::email_hash(&email)), &session::email_login(&email));
+            return self.finish_sign_in(&cfg, &login, now, "google");
         }
         let method = req.method();
         match (method.clone(), path.as_str()) {
@@ -932,7 +948,9 @@ impl Record {
                     return Ok(Some((page("That doesn't look like an email address", "Go back and check it.", 400)?, "-".into())));
                 }
                 let login = session::email_login(&email);
-                if session::allowed(&login, &self.sign_in_allowed(&cfg)) {
+                // a linked email may sign in even if its e- account was never invited (it opens the linked account)
+                let resolved = self.email_sign_in_login(&cfg, Some(&session::email_hash(&email)), &login);
+                if session::allowed(&resolved, &self.sign_in_allowed(&cfg)) {
                     if let Some(token) = self.session_key().and_then(|k| session::mint_link(&k, &login, now)) {
                         let link = format!("{}/studio/login/email?token={}", cfg.issuer, oauth::enc(&token));
                         let outcome = match self.send_sign_in_link(email.trim(), &link).await { Ok(()) => "sent", Err(e) => { console_error!("sign-in link: {e}"); "failed" } };
@@ -968,6 +986,7 @@ impl Record {
                 if !self.use_link_once(&token, now)? {
                     return Ok(Some((page("Link already used", "Each sign-in link works once. Open /studio/login to get a new one.", 400)?, "-".into())));
                 }
+                let login = self.email_sign_in_login(&cfg, None, &login);
                 self.finish_sign_in(&cfg, &login, now, "email")
             }
             (Method::Get, "/studio/login/github") => {
@@ -1051,6 +1070,27 @@ impl Record {
                         h.set("cache-control", "no-store")?;
                         Response::ok(STUDIO_GENESIS)?.with_headers(h)
                     }
+                    (Method::Post, "/studio/api/link-sign-in", Some(l)) => {
+                        // F-two-accounts-one-person: "also sign in as me with this email". Owner only; the address is
+                        // hashed here and dropped; the record gets account.link {identity: email:sha256:<hash>}.
+                        if req.headers().get(session::CSRF_HEADER).ok().flatten().as_deref() != Some("1") {
+                            json_status(&serde_json::json!({"error": "missing x-nodach-studio header"}), 403)?
+                        } else {
+                            let body: serde_json::Value = req.json().await.unwrap_or(serde_json::Value::Null);
+                            let email = body.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let unlink = body.get("unlink").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let key = self.connector_key()?;
+                            let before = self.hub.borrow().as_ref().unwrap().status().events;
+                            let res = hub_core::mcp::link_sign_in(self.hub.borrow_mut().as_mut().unwrap(), &l, &key, &email, unlink, "studio-settings", now);
+                            let added = self.hub.borrow().as_ref().unwrap().pull(before, usize::MAX).events;
+                            self.persist(&added)?;
+                            self.log(now, "/studio/api/link-sign-in", if unlink { "unlink sign-in" } else { "link sign-in" }, if res.is_ok() { "ok" } else { "refused" }, &l);
+                            match res {
+                                Ok(v) => json_status(&v, 200)?,
+                                Err(e) => json_status(&serde_json::json!({"error": e, "refused": true}), 403)?,
+                            }
+                        }
+                    }
                     (Method::Get, "/studio/api/events", Some(l)) => {
                         let q = |k: &str| url.query_pairs().find(|(a, _)| a == k).and_then(|(_, v)| v.parse::<usize>().ok());
                         let (events, next, total, _) = self.hub.borrow().as_ref().unwrap().studio_events_for(&l, q("after").unwrap_or(0), q("limit").unwrap_or(500).clamp(1, 2000));
@@ -1085,6 +1125,9 @@ impl Record {
                                 json_status(&serde_json::json!({"error": "need {doc_id, event:{kind, ts, ...}}"}), 400)?
                             } else if let Err(e) = allowed {
                                 json_status(&serde_json::json!({"error": e, "refused": true}), 403)?
+                            } else if kind == "account.link" && !ev.pointer("/author/id").and_then(|v| v.as_str()).is_some_and(|a| a.eq_ignore_ascii_case(&format!("github:{l}"))) {
+                                // a sign-in link must be written by the account it links to (F-two-accounts-one-person)
+                                json_status(&serde_json::json!({"error": "account.link must be written by the signed-in account itself", "refused": true}), 403)?
                             } else {
                                 let importer = self.importer_key()?;
                                 let made = self.hub.borrow_mut().as_mut().unwrap().import(&importer, vec![(doc_id.clone(), ev)], now)
@@ -1358,8 +1401,12 @@ impl Record {
                     } else if tool == "import_studio_events" && m.get("id").is_some() {
                         // D-129 / Q99 A: Studio Web's events keep their own authors; the importer key vouches for the copy
                         let args = m.pointer("/params/arguments").cloned().unwrap_or_default();
+                        let forged = |docs: &Vec<(String, serde_json::Value)>| docs.iter().any(|(_, ev)| ev.get("kind").and_then(|k| k.as_str()) == Some("account.link")
+                            && !ev.pointer("/author/id").and_then(|v| v.as_str()).is_some_and(|a| a.eq_ignore_ascii_case(&format!("github:{login}"))));
                         let v = match mcp::import_docs(&args) {
                             Err(e) => mcp::tool_result(serde_json::json!({"error": e}), true),
+                            // a sign-in link must be written by the account it links to (F-two-accounts-one-person)
+                            Ok(docs) if forged(&docs) => mcp::tool_result(serde_json::json!({"error": "account.link events can only be imported by the account that wrote them", "refused": true}), true),
                             Ok(docs) => {
                                 let sent = docs.len();
                                 let importer = self.importer_key()?;
