@@ -9,6 +9,8 @@
 //!   write_event  add a Studio-shaped event (answer, comment, status, item.create, item.edit, link),
 //!                signed by the connector key; it reaches Studio Web through /studio-export (D-101). Profile kinds
 //!                (account.link, profile.*, connection.*) are checked against the profile rules before writing (I2)
+//!   link_sign_in  owner only: link an email sign-in (Google or emailed link) to your own account. The address is
+//!                hashed here and dropped; only account.link {identity: email:sha256:<hash>} is written (F-two-accounts-one-person)
 //!   read_profiles  the signed-in owner's account, profiles, connections (refs only) and findings (I2)
 //!   begin_answer / end_answer / read_claims  the multi-chat guard (D-nodach-parallel-guard v2): duplicate-message
 //!                check, item claims, roles; write_event takes the session it writes under
@@ -83,6 +85,12 @@ fn tools() -> Value {
              "prefixes": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "spaces to give them, e.g. [\"INSYDR-\"]"},
              "note": {"type": "string", "maxLength": 600, "description": "a line from you to include in the welcome email"},
              "send_email": {"type": "boolean", "description": "default true; false records the invite without emailing"}}},
+         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}},
+        {"name": "link_sign_in", "title": "Also sign in as me with an email",
+         "description": "Owner only. Links an email address to your own account, so signing in to Studio with that address (Google or an emailed link) opens your account instead of a separate email account. The address is hashed on the hub and never stored: the record keeps only account.link {identity: email:sha256:<hash>}. An address already linked to another account is refused. unlink: true removes the link again.",
+         "inputSchema": {"type": "object", "required": ["email"], "properties": {
+             "email": {"type": "string"},
+             "unlink": {"type": "boolean", "description": "default false; true removes an existing link"}}},
          "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}},
         {"name": "read_profiles", "title": "Read your profiles",
          "description": "The signed-in owner's account, linked sign-ins, profiles (Personal, Developer, ...), tool connections (where each secret lives, never its value), how many items each profile owns, and any profile events the hub ignored with the reason.",
@@ -163,6 +171,14 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
         }
         "hub_log" | "import_studio_events" | "read_private" | "write_private" | "write_private_batch" | "send_invite" => text_result(json!({"error": format!("{name} is served by the node, not hub-core")}), true),
         "read_profiles" => text_result(hub.profiles().view_for(login), false),
+        "link_sign_in" => {
+            let email = args.get("email").and_then(Value::as_str).unwrap_or("");
+            let unlink = args.get("unlink").and_then(Value::as_bool).unwrap_or(false);
+            match link_sign_in(hub, login, key, email, unlink, "claude-connector", now) {
+                Ok(v) => text_result(v, false),
+                Err(e) => text_result(json!({"error": e, "refused": true}), true),
+            }
+        }
         "resume" => text_result(hub.digest_for(login), false),
         "read_claims" => {
             let g = hub.guard();
@@ -254,6 +270,35 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
         }
         _ => text_result(json!({"error": format!("unknown tool {name}")}), true),
     }
+}
+
+/// Link (or, with `unlink`, unlink) an email sign-in to the caller's own account (F-two-accounts-one-person).
+/// Owner only; the caller is always the account linked to, so a link can never point at someone else. The address
+/// is hashed here and never written or returned: the result names only the first 12 hex characters of its hash.
+pub fn link_sign_in(hub: &mut Hub, login: &str, key: &KeyPair, email: &str, unlink: bool, via: &str, now: i64) -> Result<Value, String> {
+    if !hub.access().is_owner(login) {
+        return Err("only an owner can link sign-ins".into());
+    }
+    if login.to_ascii_lowercase().starts_with(crate::session::EMAIL_LOGIN_PREFIX) {
+        return Err("sign in with your GitHub account to link an email to it".into());
+    }
+    if !crate::session::plausible_email(email) {
+        return Err("that doesn't look like an email address".into());
+    }
+    let hash = crate::session::email_hash(email);
+    let identity = format!("email:sha256:{hash}");
+    let mut body = json!({"identity": identity, "account": format!("github:{login}"), "verified": false});
+    if unlink { body["revoked"] = json!(true); }
+    let ev = json!({"ts": iso(now), "kind": "account.link", "item": null, "branch": "main", "body": body,
+                    "author": {"id": format!("github:{login}"), "label": login, "role": "owner"}, "via": via});
+    hub.profiles().check(&ev)?;
+    let made = hub.write(key, &format!("{via} ({login})"), ev, now).map_err(|e| format!("{e:?}"))?;
+    let doc = studio_doc_id(&made.last().map(|e| e.id.clone()).unwrap_or_default());
+    let mut out = json!({"written": doc, "account": format!("github:{login}"),
+              "sign_in_as": if unlink { crate::session::email_login(email) } else { login.to_string() },
+              "stored": "the address's SHA-256 fingerprint only"});
+    out[if unlink { "unlinked" } else { "linked" }] = json!(format!("email:sha256:{}…", &hash[..12]));
+    Ok(out)
 }
 
 /// Write one Studio-shaped event as the signed-in person (used by the guard tools).

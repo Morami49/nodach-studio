@@ -178,7 +178,7 @@ fn mcp_initialize_list_and_tools() {
     assert!(handle(&mut hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), T0).is_none());
     let tools = handle(&mut hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), T0).unwrap();
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["hub_status", "read_events", "hub_log", "read_private", "write_private", "write_private_batch", "send_invite", "read_profiles", "begin_answer", "end_answer", "resume", "read_claims", "import_studio_events", "write_event"]);
+    assert_eq!(names, ["hub_status", "read_events", "hub_log", "read_private", "write_private", "write_private_batch", "send_invite", "link_sign_in", "read_profiles", "begin_answer", "end_answer", "resume", "read_claims", "import_studio_events", "write_event"]);
 
     let call = |hub: &mut Hub, name: &str, args: Value| handle(hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": name, "arguments": args}}), T0 + 60_000).unwrap()["result"].clone();
     let w = call(&mut hub, "write_event", json!({"kind": "answer", "item": "Q-duress", "body": {"code": "Q86", "text": "A"}}));
@@ -370,4 +370,29 @@ fn a_tenant_sees_and_writes_only_their_space() {
     assert_eq!(w(&mut hub, "nassar-insydr", json!({"kind": "comment", "item": "D-nodach-org-model", "body": {"text": "hi"}}))["structuredContent"]["refused"], true);
     let owner_sees = call(&mut hub, "Morami49", "read_events", json!({"after": 0, "limit": 200}))["structuredContent"]["events"].as_array().unwrap().len();
     assert_eq!(owner_sees, 4, "the owner sees everything: two items, the grant and the tenant's comment");
+}
+
+#[test]
+fn link_sign_in_hashes_the_address_and_is_owner_only() {
+    // F-two-accounts-one-person: the owner links their Gmail once; the record holds only its hash.
+    let mut hub = Hub::new();
+    hub.set_owners(vec!["Morami49".into()]);
+    let key = KeyPair::from_seed([9u8; 32]);
+    let call = |hub: &mut Hub, who: &str, args: Value| handle(hub, who, &key, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "link_sign_in", "arguments": args}}), T0).unwrap()["result"].clone();
+    let r = call(&mut hub, "friend", json!({"email": "owner.test@gmail.com"}));
+    assert_eq!(r["structuredContent"]["refused"], true, "non-owners can't link: {r}");
+    let r = call(&mut hub, "Morami49", json!({"email": "Owner.Test@gmail.com"}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["sign_in_as"], "Morami49");
+    assert!(!r.to_string().to_ascii_lowercase().contains("owner.test"), "the address is never returned");
+    let (docs, _) = hub.to_studio(0, 500);
+    assert!(!docs.iter().any(|(_, ev)| ev.to_string().to_ascii_lowercase().contains("owner.test")), "nor stored");
+    let h = hub_core::session::email_hash("owner.test@gmail.com");
+    assert_eq!(hub.profiles().sign_in_login_for_email_hash(&h).as_deref(), Some("morami49"));
+    assert_eq!(call(&mut hub, "Morami49", json!({"email": "owner.test@gmail.com"}))["isError"], true, "already linked");
+    assert_eq!(call(&mut hub, "Morami49", json!({"email": "not an email"}))["isError"], true);
+    let r = call(&mut hub, "Morami49", json!({"email": "owner.test@gmail.com", "unlink": true}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(hub.profiles().sign_in_login_for_email_hash(&h), hub_core::session::login_for_hash(&h));
 }
