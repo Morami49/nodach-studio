@@ -11,6 +11,11 @@ def test_any_risky_file_makes_it_high():
         assert classify(["studio/vault.html", p]) == ("high", [p]), p
 
 
+def test_design_folder_is_high_even_for_docs():
+    for p in ["design/BRAND.md", "design/README.md", "design/tokens.json"]:
+        assert classify(["README.md", p]) == ("high", [p]), p
+
+
 def test_empty_is_high():
     assert classify([])[0] == "high"
 

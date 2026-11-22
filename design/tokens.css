@@ -1,0 +1,68 @@
+/* Nodach — generated from design/tokens.json. Edit tokens.json, then regenerate; never edit this file by hand. */
+
+:root, [data-theme="light"] {
+  --nodach-green: #0E4A3D;
+  --nodach-cream: #F3E3CC;
+  --surface: #FAF5EC;
+  --surface-raised: #FFFFFF;
+  --ink: #10201A;
+  --ink-muted: #4A5A52;
+  --on-brand: #F3E3CC;
+  --hairline: #E2D8C6;
+  --control-border: #7C8A83;
+  --focus: #0E4A3D;
+  --danger: #B3261E;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+  --duration-nav-open-delay: 150ms;
+  --duration-nav-open: 250ms;
+  --duration-nav-close-delay: 400ms;
+  --duration-nav-close: 200ms;
+  --duration-hover: 180ms;
+  --easing-out: cubic-bezier(0, 0, 0.58, 1);
+  --easing-in: cubic-bezier(0.42, 0, 1, 1);
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-sans: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+[data-theme="dark"] {
+  --nodach-green: #0E4A3D;
+  --nodach-cream: #F3E3CC;
+  --surface: #0A0F0D;
+  --surface-raised: #14201B;
+  --ink: #F3E3CC;
+  --ink-muted: #B9C7C0;
+  --on-brand: #F3E3CC;
+  --hairline: #24332C;
+  --control-border: #6F8279;
+  --focus: #F3E3CC;
+  --danger: #F2B8B5;
+}
+
+.type-wordmark { font-family: var(--font-display); font-size: 64px; line-height: 0.9; font-weight: 700; letter-spacing: -0.03em; }
+
+.type-display { font-family: var(--font-display); font-size: 48px; line-height: 52px; font-weight: 700; letter-spacing: -0.02em; }
+
+.type-heading { font-family: var(--font-display); font-size: 28px; line-height: 34px; font-weight: 700; letter-spacing: -0.01em; }
+
+.type-subheading { font-family: var(--font-display); font-size: 20px; line-height: 26px; font-weight: 500; }
+
+.type-descriptor { font-family: var(--font-display); font-size: 14px; line-height: 18px; font-weight: 500; letter-spacing: 0.6em; }
+
+.type-body { font-family: var(--font-sans); font-size: 15px; line-height: 22px; font-weight: 400; }
+
+.type-body-strong { font-family: var(--font-sans); font-size: 15px; line-height: 22px; font-weight: 600; }
+
+.type-small { font-family: var(--font-sans); font-size: 13px; line-height: 18px; font-weight: 400; }
+
+.type-id { font-family: var(--font-mono); font-size: 12px; line-height: 16px; font-weight: 500; }
