@@ -1095,7 +1095,14 @@ async def s51_show_marks_follow_canvas(b):
     await st.add("events", ev("canvas.layout", None, {"board": "main", "moves": {"D-001": [round(n1["x"]) + 300, round(n1["y"]) + 160]}}, ts=now_ts()))
     await p.wait_for_timeout(600)
     await p.evaluate(f"select('{sid}')"); await p.wait_for_timeout(200)
-    await p.click("#showReplayBtn"); await p.wait_for_timeout(1500)
+    await p.click("#showReplayBtn")
+    # The replay plays in real time: a mark appears once the clock passes its step's t_ms. On a slow runner the stroke's
+    # t_ms can be past a fixed 1.5 s wait (CI 21 Nov, 'replay 2 None'), so wait for the replay to reach its end instead.
+    try:
+        await p.wait_for_function("document.querySelector('#showReplay [data-play]')?.textContent.includes('Play again')", timeout=15000)
+    except Exception:
+        pass
+    await p.wait_for_timeout(100)
     rm = {m["n"]: (m["x"], m["y"]) for m in await p.evaluate("NodachShow.replayMarks()")}
     a2, c2 = await box("D-001"), await box("D-002")
     ok = (f1 and f1.get("node") == "D-001" and f2 and steps[1].get("anchor", {}).get("node") == "D-002"
