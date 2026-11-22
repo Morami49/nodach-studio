@@ -30,6 +30,7 @@ pub mod access;
 pub mod digest;
 pub mod authorship;
 pub mod teamspaces;
+pub mod usage;
 
 pub const IMPORT_KIND: &str = "studio.event";
 /// A Studio-shaped write made on a node other than Studio Web (PC, phone, an AI via the hub).
@@ -220,6 +221,16 @@ impl Hub {
     /// Teamspace roles and shares alone (for /studio/api/teamspaces).
     pub fn teamspaces(&self) -> teamspaces::State {
         self.access().teams().cloned().unwrap_or_default()
+    }
+
+    /// BQ-1 step 3: this month's usage meters (per profile and teamspace) and the free limits, folded from the record.
+    /// `private_bytes` is each login's Private tier size, which only the hub's own store knows.
+    pub fn usage(&self, month: &str, private_bytes: &std::collections::BTreeMap<String, u64>) -> usage::State {
+        let (docs, _, _, _) = self.studio_events(0, usize::MAX);
+        let pairs: Vec<(&str, &Value)> = docs.iter().filter_map(|d| Some((d.get("doc_id")?.as_str()?, d.get("event")?))).collect();
+        let prof = self.profiles();
+        let teams = teamspaces::State::fold(prof.clone(), &self.owners, pairs.clone());
+        usage::State::fold(prof, teams, &self.owners, pairs, month, private_bytes)
     }
 
     /// One page of the shared record as `login` may see it: same cursor and total, members get only what's theirs.

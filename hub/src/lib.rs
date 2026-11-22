@@ -39,6 +39,10 @@
 //! GET  /studio/api/teamspaces → {teamspaces:[{id,label,role,invited,members,invites}]}: the ones you're in or invited to
 //!                            (BQ-1 step 2). Writes that break a teamspace rule (hub_core::teamspaces) are refused 403
 //!                            {teamspace_refused: true} with the rule in words and logged as outcome "refused: teamspace".
+//! GET  /studio/api/usage → this month's meters for your profiles (the window's first) and teamspaces, the free limits
+//!                            and the limits node (BQ-1 step 3, hub_core::usage). At 100% of a limit AI calls and flow runs
+//!                            are refused with "Monthly free limit reached; a top-up will be available soon", logged as
+//!                            outcome "refused: limit"; storage is warn-only. Notices at 80%/100% go to the owners' queue.
 //! GET  /studio/api/private  ?path=data/users/<you>/... → {events:[{doc_id,event}]}: your private items (I1, Q53 A)
 //! POST /studio/api/private  {path, doc_id, event}: one private event, sealed with your own key (hub_core::private)
 //! POST /studio/api/private/batch  {items:[{path, key, event}]}: up to 200 private events, checked whole (M1 d)
@@ -100,6 +104,9 @@ fn random_hex(n: usize) -> Result<String> {
     getrandom::getrandom(&mut b).map_err(|e| Error::RustError(e.to_string()))?;
     Ok(hex::encode(b))
 }
+
+/// BQ-1 step 3: one flow run's AI-call allowance (None: no limit applies) and the calls made so far.
+struct AiBudget { left: Option<u64>, used: u64 }
 
 fn json_status(v: &serde_json::Value, status: u16) -> Result<Response> {
     let h = Headers::new();
@@ -562,7 +569,9 @@ impl Record {
         Ok(flows::as_items(body, cfg.get("list").and_then(|v| v.as_str()).unwrap_or("")))
     }
 
-    async fn step_ai(&self, cfg: &serde_json::Value, items: Vec<serde_json::Value>, login: &str) -> std::result::Result<Vec<serde_json::Value>, String> {
+    /// BQ-1 step 3: `budget` is the run's AI-call allowance (None: no limit, e.g. the hub owner's Developer profile) and
+    /// how many calls this step has made. One answered item is one AI call; at the limit the step stops with the refusal.
+    async fn step_ai(&self, cfg: &serde_json::Value, items: Vec<serde_json::Value>, login: &str, budget: &mut AiBudget) -> std::result::Result<Vec<serde_json::Value>, String> {
         let key = self.node_secret(cfg.get("secret").and_then(|v| v.as_str()).unwrap_or("GEMINI"))?;
         let model = cfg.get("model").and_then(|v| v.as_str()).unwrap_or("gemini-flash-latest");
         if !model.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
@@ -589,6 +598,7 @@ impl Record {
         let mut used: Option<String> = None;
         for (i, mut it) in items.into_iter().enumerate() {
             if i < max {
+                if budget.left.is_some_and(|l| budget.used >= l) { return Err(hub_core::usage::REFUSAL.to_string()); }
                 let body = serde_json::json!({"contents": [{"parts": [{"text": flows::render(prompt, &flows::with_vars(&it, &vars))}]}]}).to_string();
                 let mut last = String::new();
                 let mut text = None;
@@ -605,6 +615,7 @@ impl Record {
                     }
                 }
                 let text = text.ok_or(format!("{last} (tried again and with the lighter model; try later)"))?;
+                budget.used += 1;
                 if let Some(m) = it.as_object_mut() { m.insert(set.clone(), serde_json::json!(text)); }
             }
             out.push(it);
@@ -678,7 +689,55 @@ impl Record {
         Ok(())
     }
 
-    async fn run_flow(&self, board: &str, start: &str, login: &str, now: i64, slot: Option<&str>) -> Result<serde_json::Value> {
+    /// Each login's Private tier size in bytes (sealed rows included: they are still held). Never their contents.
+    fn private_sizes(&self) -> std::collections::BTreeMap<String, u64> {
+        #[derive(Deserialize)]
+        struct R { owner: String, n: f64 }
+        let rows: Vec<R> = self.private_tables().and_then(|sql| sql.exec("SELECT owner, SUM(LENGTH(blob)) AS n FROM private GROUP BY owner", None)?.to_array())
+            .unwrap_or_default();
+        rows.into_iter().map(|r| (r.owner, r.n.max(0.0) as u64)).collect()
+    }
+
+    /// BQ-1 step 3: this month's meters and limits, as the record and the private store say now.
+    fn usage_state(&self, now: i64) -> hub_core::usage::State {
+        let private = self.private_sizes();
+        self.hub.borrow().as_ref().unwrap().usage(&hub_core::usage::month_ms(now), &private)
+    }
+
+    /// Raise the 80% / 100% notices that are due (each once per scope, meter and month: its id says which).
+    fn usage_notices(&self, now: i64) {
+        let st = self.usage_state(now);
+        for n in st.due_notices() {
+            let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if id.is_empty() || self.hub.borrow().as_ref().unwrap().knows_item(&id) { continue; }
+            let outcome = match self.runner_write("item.create", None, n, "usage meter", now) { Ok(_) => "raised".to_string(), Err(e) => format!("failed: {}", e.chars().take(100).collect::<String>()) };
+            self.log(now, "/usage", "notice", &outcome, &id);
+        }
+    }
+
+    /// For the live responder (51a, PR #56): call before each answer with the session item. Ok(scope) to go ahead and
+    /// put `"usage": hub_core::usage::usage_body(&scope, 0, 1)` in the answer's body; Err(words) at the limit, logged
+    /// as "refused: limit". (Answers without the field are still counted, on the session's meter.)
+    #[allow(dead_code)]
+    fn usage_allow_ai(&self, item: &str, now: i64) -> std::result::Result<String, String> {
+        let st = self.usage_state(now);
+        let scope = st.scope_of(item).unwrap_or_else(|| "hub".into());
+        match st.allow(&scope, hub_core::usage::Meter::AiCalls, 1) {
+            Ok(()) => Ok(scope),
+            Err(e) => { self.log(now, "/live-responder", "ai", hub_core::usage::REFUSED_OUTCOME, &scope); Err(e) }
+        }
+    }
+
+    async fn run_flow(&self, board: &str, start: &str, login: &str, now: i64, slot: Option<&str>, profile: Option<&str>) -> Result<serde_json::Value> {
+        // BQ-1 step 3: a run is refused at the monthly free limit (the hub owner's Developer profile is exempt)
+        use hub_core::usage::{self as us, Meter};
+        let meter = self.usage_state(now);
+        let scope = meter.scope_for_run(board, profile, login);
+        if let Err(e) = meter.allow(&scope, Meter::Runs, 1) {
+            return Ok(serde_json::json!({"ok": false, "error": e, "refused_limit": true, "scope": scope, "board": board, "start": start, "steps": []}));
+        }
+        let mut budget = AiBudget { left: meter.left(&scope, Meter::AiCalls), used: 0 };
+        let mut refused_limit = false;
         let evs = self.all_events();
         let flow = flows::fold(&evs, board);
         let order = match flows::plan(&flow, start) {
@@ -699,7 +758,7 @@ impl Record {
                 "fetch" => self.step_fetch(&node.config).await,
                 "filter" => flows::filter(input, &node.config),
                 "calc" => flows::calc(input, &node.config),
-                "ai" => self.step_ai(&node.config, input, login).await,
+                "ai" => self.step_ai(&node.config, input, login, &mut budget).await,
                 "post" => self.step_post(&node.config, input, login, now).await,
                 other => Err(format!("unknown step {other}")),
             };
@@ -708,12 +767,18 @@ impl Record {
                     steps.push(serde_json::json!({"id": id, "step": node.step, "ok": true, "count": items.len(), "sample": flows::sample(&items, 3)}));
                     outs.insert(id.clone(), items);
                 }
-                Err(e) => { failed = true; steps.push(serde_json::json!({"id": id, "step": node.step, "ok": false, "error": e})); }
+                Err(e) => {
+                    if e == us::REFUSAL { refused_limit = true; self.log(now, "/flow", "ai", us::REFUSED_OUTCOME, &scope); }
+                    failed = true; steps.push(serde_json::json!({"id": id, "step": node.step, "ok": false, "error": e}));
+                }
             }
         }
-        let mut summary = serde_json::json!({"board": board, "start": start, "ok": !failed, "by": login, "steps": steps});
+        let mut summary = serde_json::json!({"board": board, "start": start, "ok": !failed, "by": login, "steps": steps,
+            "usage": us::usage_body(&scope, 1, budget.used)});
+        if refused_limit { summary["refused_limit"] = serde_json::json!(true); summary["error"] = serde_json::json!(us::REFUSAL); }
         if let Some(sl) = slot { summary["slot"] = serde_json::json!(sl); }
         let _ = self.runner_write("flow.run", None, summary.clone(), login, now);
+        self.usage_notices(now);
         Ok(summary)
     }
 
@@ -1075,6 +1140,11 @@ impl Record {
                         json_status(&serde_json::json!({"login": l, "id": if email_account { format!("email:{l}") } else { format!("github:{l}") },
                             "label": acc.label_of(&l), "owner": acc.is_owner(&l), "spaces": acc.grants_of(&l)}), 200)?
                     }
+                    (Method::Get, "/studio/api/usage", Some(l)) => {
+                        // BQ-1 step 3: your meters (profiles and teamspaces you're a member or owner of); never anyone else's
+                        let v = self.usage_state(now).view_for(&l, profile_hdr.as_deref());
+                        json_status(&v, 200)?
+                    }
                     (Method::Get, "/studio/api/teamspaces", Some(l)) => {
                         // BQ-1 step 2: the teamspaces you're in (with your role) or invited to; never anyone else's
                         let v = self.hub.borrow().as_ref().unwrap().teamspaces().view_for(&l);
@@ -1129,8 +1199,10 @@ impl Record {
                             let body: serde_json::Value = req.json().await.unwrap_or(serde_json::Value::Null);
                             let board = body.get("board").and_then(|v| v.as_str()).unwrap_or("main").to_string();
                             let start = body.get("start").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let res = self.run_flow(&board, &start, &l, now, None).await?;
-                            self.log(now, "/studio/api/run", "run", if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) { "ok" } else { "failed" }, &l);
+                            let res = self.run_flow(&board, &start, &l, now, None, profile_hdr.as_deref()).await?;
+                            let outcome = if res.get("refused_limit").and_then(|v| v.as_bool()).unwrap_or(false) { hub_core::usage::REFUSED_OUTCOME }
+                                else if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) { "ok" } else { "failed" };
+                            self.log(now, "/studio/api/run", "run", outcome, &l);
                             json_status(&res, 200)?
                         }
                     }
@@ -1514,10 +1586,13 @@ impl DurableObject for Record {
         self.state.storage().set_alarm(3_600_000 - now.rem_euclid(3_600_000) + 60_000).await?;
         let due = flows::due(&self.all_events(), now);
         for (board, start, slot) in &due {
-            let res = self.run_flow(board, start, "schedule", now, Some(slot)).await?;
+            let res = self.run_flow(board, start, "schedule", now, Some(slot), None).await?;
             let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-            self.log(now, "/alarm", "schedule", if ok { "ok" } else { "failed" }, "schedule");
+            let refused = res.get("refused_limit").and_then(|v| v.as_bool()).unwrap_or(false);
+            self.log(now, "/alarm", "schedule", if refused { hub_core::usage::REFUSED_OUTCOME } else if ok { "ok" } else { "failed" }, "schedule");
         }
+        // BQ-1 step 3: storage is warn-only and grows with every write, so its notices are checked hourly
+        self.usage_notices(now);
         Response::ok(format!("ran {}", due.len()))
     }
 

@@ -1495,13 +1495,13 @@ async def s55_nav_collapsed_expanded(b):
 
 
 async def s56_sections_reach_views(b):
-    """NAV-2: every one of the 14 views is reachable from the new bar. Private holds ActionMap, List, Version tree, My
-    queue, Ask, Capture and Pack; Teamspaces holds Teamspaces (BQ-1 step 2), Builders, Money, Hub and Show; Settings holds Runs, Developer mode,
+    """NAV-2: every one of the 15 views is reachable from the new bar. Private holds ActionMap, List, Version tree, My
+    queue, Ask, Capture and Pack; Teamspaces holds Teamspaces (BQ-1 step 2), Builders, Money, Hub and Show; Settings holds Runs, Usage (BQ-1 step 3), Developer mode,
     theme, Point, branch and Classic tabs; Search goes to an address or adds a command (Command map); Explore is a
     placeholder; the avatar menu has the account and profiles (inside claude.ai there is no profile list, so the new-window
     entry is disabled there; s60 covers it served by the hub); as-of sits on the canvas."""
     st = Store(); p = await open_page(b, st, {"classic": False})
-    want = {"private": ["map", "list", "tree", "queue", "ask", "capture", "pack"], "teams": ["spaces", "builders", "money", "hub"], "settings": ["runs", "self"]}
+    want = {"private": ["map", "list", "tree", "queue", "ask", "capture", "pack"], "teams": ["spaces", "builders", "money", "hub"], "settings": ["runs", "usage", "self"]}
     reached, missing = [], []
     for sec, views in want.items():
         await nav_open(p); await p.click(f"#sections [data-s={sec}]"); await p.wait_for_timeout(150)
@@ -1525,8 +1525,8 @@ async def s56_sections_reach_views(b):
     menu = await p.evaluate("""() => { const m = document.querySelector('#avatarMenu'), w = document.querySelector('#profWindow');
       return !m.hidden && w.disabled && w.title === 'No profile to open' && m.querySelectorAll('#profList li').length >= 1 && !!m.querySelector('#signOut') && m.textContent.includes('Signed in'); }""")
     await p.keyboard.press("Escape"); await p.wait_for_timeout(100)
-    ok = (not missing and len(reached) == 14 and show_in_teams and settings_ctl and dev_named and explore and went and cmd and asof_on_canvas and menu and not p.errors)
-    return ok, (f"views reached={len(reached)}/14 missing={missing}, Live and Show in Teamspaces={show_in_teams}, Settings controls={settings_ctl}, Developer mode={dev_named}, "
+    ok = (not missing and len(reached) == 15 and show_in_teams and settings_ctl and dev_named and explore and went and cmd and asof_on_canvas and menu and not p.errors)
+    return ok, (f"views reached={len(reached)}/15 missing={missing}, Live and Show in Teamspaces={show_in_teams}, Settings controls={settings_ctl}, Developer mode={dev_named}, "
                 f"Explore placeholder={explore}, search address={went}, search command={cmd}, as-of on canvas={asof_on_canvas}, avatar menu={menu}, errors={p.errors[:1]}")
 
 
@@ -1793,6 +1793,12 @@ async def open_teams_hub(browser, H, login, owner):
             return await js({"id": b["doc_id"], "imported": 1})
         if path == "/studio/api/private":
             return await js({"error": "no private store"}, 503)
+        if path == "/studio/api/usage" and "usage" in H:   # BQ-1 step 3: the hub's meters for this login
+            H.setdefault("usage_hdr", []).append(req.headers.get("x-nodach-profile"))
+            return await js(H["usage"](login) if callable(H["usage"]) else H["usage"])
+        if path == "/studio/api/run" and req.method == "POST" and "run" in H:
+            H.setdefault("runs", []).append(json.loads(req.post_data or "{}"))
+            return await js(H["run"])
         return await route.fulfill(status=404, body="")
     ctx = await browser.new_context(viewport={"width": 1440, "height": 900}, accept_downloads=True)
     await ctx.add_init_script(nav_init(False))
@@ -1953,6 +1959,138 @@ async def s67_teamspace_export(b):
                 f"member has no export={no_export_for_member}, errors={(p.errors + n2.errors + p2.errors)[:1]}")
 
 
+# ---------------------------------------------------------------- BQ-1 step 3: usage meter and free limits
+REFUSAL = "Monthly free limit reached; a top-up will be available soon"
+
+
+def meter(label, used, limit, enforced=True):
+    pct = used * 100 // limit if limit else (100 if used else 0)
+    return {"label": label, "used": used, "limit": limit, "pct": pct, "enforced": enforced, "refused": enforced and used >= limit}
+
+
+def usage_view(login):
+    """What the hub's /studio/api/usage gives (hub_core::usage::State::view_for): Nowed's Personal profile at 80% of
+    AI calls, his Developer profile (exempt), and the Insydr pilot teamspace at its run limit."""
+    lim = {"ai_calls": 500, "runs": 2000, "storage_bytes": 1000000000, "placeholder": True, "node": None, "version": 0}
+    rows = [
+        {"scope": f"P-{login.lower()}", "kind": "profile", "label": "Personal", "profile_kind": "personal", "active": True, "exempt": False, "notices": [],
+         "meters": {"ai_calls": meter("AI calls", 400, 500), "runs": meter("flow runs", 120, 2000), "storage_bytes": meter("stored bytes", 52_000_000, 1_000_000_000, False)}},
+        {"scope": "P-dev", "kind": "profile", "label": "Developer", "profile_kind": "developer", "active": False, "exempt": True, "notices": [],
+         "meters": {"ai_calls": meter("AI calls", 900, 500), "runs": meter("flow runs", 10, 2000), "storage_bytes": meter("stored bytes", 1000, 1_000_000_000, False)}},
+        {"scope": "TS-pilot", "kind": "teamspace", "label": "Insydr pilot", "role": "owner", "exempt": False, "notices": [],
+         "meters": {"ai_calls": meter("AI calls", 20, 500), "runs": meter("flow runs", 2000, 2000), "storage_bytes": meter("stored bytes", 900_000_000, 1_000_000_000, False)}},
+    ]
+    return {"month": "2026-11", "limits": lim, "limits_node": "PLAN-limits", "refusal": REFUSAL, "warn_pct": 80, "meters": rows}
+
+
+async def to_usage(p):
+    await nav_open(p); await p.click("#sections [data-s=settings]"); await p.wait_for_timeout(120)
+    await p.click("#subnav [data-sv=usage]"); await p.wait_for_timeout(500)
+
+
+async def s68_usage_bars(b):
+    """BQ-1 step 3: Nowed opens Settings → Usage. He sees one card per meter scope: his Personal profile first (this
+    window's), with AI calls at 80% (amber, "notice sent"), his Developer profile marked exempt, and the Insydr pilot
+    teamspace with runs at the limit (red, "refused"). The free limits read 500 AI calls, 2,000 runs, 1 GB, marked as
+    placeholders, and the hub was asked as this window's profile."""
+    H = team_hub(); H["usage"] = usage_view
+    p = await open_teams_hub(b, H, "Morami49", True)
+    await to_usage(p)
+    scopes = await p.evaluate("[...document.querySelectorAll('#useMeters [data-scope]')].map(c => c.dataset.scope)")
+    ai = await p.evaluate("document.querySelector('[data-scope=P-morami49] [data-meter=ai_calls] .ubar').className")
+    ai_txt = await p.inner_text("[data-scope=P-morami49] [data-meter=ai_calls]")
+    runs_cls = await p.evaluate("document.querySelector('[data-scope=TS-pilot] [data-meter=runs] .ubar').className")
+    runs_txt = await p.inner_text("[data-scope=TS-pilot] [data-meter=runs]")
+    dev = await p.inner_text("[data-scope=P-dev]")
+    store_txt = await p.inner_text("[data-scope=TS-pilot] [data-meter=storage_bytes]")
+    nums = await p.inner_text("#useNums"); placeholder = await p.locator("#usePlaceholder").count() == 1
+    hdr = H.get("usage_hdr", [])
+    ok = (scopes == ["P-morami49", "P-dev", "TS-pilot"] and "warn" in ai and "400 / 500" in ai_txt and "notice sent" in ai_txt
+          and "full" in runs_cls and "refused" in runs_txt and "exempt" in dev and "warn only" not in store_txt and "900.0 MB" in store_txt
+          and "500 AI calls" in nums and "2,000 flow runs" in nums and "1 GB" in nums and placeholder and hdr and hdr[-1] == "P-morami49" and not p.errors)
+    return ok, (f"cards={scopes}, AI bar={ai!r} {ai_txt.strip()!r}, team runs={runs_cls!r} {runs_txt.strip()!r}, dev exempt={'exempt' in dev}, "
+                f"limits={nums!r} placeholder={placeholder}, asked as={hdr[-1:] }, errors={p.errors[:1]}")
+
+
+async def s69_usage_notice_in_queue(b):
+    """BQ-1 step 3: the hub raised an urgent notice for Nowed (AI calls at 80% in his Personal profile). It sits at the
+    top of his My queue marked urgent, with a Usage button that opens the meters and Mark seen, which writes one status
+    and takes it out of the queue. Nassar, whose queue it isn't, never sees it in his."""
+    H = team_hub(); H["usage"] = usage_view
+    notice = {"id": "USE-2026-11-ai_calls-80-P-morami49", "type": "notice", "title": "Usage: AI calls at 80% of the monthly free limit in profile Personal",
+              "body": "400 of 500 AI calls used in 2026-11 (UTC).", "status": "open", "refs": ["FUN-1", "PLAN-limits"],
+              "meta": {"queue": ["morami49"], "urgent": True, "lane": "owner", "usage": {"scope": "P-morami49", "meter": "ai_calls", "threshold": 80, "used": 400, "limit": 500, "month": "2026-11"}}}
+    H["docs"].append({"doc_id": "Q-older", "event": {"ts": "2026-11-01T09:00:00.000Z", "kind": "item.create", "item": None, "branch": "main",
+        "body": {"id": "Q-older", "type": "question", "title": "An older question", "status": "open"}, "author": {"id": "github:Morami49", "label": "Morami49", "role": "owner"}}})
+    H["docs"].append({"doc_id": "hub-notice", "event": {"ts": "2026-11-22T10:00:00.000Z", "kind": "item.create", "item": None, "branch": "main", "body": notice,
+        "author": {"id": "flow:runner", "label": "Flow runner (for usage meter)", "role": "agent"}, "via": "flow-runner"}})
+    p = await open_teams_hub(b, H, "Morami49", True)
+    await nav_open(p); await p.click("#sections [data-s=private]"); await p.wait_for_timeout(120)
+    await p.click("#subnav [data-sv=queue]"); await p.wait_for_timeout(300)
+    first = await p.evaluate("document.querySelector('#queueList li[data-q]')?.dataset.q")
+    urgent = await p.locator(f"#queueList li[data-q='{notice['id']}'] [data-urgent]").count() == 1
+    await p.click(f"#queueList li[data-q='{notice['id']}'] [data-qusage]"); await p.wait_for_timeout(400)
+    to_usage_view = await p.evaluate("S.view") == "usage"
+    await p.evaluate("show('queue')"); await p.wait_for_timeout(200)
+    await p.click(f"#queueList li[data-q='{notice['id']}'] [data-qdone]"); await p.wait_for_timeout(400)
+    st_ev = [x["event"] for x in H["posts"] if x["event"]["kind"] == "status"]
+    gone = await p.locator(f"#queueList li[data-q='{notice['id']}']").count() == 0
+    n = await open_teams_hub(b, H, "nassar", False)
+    await n.evaluate("show('queue')"); await n.wait_for_timeout(250)
+    not_his = await n.locator(f"#queueList li[data-q='{notice['id']}']").count() == 0
+    ok = (first == notice["id"] and urgent and to_usage_view and len(st_ev) == 1 and st_ev[0]["item"] == notice["id"] and st_ev[0]["body"]["status"] == "done"
+          and gone and not_his and not (p.errors + n.errors))
+    return ok, (f"top of queue={first}, urgent={urgent}, Usage button opens meters={to_usage_view}, mark seen wrote={[(e['item'], e['body']) for e in st_ev]}, "
+                f"left queue={gone}, not in Nassar's queue={not_his}, errors={(p.errors + n.errors)[:1]}")
+
+
+async def s70_limits_change_is_a_proposal(b):
+    """BQ-1 step 3: the limits are a node. Nowed (hub owner) clicks Create the limits node: PLAN-limits is made with the
+    placeholder numbers, marked placeholder, and the card links to it. He then types 800 AI calls and clicks Propose
+    new limits: on production that writes a change proposal (status proposed, target PLAN-limits) and the limits
+    themselves stay as they were. Nassar, not an owner, gets no create or propose controls."""
+    H = team_hub(); H["usage"] = usage_view
+    p = await open_teams_hub(b, H, "Morami49", True)
+    await to_usage(p)
+    await p.click("#useMakeLimits"); await p.wait_for_timeout(500)
+    made = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "item.create" and x["event"]["body"].get("id") == "PLAN-limits"), None)
+    val = json.loads(made["body"]["value"]) if made else {}
+    linked = await p.locator("#useOpenLimits").count() == 1
+    await p.fill("#useAi", "800"); await p.click("#usePropose"); await p.wait_for_timeout(500)
+    cr = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "item.create" and x["event"]["body"].get("type") == "change"), None)
+    edits = [x for x in H["posts"] if x["event"]["kind"] == "item.edit" and x["event"].get("item") == "PLAN-limits"]
+    still = await p.inner_text("#useNums")
+    await p.click("#useOpenLimits"); await p.wait_for_timeout(300)
+    opened = await p.evaluate("S.sel") == "PLAN-limits"
+    n = await open_teams_hub(b, H, "nassar", False)
+    await to_usage(n)
+    no_controls = await n.locator("#useMakeLimits, #usePropose").count() == 0
+    ok = (made and val == {"ai_calls": 500, "runs": 2000, "storage_bytes": 1000000000, "placeholder": True} and made["body"].get("type") == "setting"
+          and linked and cr and cr["body"]["status"] == "proposed" and cr["body"]["meta"]["target"] == "PLAN-limits"
+          and json.loads(cr["body"]["meta"]["value"])["ai_calls"] == 800 and not edits and "500 AI calls" in still and opened and no_controls
+          and not (p.errors + n.errors))
+    return ok, (f"node made={bool(made)} value={val}, linked={linked}, proposal={cr and (cr['body']['status'], cr['body']['meta']['target'])}, "
+                f"direct edits={len(edits)}, limits still={still!r}, opens node={opened}, no controls for Nassar={no_controls}, errors={(p.errors + n.errors)[:1]}")
+
+
+async def s71_run_refused_at_limit(b):
+    """BQ-1 step 3: at the monthly limit Nowed presses Run from here on a step. The hub refuses the run, and the step
+    panel says so in the hub's words ("Monthly free limit reached; a top-up will be available soon"); Studio stays
+    writable and nothing else is written by the page."""
+    H = team_hub(); H["run"] = {"ok": False, "error": REFUSAL, "refused_limit": True, "scope": "P-morami49", "steps": []}
+    p = await open_teams_hub(b, H, "Morami49", True)
+    sid = "S-fetch1"
+    await p.evaluate(f"write('flow.node', null, {{board: BOARD, id: '{sid}', step: 'fetch', title: 'Reed', config: {{url: 'https://www.reed.co.uk/api/1.0/search'}}, x: 0, y: 0}})")
+    await p.wait_for_timeout(300)
+    await p.evaluate(f"selectStep('{sid}')"); await p.wait_for_selector("#stRun", timeout=10000)
+    before = len(H["posts"])
+    await p.click("#stRun"); await p.wait_for_timeout(600)
+    out = await p.inner_text("#stOut")
+    still = await p.evaluate("S.canWrite !== false")
+    ok = REFUSAL in out and "stopped" in out and len(H.get("runs", [])) == 1 and H["runs"][0].get("start") == sid and len(H["posts"]) == before and still and not p.errors
+    return ok, f"panel says={out.strip()[:90]!r}, runs asked={len(H.get('runs', []))}, writes by the page={len(H['posts']) - before}, writable={still}, errors={p.errors[:1]}"
+
+
 SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock, s05_branch_awareness, s06_view_only_client,
              s07_names, s08_long_history, s09_ai_relay, s10_keyboard_list, s11_offline_capture, s12_member_rights,
              s13_two_people_at_once, s14_phone, s15_undo_old_status, s16_overwhelm, s17_disagreement, s18_clock_skew, s19_private_area,
@@ -1964,7 +2102,8 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s52_live_connector_reply_in_seconds, s53_live_states,
              s54_sign_out_switch_account, s55_nav_collapsed_expanded, s56_sections_reach_views, s57_esc_touch_keyboard, s58_classic_tabs,
              s59_dev_mode_proposes, s60_profile_new_window, s61_profile_strip_shown, s62_write_carries_profile, s63_refused_write_shows_message,
-             s64_teamspace_create, s65_teamspace_invite, s66_guest_cant_see_unshared, s67_teamspace_export]
+             s64_teamspace_create, s65_teamspace_invite, s66_guest_cant_see_unshared, s67_teamspace_export,
+             s68_usage_bars, s69_usage_notice_in_queue, s70_limits_change_is_a_proposal, s71_run_refused_at_limit]
 
 
 async def main():
