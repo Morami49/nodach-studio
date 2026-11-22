@@ -16,8 +16,15 @@ def test_dark_theme_and_brand_colours_present():
 
 def test_token_names_unique():
     t = json.loads(TOKENS.read_text(encoding="utf-8"))
-    names = [x["name"] for fam in ("color", "spacing", "radius") for x in t[fam]["tokens"]]
+    fams = [k for k, v in t.items() if isinstance(v, dict) and "tokens" in v]
+    names = [x["name"] for fam in fams for x in t[fam]["tokens"]]
     assert len(names) == len(set(names))
+
+
+def test_motion_tokens_present():
+    css = CSS.read_text(encoding="utf-8")
+    for n in ("--duration-nav-open-delay: 150ms;", "--duration-hover: 180ms;", "--easing-out: cubic-bezier(0, 0, 0.58, 1);"):
+        assert n in css, n
 
 
 if __name__ == "__main__":
