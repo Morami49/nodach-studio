@@ -1,0 +1,36 @@
+name: restore-drill
+# P1 c (INC-261118-seed, AUD-secrets-state action 2), slice 1: monthly, export each hub's shared record (/status +
+# every /pull page), rebuild a fresh hub from it with the engine's own code, and check nothing was lost, refused or
+# changed. Read-only: nothing is written to any hub, no secret is made or changed, and the export lives only in a
+# temp file on the runner. The report holds counts and checksums only. Drift opens an issue.
+# Later slices: Private tier export/reimport with a staging test owner; a Durable Object point-in-time restore.
+on:
+  schedule: [{cron: "17 5 3 * *"}]
+  workflow_dispatch:
+permissions: {contents: read, issues: write}
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {env: staging, url: "https://staging.nodach.com", token: HUB_STAGING_TOKEN}
+          - {env: production, url: "https://studio.nodach.com", token: HUB_WRITE_TOKEN}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build the rebuild step
+        working-directory: engine
+        run: cargo build -q --release -p hub-core --example restore_drill
+      - name: Export, rebuild, compare
+        id: drill
+        env: {HUB_TOKEN: "${{ secrets[matrix.token] }}"}
+        run: |
+          [ -n "$HUB_TOKEN" ] || { echo "::warning::no token for ${{ matrix.env }}; skipped"; exit 0; }
+          set -o pipefail
+          python3 scripts/restore_drill.py "${{ matrix.env }}" "${{ matrix.url }}" | tee out.txt
+          echo "### ${{ matrix.env }}" >> "$GITHUB_STEP_SUMMARY"; cat out.txt >> "$GITHUB_STEP_SUMMARY"
+      - if: failure() && steps.drill.outcome == 'failure'
+        env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+        run: |
+          gh issue create -R "${{ github.repository }}" --title "restore-drill: ${{ matrix.env }} failed" --body "$(cat out.txt 2>/dev/null || echo 'see the run log') (playbook: INC-261118-seed, AUD-secrets-state)" || true

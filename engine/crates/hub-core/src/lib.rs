@@ -22,6 +22,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod session;
 pub mod flows;
+pub mod drill;
 pub mod private;
 pub mod profiles;
 pub mod guard;
