@@ -27,6 +27,7 @@ pub mod profiles;
 pub mod guard;
 pub mod access;
 pub mod digest;
+pub mod authorship;
 
 pub const IMPORT_KIND: &str = "studio.event";
 /// A Studio-shaped write made on a node other than Studio Web (PC, phone, an AI via the hub).

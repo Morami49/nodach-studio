@@ -1119,15 +1119,14 @@ impl Record {
                             let ev = body.get("event").cloned().unwrap_or(serde_json::Value::Null);
                             let ok_ev = ev.get("kind").and_then(|v| v.as_str()).is_some() && ev.get("ts").and_then(|v| v.as_str()).is_some();
                             let kind = ev.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let subject = hub_core::access::subject(&ev);
-                            let allowed = self.hub.borrow().as_ref().unwrap().access().check_write(&l, &kind, subject.as_deref());
+                            // F-profile-kinds-spoofable: profile and access kinds only as yourself; members only as
+                            // themselves and inside their spaces (hub_core::authorship)
+                            let refused = hub_core::authorship::refusal(&self.hub.borrow().as_ref().unwrap().access(), &l, &ev);
                             if !valid_doc_id(&doc_id) || !ok_ev {
                                 json_status(&serde_json::json!({"error": "need {doc_id, event:{kind, ts, ...}}"}), 400)?
-                            } else if let Err(e) = allowed {
+                            } else if let Some(e) = refused {
+                                self.log(now, "/studio/api/events", &kind, "refused: author", &l);
                                 json_status(&serde_json::json!({"error": e, "refused": true}), 403)?
-                            } else if kind == "account.link" && !ev.pointer("/author/id").and_then(|v| v.as_str()).is_some_and(|a| a.eq_ignore_ascii_case(&format!("github:{l}"))) {
-                                // a sign-in link must be written by the account it links to (F-two-accounts-one-person)
-                                json_status(&serde_json::json!({"error": "account.link must be written by the signed-in account itself", "refused": true}), 403)?
                             } else {
                                 let importer = self.importer_key()?;
                                 let made = self.hub.borrow_mut().as_mut().unwrap().import(&importer, vec![(doc_id.clone(), ev)], now)
@@ -1401,13 +1400,13 @@ impl Record {
                     } else if tool == "import_studio_events" && m.get("id").is_some() {
                         // D-129 / Q99 A: Studio Web's events keep their own authors; the importer key vouches for the copy
                         let args = m.pointer("/params/arguments").cloned().unwrap_or_default();
-                        let forged = |docs: &Vec<(String, serde_json::Value)>| docs.iter().any(|(_, ev)| ev.get("kind").and_then(|k| k.as_str()) == Some("account.link")
-                            && !ev.pointer("/author/id").and_then(|v| v.as_str()).is_some_and(|a| a.eq_ignore_ascii_case(&format!("github:{login}"))));
+                        // F-profile-kinds-spoofable: the whole batch is refused if any doc claims an author it may not
+                        let refused = |docs: &Vec<(String, serde_json::Value)>| hub_core::authorship::batch_refusal(&self.hub.borrow().as_ref().unwrap().access(), &login, docs);
                         let v = match mcp::import_docs(&args) {
                             Err(e) => mcp::tool_result(serde_json::json!({"error": e}), true),
-                            // a sign-in link must be written by the account it links to (F-two-accounts-one-person)
-                            Ok(docs) if forged(&docs) => mcp::tool_result(serde_json::json!({"error": "account.link events can only be imported by the account that wrote them", "refused": true}), true),
-                            Ok(docs) => {
+                            Ok(docs) => if let Some(e) = refused(&docs) {
+                                mcp::tool_result(serde_json::json!({"error": e, "refused": true}), true)
+                            } else {
                                 let sent = docs.len();
                                 let importer = self.importer_key()?;
                                 let r = self.hub.borrow_mut().as_mut().unwrap().import(&importer, docs, now);
