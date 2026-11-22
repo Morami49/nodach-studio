@@ -873,11 +873,77 @@ async def s41_my_queue(b):
     return ok, f"queue={mine} (want {want}), badge={badge}/{len(ids)}, opened={opened}, writes={len(st.events)-before}, errors={p.errors[:1]}"
 
 
+
+async def open_served_studio(browser, me):
+    """Studio as the hub serves it: the real host shim (standalone.js) over a stand-in hub with sign-in and sign-out.
+    The stand-in keeps a session cookie; /studio/logout clears it, and /studio/api/* then answers 401."""
+    import urllib.parse
+    shim = (HERE.parent / "standalone.js").read_text()
+    H = {"signed_in": True, "visits": []}
+    html = ('<!doctype html><html lang=en><head><meta charset=utf-8><style>body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style>'
+            '<script>window.__nodachBuild="test";window.__nodachEnv="production";window.__nodachPollMs=60000;</script>'
+            f'<script>{shim}</script></head><body>{PAGE.read_text()}</body></html>')
+
+    async def serve(route):
+        req = route.request; path = urllib.parse.urlparse(req.url).path
+        H["visits"].append(path)
+        js = lambda v, status=200: route.fulfill(status=status, body=json.dumps(v), content_type="application/json")
+        if path == "/studio/logout":
+            H["signed_in"] = False
+            return await route.fulfill(body="<!doctype html><p>Signed out</p>", content_type="text/html",
+                                       headers={"set-cookie": "nodach_session=; Path=/; Max-Age=0"})
+        if path == "/studio/login":
+            return await route.fulfill(body="<!doctype html><title>Sign in</title><p id=login>Sign in</p>", content_type="text/html")
+        if path == "/health":
+            return await route.fulfill(body="ok test", content_type="text/plain")
+        if path in ("/studio", "/studio/"):
+            return await route.fulfill(body=html, content_type="text/html") if H["signed_in"] else await route.fulfill(status=302, headers={"location": "/studio/login"})
+        if path.startswith("/studio/api/") and not H["signed_in"]:
+            return await js({"error": "sign in"}, 401)
+        if path == "/studio/api/me":
+            return await js(me)
+        if path == "/studio/api/genesis":
+            return await js(GENESIS)
+        if path == "/studio/api/events":
+            return await js({"events": [], "next": 0, "total": 0}) if req.method == "GET" else await js({"imported": 1})
+        if path == "/studio/api/private":
+            return await js({"error": "no private store"}, 503)
+        return await route.fulfill(status=404, body="")
+    ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
+    await ctx.route("http://hub.test/**", serve)
+    page = await ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    await page.goto("http://hub.test/studio")
+    await page.wait_for_timeout(1200)
+    page.errors = errors; page.hub = H
+    return page
+
+
+async def s54_sign_out_switch_account(b):
+    """Signed in through a linked email, wants to switch to another account: the header shows who is signed in (login
+    and role, never an address) next to a Sign out / switch account link, which clears the session at /studio/logout
+    and lands on the sign-in page. Inside claude.ai (no hub) the link isn't shown."""
+    p = await open_served_studio(b, {"login": "Morami49", "id": "github:Morami49", "owner": True})
+    acct = await p.inner_text("#acct") if await p.locator("#acct:visible").count() else ""
+    shown = await p.locator("#signOut:visible").count() == 1
+    await p.click("#signOut"); await p.wait_for_url("**/studio/login", timeout=5000)
+    landed = p.url.endswith("/studio/login"); out = not p.hub["signed_in"]
+    order = [v for v in p.hub["visits"] if v in ("/studio/logout", "/studio/login")]
+    m = await open_served_studio(b, {"login": "email:0123456789abcdef", "id": "email:0123456789abcdef", "owner": False})
+    macct = await m.inner_text("#acct")
+    st = Store(); c = await open_page(b, st, {})
+    hidden_in_claude = await c.locator("#signOut:visible").count() == 0
+    ok = (acct == "Morami49 · owner" and shown and landed and out and order[:2] == ["/studio/logout", "/studio/login"]
+          and macct == "email account · member" and hidden_in_claude and not p.errors and not m.errors)
+    return ok, f"account={acct!r}, link shown={shown}, signed out={out}, went {order[:2]}, member shows {macct!r}, hidden in claude.ai={hidden_in_claude}, errors={(p.errors + m.errors)[:1]}"
+
 SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock, s05_branch_awareness, s06_view_only_client,
              s07_names, s08_long_history, s09_ai_relay, s10_keyboard_list, s11_offline_capture, s12_member_rights,
              s13_two_people_at_once, s14_phone, s15_undo_old_status, s16_overwhelm, s17_disagreement, s18_clock_skew, s19_private_area,
              s20_addresses, s21_money_settings, s22_duplicate_id, s23_same_order_everywhere,
-             s24_hub_sync, s25_more_than_1000, s26_hub_not_connected, s27_read_on_open, s28_push_after_clean_runs, s29_runs_timeline, s30_builder_pipeline, s31_content_cycles, s32_private_files_and_views, s33_studio_edits_studio, s34_command_map, s35_history_words, s36_canvas, s37_classic_map_fallback, s38_runnable_steps, s39_scheduled_steps, s40_point_mode, s41_my_queue]
+             s24_hub_sync, s25_more_than_1000, s26_hub_not_connected, s27_read_on_open, s28_push_after_clean_runs, s29_runs_timeline, s30_builder_pipeline, s31_content_cycles, s32_private_files_and_views, s33_studio_edits_studio, s34_command_map, s35_history_words, s36_canvas, s37_classic_map_fallback, s38_runnable_steps, s39_scheduled_steps, s40_point_mode, s41_my_queue,
+             s54_sign_out_switch_account]
 
 
 async def main():

@@ -5,7 +5,8 @@
 //! and reported as a finding with its reason (the same way F-19 ignores a second create), never deleted.
 //!
 //! Kinds (all Studio-shaped: {ts, kind, item, body, author}):
-//!   account.link       {identity, verified?}         link another sign-in to the author's account
+//!   account.link       {identity, verified?, account?, revoked?}   link another sign-in to the author's account;
+//!                      `revoked: true` unlinks it again (only the account it is linked to can do that)
 //!   profile.create     {id, kind, label, for?}       personal | developer | work | venture | public
 //!   profile.revoke     {profile}                     the Personal profile can't be revoked
 //!   profile.assign     {profile, items:[..], migration?}   owner_profile links; the latest one wins
@@ -16,6 +17,9 @@
 //! - One account per person. An account is named after the first sign-in seen (`acct:github:<login>`), and every
 //!   author gets one implicitly, with an implicit Personal profile `P-<login>`. Linking an identity that already
 //!   belongs to another account is refused: joining two accounts needs an explicit merge (not built yet).
+//! - A link always points at its author's own account: `account`, if given, must be the author (a link that points
+//!   at someone else's account is refused, whoever writes it). Signing in with a linked email then gives the
+//!   linked account's session instead of the email's own `e-` login (19 Nov 2026, F-two-accounts-one-person).
 //! - Email addresses never go into the shared record (D-nodach-trail): an email sign-in is linked as
 //!   `email:sha256:<64 hex>`; a raw address is refused.
 //! - A Developer profile is granted by the Nodach owner (author role `owner`) and can be revoked by the owner.
@@ -205,6 +209,25 @@ impl State {
         match s(ev, "kind") {
             "account.link" => {
                 let ident = normalise_identity(s(&b, "identity"))?;
+                match s(&b, "account") {
+                    "" => {}
+                    a if normalise_identity(a).ok().map(|i| account_id(&i)) == Some(me.clone()) || a == me => {}
+                    _ => return Err("a link can only point at your own account: sign in as that account to link it".into()),
+                }
+                if b.get("revoked").and_then(Value::as_bool) == Some(true) {
+                    if ident == format!("github:{login}") {
+                        return Err("an account's own sign-in can't be unlinked".into());
+                    }
+                    return match self.by_identity.get(&ident) {
+                        Some(a) if *a == me => {
+                            self.by_identity.remove(&ident);
+                            self.accounts.get_mut(&me).expect("ensured").identities.retain(|i| *i != ident);
+                            Ok(())
+                        }
+                        Some(_) => Err(format!("{ident} is linked to another account; only that account can unlink it")),
+                        None => Err(format!("{ident} isn't linked")),
+                    };
+                }
                 match self.by_identity.get(&ident) {
                     Some(a) if *a == me => Err(format!("{ident} is already linked to this account")),
                     Some(a) => Err(format!("{ident} already belongs to {a}; joining two accounts needs an explicit merge")),
@@ -337,6 +360,32 @@ impl State {
         normalise_identity(identity).ok().and_then(|i| self.by_identity.get(&i))
     }
 
+    /// The GitHub login an email sign-in is linked to, given the email's full SHA-256 (hex), if any.
+    pub fn linked_login_for_email_hash(&self, hash: &str) -> Option<String> {
+        let acct = self.account_of(&format!("email:sha256:{}", hash.trim()))?;
+        acct.strip_prefix("acct:github:").map(str::to_string)
+    }
+
+    /// The login a sign-in by email gets: the linked account's login if that email is linked, else `e-<hash16>`.
+    pub fn sign_in_login_for_email_hash(&self, hash: &str) -> Option<String> {
+        self.linked_login_for_email_hash(hash).or_else(|| crate::session::login_for_hash(hash))
+    }
+
+    /// The same for an emailed sign-in link, which carries only the `e-<hash16>` login: a linked email whose hash
+    /// starts with those 16 hex characters gives its account (none if two linked hashes share them; then the
+    /// `e-` login is kept unchanged).
+    pub fn sign_in_login_for_email_login(&self, e_login: &str) -> String {
+        let Some(prefix) = e_login.to_ascii_lowercase().strip_prefix(crate::session::EMAIL_LOGIN_PREFIX).map(str::to_string) else { return e_login.to_string() };
+        if prefix.len() != 16 { return e_login.to_string(); }
+        let hits: Vec<&String> = self.by_identity.iter()
+            .filter(|(i, _)| i.strip_prefix("email:sha256:").is_some_and(|h| h.starts_with(&prefix)))
+            .map(|(_, a)| a).collect();
+        match hits.as_slice() {
+            [a] => a.strip_prefix("acct:github:").map(str::to_string).unwrap_or_else(|| e_login.to_string()),
+            _ => e_login.to_string(),
+        }
+    }
+
     /// Everything one login may see about its own account: profiles (implicit Personal included), connections
     /// (secret_ref only, never values), assignment counts per profile, and findings on its events.
     pub fn view_for(&self, login: &str) -> Value {
@@ -455,6 +504,69 @@ mod tests {
         assert!(st.findings[0].reason.contains("explicit merge"), "same hash, other account");
         assert!(st.findings[1].reason.contains("explicit merge"), "b already has its own account");
         assert!(st.findings[2].reason.contains("never go into the shared record"));
+    }
+
+    // F-two-accounts-one-person (19 Nov 2026): one person signing in two ways must stay one person.
+    fn gmail() -> String { crate::session::email_hash("Owner.Test@Gmail.com") }
+
+    #[test]
+    fn a_linked_email_signs_in_as_the_owner() {
+        let h = gmail();
+        let st = fold(&[ev("account.link", "Morami49", "owner", json!({"identity": format!("email:sha256:{h}"), "account": "github:Morami49"}))]);
+        assert!(st.findings.is_empty(), "{:?}", st.findings);
+        assert_eq!(st.sign_in_login_for_email_hash(&h).as_deref(), Some("morami49"));
+        // the emailed link carries only e-<hash16>; it resolves the same way
+        let e = crate::session::email_login("owner.test@gmail.com");
+        assert_eq!(st.sign_in_login_for_email_login(&e), "morami49");
+    }
+
+    #[test]
+    fn an_unlinked_email_stays_its_own_e_login() {
+        let st = fold(&[ev("account.link", "Morami49", "owner", json!({"identity": format!("email:sha256:{}", gmail())}))]);
+        let other = crate::session::email_hash("someone@example.com");
+        assert_eq!(st.sign_in_login_for_email_hash(&other), crate::session::login_for_hash(&other));
+        let e = crate::session::email_login("someone@example.com");
+        assert_eq!(st.sign_in_login_for_email_login(&e), e);
+        assert_eq!(st.sign_in_login_for_email_login("Morami49"), "Morami49", "non-email logins pass through");
+    }
+
+    #[test]
+    fn a_link_for_someone_elses_account_is_ignored() {
+        let h = gmail();
+        let st = fold(&[
+            // a member tries to point the owner's Gmail at the owner (not their account) and at themselves via `account`
+            ev("account.link", "friend", "member", json!({"identity": format!("email:sha256:{h}"), "account": "github:Morami49"})),
+            ev("account.link", "friend", "owner", json!({"identity": format!("email:sha256:{h}"), "account": "acct:github:morami49"})),
+        ]);
+        assert_eq!(st.findings.len(), 2, "{:?}", st.findings);
+        assert!(st.findings.iter().all(|f| f.reason.contains("your own account")));
+        assert_eq!(st.sign_in_login_for_email_hash(&h), crate::session::login_for_hash(&h));
+        // once the owner links it, a later claim by someone else is refused, not merged
+        let st = fold(&[
+            ev("account.link", "Morami49", "owner", json!({"identity": format!("email:sha256:{h}")})),
+            ev("account.link", "friend", "member", json!({"identity": format!("email:sha256:{h}")})),
+        ]);
+        assert_eq!(st.sign_in_login_for_email_hash(&h).as_deref(), Some("morami49"));
+        assert!(st.findings[0].reason.contains("explicit merge"));
+    }
+
+    #[test]
+    fn revoking_a_link_reverts_the_sign_in() {
+        let h = gmail();
+        let link = json!({"identity": format!("email:sha256:{h}")});
+        let unlink = json!({"identity": format!("email:sha256:{h}"), "revoked": true});
+        let st = fold(&[
+            ev("account.link", "Morami49", "owner", link.clone()),
+            ev("account.link", "friend", "member", unlink.clone()),
+            ev("account.link", "Morami49", "owner", unlink.clone()),
+        ]);
+        assert_eq!(st.findings.len(), 1, "only the linked account can unlink: {:?}", st.findings);
+        assert_eq!(st.sign_in_login_for_email_hash(&h), crate::session::login_for_hash(&h));
+        assert!(!st.accounts["acct:github:morami49"].identities.iter().any(|i| i.starts_with("email:")));
+        // relinking after a revoke works, and the account's own sign-in can never be unlinked
+        let st = fold(&[ev("account.link", "Morami49", "owner", link.clone()), ev("account.link", "Morami49", "owner", unlink), ev("account.link", "Morami49", "owner", link)]);
+        assert_eq!(st.sign_in_login_for_email_hash(&h).as_deref(), Some("morami49"));
+        assert!(st.check(&ev("account.link", "Morami49", "owner", json!({"identity": "github:Morami49", "revoked": true}))).is_err());
     }
 
     #[test]

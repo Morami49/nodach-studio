@@ -167,6 +167,8 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <input id="asof" type="range" min="0" max="0" value="0" aria-label="View as of an earlier change">
     <span class="status live" id="when">live</span>
     <span class="status" id="conn">connecting…</span>
+    <span class="status mono" id="acct" hidden title="Signed in as"></span>
+    <a id="signOut" href="/studio/logout" hidden title="Sign out of Studio on this browser, then sign in again (with another account if you like)">Sign out / switch account</a>
     <button id="pointBtn" aria-pressed="false" title="Point mode: click any part of Studio and leave a note on it. Esc stops.">⌖ Point</button>
     <button id="theme" aria-label="Toggle theme" title="Toggle theme">◐</button>
   </div>
@@ -1701,6 +1703,25 @@ function renderMoney(){
 }
 for (const id of ["calcAmt","calcSales","calcClass"]) $("#"+id).oninput = renderMoney;
 
+/* ---------------------------------------------------------------- account (served by the hub only)
+   Who is signed in (login · owner/member, never an email address) and a way out: the hub's /studio/logout clears
+   the session cookie, then the sign-in page opens, where another account (GitHub or a linked email) can sign in. */
+async function showAccount(){
+  const a = $("#acct"), so = $("#signOut"); if (!a || !so) return;
+  let me = null;
+  try { const r = await fetch("/studio/api/me", {credentials:"same-origin", cache:"no-store"}); if (r.ok) me = await r.json(); } catch {}
+  const login = String(me?.login || "");
+  a.textContent = (/^email:/.test(login) ? "email account" : login && !login.includes("@") ? login : "signed in") + (me ? (me.owner ? " · owner" : " · member") : "");
+  a.hidden = false; so.hidden = false;
+  so.onclick = e => { e.preventDefault(); signOut(); };
+}
+async function signOut(){
+  const so = $("#signOut"); if (so) so.textContent = "Signing out…";
+  try { await fetch("/studio/logout", {credentials:"same-origin", cache:"no-store"}); }
+  catch { location.assign("/studio/logout"); return; }   // couldn't ask in the background: show the hub's signed-out page
+  location.assign("/studio/login");
+}
+
 /* ---------------------------------------------------------------- boot */
 (async function boot(){
   show(store.get("view") || (innerWidth < 600 ? "capture" : "map"));
@@ -1720,6 +1741,7 @@ for (const id of ["calcAmt","calcSales","calcClass"]) $("#"+id).oninput = render
     if (S.owner){ S.canEdit = true; S.canWrite = true; }
   }
   refresh();
+  if (window.__nodach?.standalone) showAccount();
   db.doc("seed/genesis").onSnapshot(s => { if (s.exists){ S.genesis = s.data(); refresh(); if (!s.metadata.fromCache){ clearTimeout(timer); $("#conn").textContent = "saved · shared"; $("#conn").className="status live"; } }
       else if (!s.metadata.fromCache){ clearTimeout(timer); $("#conn").textContent = "waiting for genesis"; } },
     () => { clearTimeout(timer); $("#conn").textContent = "store unavailable"; });
