@@ -58,6 +58,23 @@ nav button[aria-current="true"]{background:var(--ink);color:var(--surface)}
 #pointNote{position:fixed;z-index:32;background:var(--surface);color:var(--ink);border:1px solid var(--mute);border-radius:8px;padding:10px;width:min(360px,calc(100% - 24px));box-shadow:0 6px 24px rgba(0,0,0,.2)}
 #pointNote textarea{width:100%;box-sizing:border-box;min-height:70px}
 body.pointing, body.pointing *{cursor:crosshair!important}
+.ptBadge{position:fixed;z-index:31;pointer-events:none;background:#e0457b;color:#fff;font:600 11px/18px var(--mono,monospace);min-width:18px;height:18px;padding:0 4px;border-radius:9px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.3);box-sizing:border-box}
+.ptSel{outline:2px solid #e0457b!important;outline-offset:1px}
+#showBtn[aria-pressed="true"]{background:#c62828;color:#fff}
+#showBar{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:40;display:flex;gap:8px;align-items:center;flex-wrap:wrap;max-width:calc(100% - 24px);background:var(--surface);color:var(--ink);border:1px solid var(--mute);border-radius:10px;padding:8px 10px;box-shadow:0 6px 24px rgba(0,0,0,.25);font-size:13px}
+#showBar .rec{color:#c62828;font-weight:600}
+#showBar details{position:relative}
+#showBar details>div{position:absolute;bottom:calc(100% + 8px);left:0;background:var(--surface);border:1px solid var(--mute);border-radius:8px;padding:8px;min-width:240px;display:flex;flex-direction:column;gap:4px}
+#showLayer{position:fixed;inset:0;pointer-events:none;z-index:29}
+#showLayer svg,#showReplay svg{position:absolute;inset:0;width:100%;height:100%}
+#showNoteBox,#showStop{position:fixed;z-index:41;background:var(--surface);color:var(--ink);border:1px solid var(--mute);border-radius:8px;padding:10px;width:min(380px,calc(100% - 24px));box-shadow:0 6px 24px rgba(0,0,0,.25);display:flex;flex-direction:column;gap:6px}
+#showNoteBox textarea,#showStop textarea{width:100%;box-sizing:border-box;min-height:60px}
+#showReplay{position:fixed;inset:0;z-index:50;pointer-events:none}
+#showReplay .ctl{pointer-events:auto;position:absolute;left:50%;transform:translateX(-50%);bottom:14px;display:flex;gap:8px;align-items:center;background:var(--surface);color:var(--ink);border:1px solid var(--mute);border-radius:10px;padding:6px 10px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+#showReplay .cur{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:rgba(224,69,123,.85);box-shadow:0 0 0 4px rgba(224,69,123,.25)}
+.live-badge{color:#c62828;font:600 11px var(--mono,monospace)}
+.showlog li.reply .what{border-left:3px solid var(--accent);padding-left:6px}
+body.showing, body.showing *{cursor:crosshair!important}
 #asof{width:160px;accent-color:var(--accent)}
 .status{font:500 11px var(--mono);padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mute)}
 .status.live{color:var(--ok);border-color:var(--ok)}
@@ -158,7 +175,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <button data-v="builders">Builders</button>
     <button data-v="self">Studio</button>
   </nav>
-  <form id="goForm" class="row" style="gap:4px" role="search"><input id="goAddr" class="mono" placeholder="Go to: D-063@2 · R-261105-2#3.1 · repo/sha:path#L10" aria-label="Go to an address" style="width:300px;max-width:100%"><button>Go</button></form>
+  <form id="goForm" data-nodach-part="studio.goto" class="row" style="gap:4px" role="search"><input id="goAddr" class="mono" placeholder="Go to: D-063@2 · R-261105-2#3.1 · repo/sha:path#L10" aria-label="Go to an address" style="width:300px;max-width:100%"><button>Go</button></form>
   <span class="spacer"></span>
   <div class="rail" data-nodach-part="studio.rail">
     <label for="branch">branch</label>
@@ -170,6 +187,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <span class="status mono" id="acct" hidden title="Signed in as"></span>
     <a id="signOut" href="/studio/logout" hidden title="Sign out of Studio on this browser, then sign in again (with another account if you like)">Sign out / switch account</a>
     <button id="pointBtn" aria-pressed="false" title="Point mode: click any part of Studio and leave a note on it. Esc stops.">⌖ Point</button>
+    <button id="showBtn" aria-pressed="false" title="Show mode: record a demonstration (clicks, drawn strokes, notes, cursor) that chosen people can follow live and replay later. Esc stops.">● Show</button>
     <button id="theme" aria-label="Toggle theme" title="Toggle theme">◐</button>
   </div>
 </header>
@@ -177,9 +195,9 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
 
 <main>
   <section class="view" id="v-map">
-    <div class="mapbar" id="filters"></div>
-    <div id="canvas" hidden aria-label="Canvas of decisions, questions and other items. Drag to arrange, drag from a dot to link. The List view has the same items for keyboard and screen readers."></div>
-    <div id="cy" aria-label="Map of decisions, questions, terms, stories, assets and findings. The List view has the same items for keyboard and screen readers."></div>
+    <div class="mapbar" id="filters" data-nodach-part="map.filters"></div>
+    <div id="canvas" data-nodach-part="map.canvas" hidden aria-label="Canvas of decisions, questions and other items. Drag to arrange, drag from a dot to link. The List view has the same items for keyboard and screen readers."></div>
+    <div id="cy" data-nodach-part="map.classic" aria-label="Map of decisions, questions, terms, stories, assets and findings. The List view has the same items for keyboard and screen readers."></div>
   </section>
 
   <section class="view" id="v-list" hidden>
@@ -188,12 +206,12 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
         <input id="listQ" placeholder="Find by code, title or text" style="flex:1" aria-label="Find items">
         <select id="listT" aria-label="Type"><option value="">All types</option></select>
       </div>
-      <ul id="listView"></ul>
+      <ul id="listView" data-nodach-part="list.items"></ul>
     </div>
   </section>
 
   <section class="view" id="v-ask" hidden>
-    <div class="codebar">
+    <div class="codebar" data-nodach-part="ask.codes">
       <textarea id="codes" rows="3" placeholder="Answer in codes, one per line or in a row:&#10;Q1 A · Q3 B no prompts at night · T4 ok&#10;NEW an idea you want captured" aria-label="Answer in codes"></textarea>
       <div class="row">
         <label for="codeSource" class="mute">these answers come from</label>
@@ -203,7 +221,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
       </div>
     </div>
     <p class="mute" style="margin:0 0 12px">Each open item has a code that never changes. Answer one card, or many at once above. <span class="mono">ok</span> agrees, a letter picks an option, anything else is recorded as written.</p>
-    <div class="grid" id="askList"></div>
+    <div class="grid" id="askList" data-nodach-part="ask.cards"></div>
   </section>
 
   <section class="view" id="v-queue" hidden data-nodach-part="studio.queue">
@@ -228,7 +246,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
       <div class="row"><label for="capRefs" class="mute">links to</label><input id="capRefs" placeholder="D-044, S21, Q3 …" style="flex:1"></div>
       <div class="stack">
         <div class="row"><span class="eyebrow">Sketch</span><span class="spacer"></span><button id="padClear">Clear sketch</button></div>
-        <canvas id="pad" aria-label="Sketch pad"></canvas>
+        <canvas id="pad" data-nodach-part="capture.sketch" aria-label="Sketch pad"></canvas>
       </div>
       <div class="row"><button class="primary" id="capGo">Add to Studio</button><span class="mute" id="capNote"></span></div>
     </div>
@@ -238,13 +256,13 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <div class="stack">
       <h2>Version tree</h2>
       <p class="mute" style="margin:0">Every change is kept; nothing is overwritten. Fork from any point to try another direction in parallel, and merge back when it's settled.</p>
-      <div class="tree-wrap" id="treeSvg"></div>
+      <div class="tree-wrap" id="treeSvg" data-nodach-part="tree.graph"></div>
       <div class="row">
         <input id="forkName" placeholder="New branch name" aria-label="New branch name">
         <button id="forkGo">Fork at the point shown</button>
         <button id="mergeGo">Merge this branch into main</button>
       </div>
-      <ol class="log" id="eventLog"></ol>
+      <ol class="log" id="eventLog" data-nodach-part="tree.log"></ol>
     </div>
   </section>
 
@@ -285,7 +303,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
       <div class="row"><label for="runExec">Executor</label><select id="runExec"><option value="">all</option></select>
         <label for="runOutcome">Outcome</label><select id="runOutcome"><option value="">all</option><option value="success">succeeded</option><option value="failure">failed</option></select>
         <span class="mute" id="runCount"></span></div>
-      <ul class="log" id="runList"></ul>
+      <ul class="log" id="runList" data-nodach-part="runs.list"></ul>
     </div>
   </section>
 
@@ -329,8 +347,8 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
         <select id="cmdMode" aria-label="Agent mode"><option value="suggest">suggest</option><option value="act">act</option><option value="observe">observe</option></select>
         <span class="mute" id="cmdHear"></span></div>
       <div class="row"><input id="cmdText" placeholder="e.g. propose change weekly digest · capture idea venue list · move Amina to interviewed · approve CR-… · show runs · sync" style="flex:1" aria-label="Command"><button id="cmdGo">Add</button></div>
-      <svg id="cmdMap" role="img" aria-label="Command map" style="width:100%;height:360px;background:var(--raise);border:1px solid var(--line);border-radius:8px"></svg>
-      <div class="card" id="cmdPanel" hidden></div>
+      <svg id="cmdMap" data-nodach-part="command.map" role="img" aria-label="Command map" style="width:100%;height:360px;background:var(--raise);border:1px solid var(--line);border-radius:8px"></svg>
+      <div class="card" id="cmdPanel" data-nodach-part="command.panel" hidden></div>
       <p class="mute" style="margin:0;font-size:12px">Commands are kept in your private area. Speech uses your browser's built-in recognition where it has one (Chrome and Edge do); otherwise type. Wake word and desktop-wide listening come with the local ActionMap app.</p>
     </div>
   </section>
@@ -362,11 +380,11 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
       <h2>Context pack</h2>
       <p class="mute" style="margin:0">The current view as text any AI can read. Paste it into ChatGPT, Gemini or another Claude chat; paste their reply into Ask and pick who it came from.</p>
       <div class="row"><button class="primary" id="copyPack">Copy pack</button><label for="packPriv"><input type="checkbox" id="packPriv"> include my private items</label><span class="mute" id="packNote"></span></div>
-      <pre class="pack" id="pack"></pre>
+      <pre class="pack" id="pack" data-nodach-part="pack.text"></pre>
     </div>
   </section>
 
-  <aside id="inspector" class="closed" aria-label="Selected item">
+  <aside id="inspector" class="closed" aria-label="Selected item" data-nodach-part="item.panel">
     <div class="empty" id="inspEmpty">Select anything on the map or in the list to see its history, links and answers.</div>
     <div id="insp" hidden></div>
   </aside>
@@ -447,14 +465,14 @@ function fold(){
     const h = {id:e._id, ts:e.ts, kind:e.kind, author:e.author, body:e.body, branch:e.branch, gone:gone.has(e._id), reverted:reverted.has(e._id)};
     if (e.kind==="item.create" && items.has(e.body.id)){ h.dup = true; items.get(e.body.id).history.push(h); continue; } // F-19: a second create never replaces an item
     if (e.kind==="item.create"){ items.set(e.body.id, {id:e.body.id, type:e.body.type, title:e.body.title, body:e.body.body||"", status:e.body.status||"open",
-      refs:e.body.refs||[], sketch:e.body.sketch||null, source:e.body.source||null, private:!!e._private, value:e.body.value, meta:e.body.meta||null, answers:[], comments:[], history:[h], by:e.author}); continue; }
+      refs:e.body.refs||[], sketch:e.body.sketch||null, source:e.body.source||null, private:!!e._private, value:e.body.value, meta:e.body.meta||null, point:e.body.point||null, show:e.body.show||null, answers:[], comments:[], history:[h], by:e.author}); continue; }
     const it = items.get(e.item); if (!it) continue;
     if (e.kind==="retract"){ it.history.push(h); continue; }
     it.history.push(h);
     if (h.gone) continue;
     if (e.kind==="answer") it.answers.push(h);
     if (e.kind==="comment") it.comments.push(h);
-    if (e.kind==="item.edit"){ if (e.body.title!=null) it.title=e.body.title; if (e.body.body!=null) it.body=e.body.body; if (e.body.value!=null) it.value=e.body.value; if (e.body.meta) it.meta={...(it.meta||{}), ...e.body.meta}; }
+    if (e.kind==="item.edit"){ if (e.body.title!=null) it.title=e.body.title; if (e.body.body!=null) it.body=e.body.body; if (e.body.value!=null) it.value=e.body.value; if (e.body.meta) it.meta={...(it.meta||{}), ...e.body.meta}; if (e.body.show) it.show=e.body.show; }
     if (e.kind==="status"){ h.prev = it.status; it.status = e.body.status; }
     if (e.kind==="link") it.refs = [...new Set([...it.refs, ...(e.body.refs||[])])];
   }
@@ -812,6 +830,31 @@ function line(n, h, withUndo){
   return `<li class="${h.gone||h.reverted?"gone":""}"><span class="n">${n}</span><span><span class="mono mute">${esc((h.ts||"").slice(0,16).replace("T"," "))} · ${esc(who(h.author))}${h.branch&&h.branch!=="main"?" · "+esc(h.branch):""}</span>
     ${can?`<button class="link" data-revert="${esc(h.id)}">${h.kind==="status"?"Revert":"Take back"}</button>`:""}<br><span class="what">${describe(h)}</span>${h.gone?' <span class="mute">(taken back)</span>':h.reverted?' <span class="mute">(reverted)</span>':""}</span></li>`;
 }
+/* Show items (show.v1): the live log interleaves his steps (comments carrying {step}) with replies from anyone else,
+   Claude included, by time. Once saved, the steps come from the item's show object, the record of what was kept. */
+function showSteps(it){
+  if (it.show?.steps?.length && it.status !== "live") return it.show.steps;
+  return it.comments.filter(c => c.body?.step).map(c => c.body.step);
+}
+function isReply(h){ const a = h.author || {}; return a.id === "claude" || a.role === "agent" || a.role !== "owner"; }
+function showSection(it){
+  if (it.source !== "show" && !it.show) return "";
+  const live = it.status === "live", steps = showSteps(it);
+  const rows = live
+    ? it.comments.map(c => c.body?.step ? {ts:c.ts, step:c.body.step} : {ts:c.ts, h:c})
+    : [...steps.map(st => ({step:st})), ...it.comments.filter(c => !c.body?.step && isReply(c)).map(c => ({ts:c.ts, h:c}))];
+  const li = r => r.step ? `<li class="step"><span class="n">${esc(r.step.n)}</span><span class="what">${esc(stepWords(r.step))}</span></li>`
+    : `<li class="${isReply(r.h) ? "reply" : ""}"><span class="n">${isReply(r.h) ? "reply" : "note"}</span><span><span class="mono mute">${esc((r.h.ts||"").slice(11,19))} · ${esc(who(r.h.author))}</span><br><span class="what">${esc(r.h.body?.text||"")}</span></span></li>`;
+  return `<div class="stack" data-nodach-part="item.show" style="margin-top:10px">
+    <div class="row"><span class="eyebrow">Show${it.show?.duration_ms ? " · " + Math.round(it.show.duration_ms/1000) + "s" : ""} · ${steps.length} step(s)</span>${live ? '<span class="live-badge" id="showLive">● live</span>' : ""}<span class="spacer"></span>
+      ${steps.length || it.show?.cursor?.length ? `<button id="showReplayBtn">▶ Replay</button>` : ""}</div>
+    ${rows.length ? `<ol class="log showlog">${rows.map(li).join("")}</ol>` : '<span class="empty">No steps yet.</span>'}</div>`;
+}
+function stepWords(st){
+  const t = st.target || {}, what = t.text ? "“" + String(t.text).slice(0, 60) + "”" : (t.element || "the page");
+  const part = t.part ? ` (${t.part})` : "";
+  return st.kind === "note" ? "Note: " + (st.text || "") : st.kind === "stroke" ? `Drew around ${what}${part}` : `Pointed at ${what}${part}`;
+}
 function renderInspector(){
   const it = F.items.get(S.sel);
   $("#inspEmpty").hidden = !!it; $("#insp").hidden = !it; if (!it) return;
@@ -825,13 +868,14 @@ function renderInspector(){
     ${it.private?`<div class="pill" style="color:var(--accent);align-self:flex-start">🔒 Only you can see this</div>`:""}
     <h2>${esc(it.title)}</h2>
     <div class="row"><span class="mono mute">studio/${esc(it.id)}@${it.history.length-1}</span><button class="link" id="copyAddr">copy address</button></div>
-    <div class="body" id="inspBody">${bodyLines(it.body)}</div>
+    <div class="body" id="inspBody" data-nodach-part="item.body">${bodyLines(it.body)}</div>
     ${it.sketch?`<img src="${it.sketch}" alt="Sketch attached to ${esc(it.id)}" style="border:1px solid var(--line);border-radius:8px">`:""}
+    ${showSection(it)}
     <div class="stack" style="margin-top:14px">
-      <div class="eyebrow">Links</div>
+      <div class="eyebrow" data-nodach-part="item.links">Links</div>
       <div class="refs">${[...(it.refs||[])].map(r=>`<button data-go="${esc(r)}">${esc(r)} →</button>`).join("")}${back.map(r=>`<button data-go="${esc(r)}">← ${esc(r)}</button>`).join("") || (it.refs?.length?"":'<span class="empty">None yet.</span>')}</div>
       <div class="eyebrow">Respond</div>
-      <textarea id="reply" rows="3" ${dis()} placeholder="${isQ?"A, B… or your own words":"Agree, challenge, refine, or ask"}">${esc(draft)}</textarea>
+      <textarea id="reply" data-nodach-part="item.respond" rows="3" ${dis()} placeholder="${isQ?"A, B… or your own words":"Agree, challenge, refine, or ask"}">${esc(draft)}</textarea>
       <span class="hint" id="replyHint" hidden></span>
       <div class="row">
         <button class="primary" id="sendAnswer" ${dis()}>${isQ?"Answer":"Comment"}</button>
@@ -839,8 +883,9 @@ function renderInspector(){
         <button id="mkChallenge" ${dis()}>Challenge…</button>
       </div>
       <div class="eyebrow">History (${it.history.length})</div>
-      <ol class="log">${it.history.map((h,i)=>line(i+1,h,true)).join("")}</ol>
+      <ol class="log" data-nodach-part="item.history">${it.history.map((h,i)=>line(i+1,h,true)).join("")}</ol>
     </div>`;
+  const rp = $("#showReplayBtn"); if (rp) rp.onclick = () => window.NodachShow?.replay(it.id);
   $("#copyAddr").onclick = async () => { const a = `studio/${it.id}@${it.history.length-1}`;
     try { await navigator.clipboard.writeText(a); toast("Copied "+a); } catch { toast(a); } };
   if (S.line){ const el = document.getElementById("L-"+S.line); if (el){ el.classList.add("hit"); el.scrollIntoView({block:"center"}); } S.line = null; }
@@ -1756,25 +1801,116 @@ async function signOut(){
 })();
 addEventListener("resize", () => { if (S.view==="capture") sizePad(); });
 
-/* ---------------------------------------------------------------- point mode (R-261119-visual-builder, U1)
+/* ---------------------------------------------------------------- state machines and clocks (pure; F-show-pause-clock, 20 Nov)
+   Every recording feature (Show, Live) is a small explicit state machine: a table of state → event → next state, with
+   no DOM and no writes, so it can be tested, graphed and reused. send() returns false for an event the current state
+   doesn't take (the refusal is kept in the trace too). The trace is the ordered list of transitions, readable from
+   window.NodachShow.state() / window.NodachLive.state(). The clock counts elapsed time without the paused stretches;
+   tests swap the time source for a fake one through window.__clockNow. */
+const NodachFSM = {
+  now: () => typeof window.__clockNow === "function" ? window.__clockNow() : performance.now(),
+  machine(name, table, initial){
+    let state = initial; const trace = [];
+    return {
+      name, table,
+      get state(){ return state; },
+      can: ev => (table[state] || {})[ev] !== undefined,
+      send(ev, ctx){
+        let to = (table[state] || {})[ev];
+        if (to === undefined){ trace.push({from:state, event:ev, to:state, ok:false}); if (trace.length > 400) trace.shift(); return false; }
+        if (typeof to === "function") to = to(ctx || {});
+        trace.push({from:state, event:ev, to, ok:true}); if (trace.length > 400) trace.shift();
+        state = to; return true;
+      },
+      trace: () => trace.map(x => ({...x})),
+      edges: () => Object.entries(table).flatMap(([from, row]) => Object.entries(row).map(([event, to]) => ({from, event, to: typeof to === "function" ? "(decided)" : to}))),
+    };
+  },
+  clock(now = NodachFSM.now){
+    let t0 = null, pausedAt = null, pausedTotal = 0;
+    return {
+      start(){ t0 = now(); pausedAt = null; pausedTotal = 0; },
+      pause(){ if (t0 != null && pausedAt == null) pausedAt = now(); },
+      resume(){ if (pausedAt != null){ pausedTotal += now() - pausedAt; pausedAt = null; } },
+      get paused(){ return pausedAt != null; },
+      elapsed(){ return t0 == null ? 0 : Math.max(0, Math.round((pausedAt ?? now()) - t0 - pausedTotal)); },
+      pausedMs(){ return Math.round(pausedTotal + (pausedAt != null ? now() - pausedAt : 0)); },
+      sincePause(){ return pausedAt != null ? Math.round(now() - pausedAt) : 0; },
+    };
+  },
+};
+window.NodachFSM = NodachFSM;
+/* Show: idle → ready (bar open) → recording ⇄ paused → stopping (save box; the clock is held) → saving → saved → idle.
+   keep (Keep recording) goes back to whichever of recording / paused it came from. */
+const SHOW_TABLE = {
+  idle:      {open:"ready"},
+  ready:     {start:"recording", cancel:"idle"},
+  recording: {pause:"paused", stop:"stopping"},
+  paused:    {resume:"recording", stop:"stopping"},
+  stopping:  {keep: c => c.wasPaused ? "paused" : "recording", save:"saving", discard:"idle"},
+  saving:    {saved:"saved", fail:"stopping"},
+  saved:     {close:"idle"},
+};
+
+/* ---------------------------------------------------------------- pointer.v1 targets (shared by point mode and show mode)
+   One way to say "this part of Studio": the named region (data-nodach-part, stable across renames and edits), the
+   element and its text, the view, and the screen position. The desktop pointer and ActionMap use the same shape. */
+const PTR = {
+  partOf: el => el?.closest?.("[data-nodach-part]")?.dataset.nodachPart || "studio",
+  describe(el){
+    const t = (el.tagName || "node").toLowerCase(), id = el.id ? "#" + el.id : "";
+    const label = el.getAttribute?.("aria-label") || el.getAttribute?.("title") || (el.textContent || "").replace(/\s+/g, " ").trim();
+    return {element: t + id + (el.dataset?.v ? `[data-v=${el.dataset.v}]` : ""), text: label.slice(0, 120)};
+  },
+  target(el){
+    const r = el.getBoundingClientRect(), d = PTR.describe(el);
+    const t = {schema:"pointer.v1", kind:"pointer.studio", part:PTR.partOf(el), element:d.element, text:d.text, view:S.view,
+            rect:{left:Math.round(r.left), top:Math.round(r.top), right:Math.round(r.right), bottom:Math.round(r.bottom)},
+            viewport:{w:innerWidth, h:innerHeight}};
+    const f = PTR.flowAt(r.left, r.top, el);   // on the canvas: where it is on the map itself, so it survives pan, zoom and node moves
+    if (f){ const z = f.z || 1; t.flow = {...f, w:PTR.r2(r.width / z), h:PTR.r2(r.height / z)}; }
+    return t;
+  },
+  /* flow coordinates (F-show-replay-drift, 20 Nov): a mark on the React Flow canvas is kept in map units as well as
+     screen pixels, plus the node under it (with that node's position then), so a replay or the live layer can put it
+     back on the same thing after the map was dragged, zoomed or the node moved. Screen pixels stay the fallback. */
+  r2: v => Math.round(v * 100) / 100,
+  geo(){ const g = window.NodachCanvas?.geo, cv = document.getElementById("canvas"); return g?.ready?.() && cv && !cv.hidden ? g : null; },
+  flowAt(x, y, el){
+    const g = PTR.geo(); if (!g || !el?.closest?.("#canvas")) return null;
+    const p = g.toFlow(x, y); if (!p || !isFinite(p.x)) return null;
+    const out = {x:PTR.r2(p.x), y:PTR.r2(p.y), z:PTR.r2(g.zoom())};
+    const nid = el.closest(".react-flow__node")?.dataset?.id, n = nid && g.node(nid);
+    if (n){ out.node = nid; out.nx = PTR.r2(n.x); out.ny = PTR.r2(n.y); }
+    return out;
+  },
+  /* flow point (+ the anchor it was recorded with) → screen point now; null when the canvas isn't showing */
+  project(x, y, anchor){
+    const g = PTR.geo(); if (!g || x == null) return null;
+    if (anchor?.node){ const n = g.node(anchor.node); if (n){ x += n.x - anchor.nx; y += n.y - anchor.ny; } }
+    const s = g.toScreen(x, y); return s && isFinite(s.x) ? [s.x, s.y] : null;
+  },
+  stamp(prefix){ const t = new Date(), pad = n => String(n).padStart(2, "0");
+    return `${prefix}-${String(t.getUTCFullYear()).slice(2)}${pad(t.getUTCMonth()+1)}${pad(t.getUTCDate())}-${pad(t.getUTCHours())}${pad(t.getUTCMinutes())}${pad(t.getUTCSeconds())}-${Math.random().toString(36).slice(2, 6)}`; },
+  badge(n, x, y, parent){ const b = document.createElement("div"); b.className = "ptBadge"; b.textContent = n;
+    b.style.left = Math.max(0, x - 9) + "px"; b.style.top = Math.max(0, y - 9) + "px"; (parent || document.body).append(b); return b; },
+};
+
+/* ---------------------------------------------------------------- point mode (R-261119-visual-builder, U1; multi-point R-261119-show-mode)
    Click any part of Studio and leave a note on it. Saves an idea item (append-only, like every write) whose
-   source is "point" and whose body says exactly where you pointed: the named region (data-nodach-part, stable
-   across renames and edits), the element and its text, the view, and the screen position. Same meaning as a
-   desktop pointer event (pointer.v1), so every way of pointing lands in one place. Esc or the button stops. */
+   source is "point" and whose body says exactly where you pointed (pointer.v1). Shift+click picks several parts,
+   each with a numbered pink badge; a plain click (which adds that part last) or Enter opens one note for all of
+   them, saved with point.targets in click order. A single plain click saves exactly what it always did.
+   Esc closes the note, then clears the picks, then stops. */
 (() => {
   const btn = $("#pointBtn"); if (!btn) return;
   document.querySelectorAll("main > section.view[id^='v-']").forEach(sec => { if (!sec.dataset.nodachPart) sec.dataset.nodachPart = "view." + sec.id.slice(2); });
   const box = document.createElement("div"); box.id = "pointBox";
   const tag = document.createElement("div"); tag.id = "pointTag";
   document.body.append(box, tag);
-  let on = false, cur = null, note = null;
+  let on = false, cur = null, note = null, picks = [];   // picks: [{el, badge}] in Shift+click order
   const ours = el => el && (el.closest("#pointNote") || el === btn);
-  const partOf = el => el?.closest?.("[data-nodach-part]")?.dataset.nodachPart || "studio";
-  const describe = el => {
-    const t = el.tagName.toLowerCase(), id = el.id ? "#" + el.id : "";
-    const label = el.getAttribute("aria-label") || el.getAttribute("title") || (el.textContent || "").replace(/\s+/g, " ").trim();
-    return {element: t + id + (el.dataset.v ? `[data-v=${el.dataset.v}]` : ""), text: label.slice(0, 120)};
-  };
+  const {partOf, describe} = PTR;
   const hide = () => { box.style.display = tag.style.display = "none"; };
   const mark = el => {
     const r = el.getBoundingClientRect();
@@ -1782,20 +1918,45 @@ addEventListener("resize", () => { if (S.view==="capture") sizePad(); });
     tag.textContent = partOf(el) + " · " + describe(el).element;
     Object.assign(tag.style, {display:"block", left:Math.max(4, r.left-2)+"px", top:Math.max(4, r.top-20)+"px"});
   };
+  const pick = el => { const r = el.getBoundingClientRect(); el.classList.add("ptSel"); picks.push({el, badge:PTR.badge(picks.length + 1, r.left, r.top)}); };
+  const clearPicks = () => { for (const p of picks){ p.badge.remove(); p.el.classList.remove("ptSel"); } picks = []; };
   const closeNote = () => { note?.remove(); note = null; };
-  const set = v => { on = v; btn.setAttribute("aria-pressed", String(v)); document.body.classList.toggle("pointing", v);
-    if (!v){ hide(); closeNote(); cur = null; } else toast("Point mode: click anything to leave a note on it. Esc stops."); };
+  const set = v => {
+    if (v && window.NodachShow?.active()){ toast("A show is recording. Stop it first."); return; }
+    on = v; btn.setAttribute("aria-pressed", String(v)); document.body.classList.toggle("pointing", v);
+    if (!v){ hide(); closeNote(); clearPicks(); cur = null; }
+    else toast("Point mode: click anything to leave a note on it. Shift+click picks several. Esc stops."); };
+  window.__point = { off: () => { if (on) set(false); } };
   btn.onclick = () => set(!on);
   document.addEventListener("mousemove", e => { if (!on || note) return; const el = e.target; if (ours(el) || el === document.body) return hide(); cur = el; mark(el); }, true);
-  document.addEventListener("keydown", e => { if (on && e.key === "Escape"){ e.preventDefault(); note ? closeNote() : set(false); } }, true);
+  document.addEventListener("keydown", e => {
+    if (!on) return;
+    if (e.key === "Escape"){ e.preventDefault(); note ? closeNote() : picks.length ? clearPicks() : set(false); }
+    else if (e.key === "Enter" && !note && picks.length){ e.preventDefault(); openNote(picks.map(p => p.el)); }
+  }, true);
   document.addEventListener("click", e => {
     if (!on || ours(e.target)) return;
     e.preventDefault(); e.stopPropagation();
     if (note) return;
-    const el = e.target, r = el.getBoundingClientRect(), d = describe(el), part = partOf(el);
-    mark(el);
+    const el = e.target;
+    if (e.shiftKey){   // add to (or take out of) the numbered selection
+      const i = picks.findIndex(p => p.el === el);
+      if (i >= 0){ picks[i].badge.remove(); el.classList.remove("ptSel"); picks.splice(i, 1); picks.forEach((p, k) => p.badge.textContent = k + 1); }
+      else pick(el);
+      return;
+    }
+    if (!picks.length) return openNote([el]);
+    if (!picks.some(p => p.el === el)) pick(el);
+    openNote(picks.map(p => p.el));
+  }, true);
+  function openNote(els){
+    const last = els[els.length - 1], r = last.getBoundingClientRect(), targets = els.map(PTR.target), multi = els.length > 1;
+    const d = describe(last), part = partOf(last);
+    mark(last);
     note = document.createElement("div"); note.id = "pointNote";
-    note.innerHTML = `<div class="mute" style="font-size:12px;margin-bottom:6px">${esc(part)} · ${esc(d.element)}${d.text ? " · “" + esc(d.text.slice(0, 50)) + "”" : ""}</div>
+    const head = multi ? `${els.length} places, in click order: ` + targets.map((t, i) => `${i + 1} ${esc(t.part)}`).join(" · ")
+      : `${esc(part)} · ${esc(d.element)}${d.text ? " · “" + esc(d.text.slice(0, 50)) + "”" : ""}`;
+    note.innerHTML = `<div class="mute" style="font-size:12px;margin-bottom:6px">${head}</div>
       <textarea aria-label="What do you want here?" placeholder="What do you want here?"></textarea>
       <div class="row" style="gap:6px;margin-top:6px"><button data-save>Save</button><button data-cancel>Cancel</button>
       <span class="mute" style="font-size:12px">Enter saves · Shift+Enter new line · Esc cancels</span></div>`;
@@ -1804,19 +1965,425 @@ addEventListener("resize", () => { if (S.view==="capture") sizePad(); });
     const ta = note.querySelector("textarea"); ta.focus();
     const save = async () => {
       const text = ta.value.trim(); if (!text){ ta.focus(); return; }
-      const t = new Date(), pad = n => String(n).padStart(2, "0");
-      const id = `PT-${String(t.getUTCFullYear()).slice(2)}${pad(t.getUTCMonth()+1)}${pad(t.getUTCDate())}-${pad(t.getUTCHours())}${pad(t.getUTCMinutes())}${pad(t.getUTCSeconds())}-${Math.random().toString(36).slice(2, 6)}`;
-      const where = {schema:"pointer.v1", kind:"pointer.studio", part, element:d.element, text:d.text, view:S.view,
-                     rect:{left:Math.round(r.left), top:Math.round(r.top), right:Math.round(r.right), bottom:Math.round(r.bottom)},
-                     viewport:{w:innerWidth, h:innerHeight}};
-      const body = `${text}\n\nPointed at: ${part} › ${d.element}${d.text ? " (“" + d.text.slice(0, 80) + "”)" : ""} in the ${S.view} view.`;
+      const id = PTR.stamp("PT");
+      let where, body;
+      if (!multi){
+        where = targets[0];
+        body = `${text}\n\nPointed at: ${part} › ${d.element}${d.text ? " (“" + d.text.slice(0, 80) + "”)" : ""} in the ${S.view} view.`;
+      } else {
+        where = {...targets[0], targets};
+        body = `${text}\n\nPointed at ${targets.length} places in the ${S.view} view, in click order:\n` +
+          targets.map((t, i) => `${i + 1}. ${t.part} › ${t.element}${t.text ? " (“" + t.text.slice(0, 80) + "”)" : ""}`).join("\n");
+      }
       const ok = await write("item.create", null, {id, type:"idea", title:("Point: " + text).slice(0, 80), body, refs:[], status:"open", source:"point", point:where});
-      if (ok){ closeNote(); toast(`Saved ${id}. Still pointing (Esc stops).`); }
+      if (ok){ closeNote(); clearPicks(); toast(`Saved ${id}. Still pointing (Esc stops).`); }
     };
     note.querySelector("[data-save]").onclick = save;
     note.querySelector("[data-cancel]").onclick = closeNote;
     ta.onkeydown = ev => { if (ev.key === "Enter" && !ev.shiftKey){ ev.preventDefault(); save(); } };
+  }
+})();
+
+/* ---------------------------------------------------------------- show mode (R-261119-show-mode; Q-SHOW1 1c, 2c, 3b)
+   Record a demonstration of Studio: every click becomes a numbered step on what you clicked (the click never reaches
+   the control underneath), a press-and-drag becomes a drawn stroke, N adds a note to the latest step, and the cursor
+   path is sampled. It is live from the start: the item is created at once with status "live", each step is written
+   as a comment as it happens, and the people chosen in Audience are granted that one item, so they (and Claude,
+   through the hub) can follow and answer while you show. Pause stops live writes; what you do while paused stays on
+   this device and is only kept if you choose so when you stop. Stop (button or Esc) asks for a title and one note,
+   then saves the whole show (show.v1) on the item and opens it. The same steps format is meant for the desktop
+   pointer and ActionMap later (2c). Replay plays any show back over the view it was recorded in. */
+(() => {
+  const btn = $("#showBtn"); if (!btn) return;
+  const STROKE_MS = 30, MAX_STROKE = 400, CURSOR_MS = 100, MAX_CURSOR = 3000, MAX_BYTES = 200000;
+  /* F-show-pause-clock (20 Nov): the time of a show is a pausable clock (NodachFSM.clock), so the paused stretches are
+     left out of the on-screen timer, every step's t_ms and the cursor trail times; the save box holds the clock too. */
+  const M = NodachFSM.machine("show", SHOW_TABLE, "idle");
+  let R = null, bar = null, layer = null, noteBox = null, stopBox = null, ticks = [], marks = [], placeRaf = 0;
+  const ours = el => !!el?.closest?.("#showBar,#showNoteBox,#showStop,#showBtn,.toast");
+  const now = () => R?.clock ? R.clock.elapsed() : 0;
+  const fmt = ms => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+  const svgNS = "http://www.w3.org/2000/svg";
+  const sync = () => { if (R) R.paused = M.state === "paused"; };
+
+  /* audience: logins the page already knows (people who wrote here, people granted before, what /studio/api/me says) */
+  async function meInfo(){
+    if (S.meInfo !== undefined) return S.meInfo; S.meInfo = null;
+    if (window.__nodach?.standalone) try { const r = await fetch("/studio/api/me", {cache:"no-store"}); if (r.ok) S.meInfo = await r.json(); } catch {}
+    return S.meInfo;
+  }
+  function knownLogins(){
+    const self = new Set([S.me, S.meInfo?.login, S.meInfo?.id].filter(Boolean).map(String)), out = new Set();
+    const add = id => { const m = String(id || "").match(/^(?:github|email):(.+)$/); if (m && !self.has(id) && !self.has(m[1])) out.add(m[1]); };
+    for (const id of Object.keys(S.names || {})) add(id);
+    for (const e of [...S.events].reverse().slice(0, 3000)){
+      add(e.author?.id);
+      if (e.kind === "access.grant" && e.body?.login && !self.has(String(e.body.login))) out.add(String(e.body.login));
+    }
+    return [...out].slice(0, 40);
+  }
+  function audience(){
+    if (!bar) return [];
+    const ticked = [...bar.querySelectorAll("[data-login]:checked")].map(c => c.dataset.login);
+    const typed = (bar.querySelector("#showAudText")?.value || "").split(/[\s,]+/).map(x => x.trim().replace(/^@/, "")).filter(Boolean);
+    return [...new Set([...ticked, ...typed])];
+  }
+  function audChanged(){ const a = audience(), n = bar?.querySelector("#showAudN"); if (n) n.textContent = a.length; if (R?.active) grant(a); }
+  function grant(list){   // owner only: each watcher is given this one item, nothing else
+    if (!S.owner || !R?.id) return;
+    for (const l of list) if (!R.granted.has(l)){ R.granted.add(l); const id = R.id; queue(() => write("access.grant", null, {login:l, items:[id]})); }
+  }
+  const queue = fn => { R.q = R.q.then(fn).catch(() => {}); return R.q; };
+
+  /* the bar */
+  async function openBar(){
+    window.__point?.off();
+    if (!M.send("open")) return;
+    await meInfo();
+    bar = document.createElement("div"); bar.id = "showBar"; bar.dataset.nodachPart = "show.bar";
+    bar.setAttribute("role", "toolbar"); bar.setAttribute("aria-label", "Show mode");
+    const logins = knownLogins();
+    bar.innerHTML = `<span class="rec" id="showRec">● ready</span><span class="mono" id="showTime">0:00</span><span class="mono mute" id="showCount"></span>
+      ${S.owner ? `<details id="showAud"><summary>Audience (<span id="showAudN">0</span>)</summary><div>
+        <span class="mute" style="font-size:12px">Who can follow this show live (they get this item only)</span>
+        ${logins.map(l => `<label class="row" style="gap:6px"><input type="checkbox" data-login="${esc(l)}"> <span class="mono">${esc(l)}</span></label>`).join("")
+          || '<span class="mute" style="font-size:12px">No people known in this Studio yet. Type their logins.</span>'}
+        <input id="showAudText" placeholder="logins, comma separated" aria-label="More logins, comma separated"></div></details>`
+        : `<span class="mute" style="font-size:12px">Only the owner can share a show live.</span>`}
+      <button class="primary" id="showGo">● Start</button><button id="showPause" hidden>⏸ Pause</button><button id="showStopBtn" hidden>■ Stop</button><button id="showCancel">Cancel</button>
+      <span class="mute" style="font-size:12px">Click to point · drag to draw · N adds a note · Esc stops</span>`;
+    document.body.append(bar);
+    bar.querySelector("#showGo").onclick = start;
+    bar.querySelector("#showCancel").onclick = finish;
+    bar.querySelector("#showPause").onclick = togglePause;
+    bar.querySelector("#showStopBtn").onclick = askStop;
+    bar.querySelectorAll("[data-login]").forEach(c => c.onchange = audChanged);
+    const t = bar.querySelector("#showAudText"); if (t) t.onchange = audChanged;
+    btn.setAttribute("aria-pressed", "true");
+  }
+
+  async function start(){
+    if (R || M.state !== "ready") return;
+    if (!writable()){ toast("Show needs a signed-in, live Studio you can write to. Nothing was recorded."); return; }
+    const id = PTR.stamp("SH"), started = new Date().toISOString(), viewport = {w:innerWidth, h:innerHeight}, aud = audience();
+    R = {id, clock:NodachFSM.clock(), started, view:S.view, viewport, steps:[], cursor:[], paused:false, nLive:0, nPaused:0,
+         granted:new Set(), q:Promise.resolve(), down:null, last:null, lastEl:null, lastPushed:null, stride:1, tick:0, active:false};
+    const ok = await write("item.create", null, {id, type:"idea", title:"Show (live) " + started.slice(0, 16).replace("T", " "),
+      body:"Live demonstration in progress. Each step arrives as a comment on this item.", refs:[], status:"live", source:"show",
+      show:{schema:"show.v1", started, duration_ms:0, view:S.view, viewport, audience:aud, steps:[], cursor:[]}});
+    if (!ok){ R = null; return; }
+    R.active = true; R.clock.start(); M.send("start"); sync();
+    grant(aud);
+    document.body.classList.add("showing");
+    bar.querySelector("#showRec").textContent = "● REC";
+    for (const s of ["#showGo", "#showCancel"]) bar.querySelector(s).hidden = true;
+    for (const s of ["#showPause", "#showStopBtn"]) bar.querySelector(s).hidden = false;
+    layer = document.createElement("div"); layer.id = "showLayer"; layer.innerHTML = `<svg aria-hidden="true"></svg>`; document.body.append(layer);
+    marks = []; placeLoop();
+    runTimers();
+    toast(`Showing live as ${id}${R.granted.size ? " for " + R.granted.size + " watcher(s)" : ""}.`);
+  }
+  const paintTime = () => { const t = bar?.querySelector("#showTime"); if (t && R) t.textContent = fmt(now()); };
+  function runTimers(){
+    stopTimers();
+    ticks.push(setInterval(paintTime, 250));
+    ticks.push(setInterval(sampleCursor, CURSOR_MS));
+  }
+  function stopTimers(){ ticks.forEach(clearInterval); ticks = []; }
+  function sampleCursor(){
+    if (!R?.active || R.stopping || !R.last) return;
+    if (++R.tick % R.stride) return;
+    const [x, y] = R.last; if (R.lastPushed && R.lastPushed[0] === x && R.lastPushed[1] === y) return;
+    R.lastPushed = [x, y];
+    const c = {t:now(), x, y}, f = PTR.flowAt(x, y, R.lastEl);
+    if (f){ c.fx = f.x; c.fy = f.y; }
+    if (R.paused) c.p = 1;
+    R.cursor.push(c);
+    if (R.cursor.length >= MAX_CURSOR){ R.cursor = R.cursor.filter((_, i) => i % 2 === 0); R.stride *= 2; }   // keep the whole path, coarser
+  }
+  function togglePause(){
+    if (!R?.active || R.stopping) return;
+    if (M.state === "recording"){ M.send("pause"); R.clock.pause(); }
+    else if (M.state === "paused"){ M.send("resume"); R.clock.resume(); }
+    sync(); paintTime();
+    bar.querySelector("#showPause").textContent = R.paused ? "▶ Resume" : "⏸ Pause";
+    bar.querySelector("#showRec").textContent = R.paused ? "⏸ paused (not shared)" : "● REC";
+  }
+
+  /* steps */
+  const clean = st => { const {paused, ...rest} = st; return rest; };
+  function addStep(s){
+    const paused = R.paused, n = paused ? "p" + (++R.nPaused) : ++R.nLive;
+    const st = {n, t_ms:s.t_ms, kind:s.kind};
+    for (const k of ["target", "path", "fpath", "anchor", "dur_ms", "text", "ref", "via"]) if (s[k] != null) st[k] = s[k];
+    if (paused){ st.paused = true; st.pause_ms = R.clock.sincePause(); }   // order within a pause (t_ms is held while paused)
+    R.steps.push(st); drawStep(st);
+    if (!paused){ const id = R.id, body = {text:`${st.n}. ${stepWords(st)}`, step:clean(st)}; queue(() => write("comment", id, body)); }
+    const c = bar?.querySelector("#showCount"); if (c) c.textContent = `${R.nLive} step(s)${R.nPaused ? " + " + R.nPaused + " paused" : ""}`;
+    return st;
+  }
+  /* marks: badges and strokes that are put back where they belong every frame (map units when known, else pixels) */
+  function markFor(s, parent, sx = 1, sy = 1){
+    const m = {s, badge:null, line:null, sx, sy};
+    if (s.kind === "stroke" && s.path?.length){
+      m.line = document.createElementNS(svgNS, "polyline"); m.line.setAttribute("fill", "none"); m.line.setAttribute("stroke", "#e0457b");
+      m.line.setAttribute("stroke-width", "3"); m.line.setAttribute("stroke-linecap", "round"); m.line.setAttribute("stroke-linejoin", "round");
+      if (s.paused) m.line.setAttribute("stroke-dasharray", "4 4");
+      parent.querySelector("svg").append(m.line);
+    }
+    return m;
+  }
+  function strokePts(m){
+    const s = m.s;
+    if (s.fpath?.length){ const pts = s.fpath.map(p => PTR.project(p[0], p[1], s.anchor)); if (pts.every(Boolean)) return pts; }
+    return s.path.map(p => [p[0] * m.sx, p[1] * m.sy]);
+  }
+  function badgeAt(m){
+    const s = m.s, f = s.target?.flow;
+    if (s.kind === "stroke" && s.path?.length) return strokePts(m)[0];
+    if (f){ const q = PTR.project(f.x, f.y, f); if (q) return q; }
+    return s.target?.rect ? [s.target.rect.left * m.sx, s.target.rect.top * m.sy] : null;
+  }
+  function placeMark(m, on = true, frac = 1){
+    if (m.line){ const pts = strokePts(m), k = on ? Math.max(1, Math.ceil(pts.length * frac)) : 0;
+      m.line.setAttribute("points", pts.slice(0, k).map(p => p.map(v => Math.round(v * 10) / 10).join(",")).join(" ")); }
+    const at = on ? badgeAt(m) : null;
+    if (at && !m.badge) m.badge = PTR.badge(m.s.n, at[0], at[1], m.parent);
+    else if (at){ m.badge.style.left = Math.max(0, at[0] - 9) + "px"; m.badge.style.top = Math.max(0, at[1] - 9) + "px"; }
+    if (!on && m.badge){ m.badge.remove(); m.badge = null; }
+  }
+  function drawStep(st){
+    if (!layer || (st.kind !== "stroke" && st.kind !== "point")) return;
+    if (st.kind === "point" && !st.target) return;
+    const m = markFor(st, layer); m.parent = layer; marks.push(m); placeMark(m);
+    layer.querySelector("#showLiveStroke")?.remove();
+  }
+  function placeLoop(){ cancelAnimationFrame(placeRaf); const f = () => { if (!layer) return; for (const m of marks) placeMark(m); placeRaf = requestAnimationFrame(f); }; f(); }
+  function drawLive(path){
+    let pl = layer?.querySelector("#showLiveStroke"); if (!layer) return;
+    if (!pl){ pl = document.createElementNS(svgNS, "polyline"); pl.id = "showLiveStroke"; pl.setAttribute("fill", "none"); pl.setAttribute("stroke", "#e0457b");
+      pl.setAttribute("stroke-width", "3"); pl.setAttribute("opacity", ".6"); layer.querySelector("svg").append(pl); }
+    pl.setAttribute("points", path.map(p => p.join(",")).join(" "));
+  }
+
+  /* input while recording: window capture runs before anything on the page, so nothing underneath ever fires */
+  const recording = () => R?.active && !R.stopping;
+  const block = e => { if (!recording() || ours(e.target)) return false; e.preventDefault(); e.stopImmediatePropagation(); return true; };
+  for (const t of ["mousedown", "mouseup", "click", "dblclick", "auxclick", "contextmenu", "touchstart", "touchend"])
+    addEventListener(t, block, {capture:true, passive:false});
+  addEventListener("pointerdown", e => {
+    if (!block(e) || e.button !== 0 || noteBox) return;
+    R.down = {x:e.clientX, y:e.clientY, el:e.target, t:now(), path:[[e.clientX, e.clientY]], at:performance.now(), stroke:false};
   }, true);
+  addEventListener("pointermove", e => {
+    if (!R?.active) return;
+    R.last = [Math.round(e.clientX), Math.round(e.clientY)]; R.lastEl = e.target;
+    const d = R.down; if (!d || R.stopping) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (!d.stroke && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) d.stroke = true;
+    const t = performance.now();
+    if (d.stroke && t - d.at >= STROKE_MS && d.path.length < MAX_STROKE - 1){ d.path.push([e.clientX, e.clientY]); d.at = t; drawLive(d.path); }
+  }, true);
+  addEventListener("pointerup", e => {
+    const d = R?.down; block(e); if (!recording() || !d) return;
+    R.down = null;
+    if (!d.stroke) return void addStep({kind:"point", t_ms:d.t, target:PTR.target(d.el)});
+    d.path.push([e.clientX, e.clientY]);
+    const path = d.path.map(p => [Math.round(p[0]), Math.round(p[1])]);
+    const xs = path.map(p => p[0]), ys = path.map(p => p[1]);
+    const mid = document.elementFromPoint((Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2);
+    const s = {kind:"stroke", t_ms:d.t, target:PTR.target(mid && !ours(mid) ? mid : d.el), path, dur_ms:now() - d.t};
+    const a = PTR.flowAt(path[0][0], path[0][1], d.el);   // started on the canvas: keep the stroke in map units, tied to the node it started on
+    if (a){ const g = PTR.geo(); s.fpath = path.map(p => { const q = g.toFlow(p[0], p[1]); return [PTR.r2(q.x), PTR.r2(q.y)]; });
+      if (a.node) s.anchor = {node:a.node, nx:a.nx, ny:a.ny}; }
+    addStep(s);
+  }, true);
+  addEventListener("keydown", e => {
+    if (!R?.active) return;
+    if (stopBox) return;   // the stop box handles its own keys
+    if (e.target?.closest?.("#showNoteBox") || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || "") || e.target?.isContentEditable) return;
+    if (e.key === "Escape"){ e.preventDefault(); e.stopImmediatePropagation(); askStop(); }
+    else if ((e.key === "n" || e.key === "N") && !e.ctrlKey && !e.metaKey && !e.altKey && !noteBox){ e.preventDefault(); e.stopImmediatePropagation(); openNoteBox(); }
+  }, true);
+
+  function openNoteBox(){
+    const last = [...R.steps].reverse().find(s => s.kind !== "note"), t_ms = now();
+    noteBox = document.createElement("div"); noteBox.id = "showNoteBox";
+    noteBox.innerHTML = `<span class="mute" style="font-size:12px">${last ? "Note on step " + esc(last.n) : "Note"}${R.paused ? " (paused: kept on this device)" : ""}</span>
+      <textarea aria-label="Note" placeholder="What should they notice here?"></textarea>
+      <div class="row" style="gap:6px"><button data-save class="primary">Add note</button><button data-cancel>Cancel</button><span class="mute" style="font-size:12px">Enter adds · Esc cancels</span></div>`;
+    document.body.append(noteBox);
+    const r = last?.target?.rect;
+    Object.assign(noteBox.style, {left: Math.min(innerWidth - 392, Math.max(12, r ? r.left : innerWidth / 2 - 190)) + "px",
+      top: Math.min(innerHeight - 220, Math.max(12, r ? r.bottom + 8 : innerHeight / 3)) + "px"});
+    const ta = noteBox.querySelector("textarea"); ta.focus();
+    const close = () => { noteBox?.remove(); noteBox = null; };
+    const add = () => { const text = ta.value.trim(); if (!text) return ta.focus();
+      addStep({kind:"note", t_ms, text:text.slice(0, 2000), ref:last?.n}); close(); };
+    noteBox.querySelector("[data-save]").onclick = add;
+    noteBox.querySelector("[data-cancel]").onclick = close;
+    ta.onkeydown = ev => { if (ev.key === "Enter" && !ev.shiftKey){ ev.preventDefault(); add(); }
+      if (ev.key === "Escape"){ ev.preventDefault(); ev.stopPropagation(); close(); } };
+  }
+
+  /* stopping and saving */
+  function askStop(){
+    if (!R?.active || stopBox) return;
+    R.wasPaused = R.paused;
+    if (!M.send("stop")) return;
+    noteBox?.remove(); noteBox = null;
+    R.clock.pause();   // the save box doesn't count as show time
+    R.stopping = true; R.end = now(); stopTimers(); paintTime();
+    const np = R.steps.filter(s => s.paused).length;
+    stopBox = document.createElement("div"); stopBox.id = "showStop"; stopBox.setAttribute("role", "dialog"); stopBox.setAttribute("aria-label", "Save this show");
+    stopBox.innerHTML = `<b>Save this show</b><span class="mute" style="font-size:12px">${fmt(R.end)} · ${R.nLive} step(s) shared live${np ? ` · ${np} while paused (not shared)` : ""}</span>
+      <input id="showTitle" placeholder="Title" aria-label="Title">
+      <textarea id="showOverall" placeholder="One overall note: what you were showing, and what you want done" aria-label="Overall note"></textarea>
+      ${np ? `<label class="row" style="gap:6px"><input type="checkbox" id="showInclPaused"> include paused steps (${np})</label>` : ""}
+      <div class="row" style="gap:6px"><button class="primary" id="showSave">Save</button><button id="showResume">Keep recording</button><button id="showDiscard">Discard</button></div>`;
+    document.body.append(stopBox);
+    Object.assign(stopBox.style, {left: Math.max(12, innerWidth / 2 - 190) + "px", top: Math.max(12, innerHeight / 2 - 140) + "px"});
+    stopBox.querySelector("#showTitle").focus();
+    stopBox.querySelector("#showSave").onclick = save;
+    stopBox.querySelector("#showResume").onclick = resume;
+    stopBox.querySelector("#showDiscard").onclick = discard;
+    stopBox.onkeydown = ev => { if (ev.key === "Escape"){ ev.preventDefault(); ev.stopPropagation(); resume(); }
+      if (ev.key === "Enter" && ev.target.id === "showTitle"){ ev.preventDefault(); save(); } };
+  }
+  function resume(){
+    if (!R || M.state !== "stopping") return;
+    stopBox?.remove(); stopBox = null;
+    M.send("keep", {wasPaused:R.wasPaused}); sync();
+    if (!R.paused) R.clock.resume();
+    R.stopping = false; runTimers();
+  }
+  async function discard(){
+    if (!R || M.state !== "stopping") return;
+    const id = R.id; await R.q;
+    const ok = await write("status", id, {status:"withdrawn"});
+    if (ok){ M.send("discard"); finish(); toast(`Discarded ${id}. It stays in history as withdrawn.`); }
+  }
+  function shrink(show){   // keep a show under ~200 KB: thin the cursor path first, then the strokes (pixels and map units together)
+    let size = JSON.stringify(show).length, rounds = 0;
+    while (size > MAX_BYTES && rounds++ < 16){
+      const half = a => a.filter((_, i) => i % 2 === 0 || i === a.length - 1);
+      if (show.cursor.length > 60) show.cursor = half(show.cursor);
+      else show.steps = show.steps.map(s => s.path?.length > 8 ? {...s, path:half(s.path), ...(s.fpath ? {fpath:half(s.fpath)} : {})} : s);
+      size = JSON.stringify(show).length;
+    }
+    if (rounds) show.downsampled = rounds;
+    return show;
+  }
+  async function save(){
+    if (!R || R.saving || M.state !== "stopping") return;
+    R.saving = true; M.send("save");
+    const incl = !!stopBox.querySelector("#showInclPaused")?.checked;
+    const title = stopBox.querySelector("#showTitle").value.trim() || "Show " + R.started.slice(0, 16).replace("T", " ");
+    const overall = stopBox.querySelector("#showOverall").value.trim();
+    let steps = R.steps.filter(s => incl || !s.paused);
+    if (incl && R.nPaused){   // paused steps join in time order, and everything is numbered again from 1
+      const map = {}; steps = [...steps].sort((a, b) => a.t_ms - b.t_ms || (a.pause_ms || 0) - (b.pause_ms || 0)).map((s, i) => { map[s.n] = i + 1; return {...s, n:i + 1}; });
+      steps = steps.map(s => s.ref != null && map[s.ref] ? {...s, ref:map[s.ref]} : s);
+    }
+    steps = steps.map(clean);
+    // cursor: [t_ms, x, y] in pixels, plus [.., fx, fy] in map units when it was over the canvas
+    const cursor = R.cursor.filter(c => incl || !c.p).map(c => c.fx != null ? [c.t, c.x, c.y, c.fx, c.fy] : [c.t, c.x, c.y]);
+    const show = shrink({schema:"show.v1", started:R.started, duration_ms:R.end, view:R.view, viewport:R.viewport, audience:[...R.granted], steps, cursor});
+    const body = (overall ? overall + "\n\n" : "") +
+      `Shown in the ${R.view} view for ${fmt(R.end)}, ${steps.length} step(s)${R.granted.size ? `, live for ${R.granted.size} watcher(s)` : ""}. Each step is ${R.id}#<n>.\n` +
+      steps.map(s => `${s.n}. ${stepWords(s)}`).join("\n");
+    const id = R.id;
+    await R.q;   // every live step lands before the final version
+    const a = await write("item.edit", id, {title, body, show});
+    const b = a && await write("status", id, {status:"open"});
+    if (a && b){ M.send("saved"); finish(); toast(`Saved ${id}: ${steps.length} step(s). Replay it from the item.`); select(id); }
+    else { R.saving = false; M.send("fail"); }
+  }
+  function finish(){
+    stopTimers(); cancelAnimationFrame(placeRaf);
+    if (M.state === "ready") M.send("cancel"); else if (M.state === "saved") M.send("close");
+    for (const el of [bar, layer, noteBox, stopBox]) el?.remove();
+    bar = layer = noteBox = stopBox = null; R = null; marks = [];
+    btn.setAttribute("aria-pressed", "false"); document.body.classList.remove("showing");
+  }
+  btn.onclick = () => { if (R?.active) askStop(); else if (bar) finish(); else openBar(); };
+
+  /* replay: the recorded view, the cursor path, the strokes and the numbered badges. Marks recorded on the canvas are put
+     back through the map's current pan and zoom (and follow their node); everything else is scaled to this screen. */
+  let RP = null;
+  function closeReplay(){
+    if (!RP) return; cancelAnimationFrame(RP.raf); RP.ov.remove();
+    const back = RP.prevView; RP = null; if (back && back !== S.view) show(back);
+  }
+  function replay(itemId){
+    const it = F.items.get(itemId); if (!it) return;
+    if (R) { toast("Stop the show you're recording first."); return; }
+    closeReplay();
+    const sh = it.show || {}, steps = showSteps(it), cursor = sh.cursor || [];
+    if (!steps.length && !cursor.length){ toast("Nothing to replay yet."); return; }
+    const prevView = S.view, view = sh.view || steps.find(s => s.target?.view)?.target.view;
+    if (view && view !== S.view) show(view);
+    const vp = sh.viewport || steps.find(s => s.target?.viewport)?.target.viewport || {w:innerWidth, h:innerHeight};
+    const sx = innerWidth / (vp.w || innerWidth), sy = innerHeight / (vp.h || innerHeight);
+    const dur = Math.max(sh.duration_ms || 0, 1, ...steps.map(s => (s.t_ms || 0) + (s.dur_ms || 0)), ...cursor.map(c => c[0]));
+    const ov = document.createElement("div"); ov.id = "showReplay"; ov.dataset.nodachPart = "show.replay";
+    ov.innerHTML = `<svg aria-hidden="true"></svg><div class="cur" hidden></div><div class="mute" data-cap style="position:absolute;left:50%;transform:translateX(-50%);bottom:64px;background:var(--surface);padding:4px 10px;border-radius:6px;display:none"></div>
+      <div class="ctl" role="toolbar" aria-label="Replay ${esc(it.id)}"><b class="mono">▶ ${esc(it.id)}</b><button data-play>⏸ Pause</button><span class="mono" data-time></span><button data-close aria-label="Close replay">✕ Close</button></div>`;
+    document.body.append(ov);
+    const dot = ov.querySelector(".cur"), cap = ov.querySelector("[data-cap]");
+    const rmarks = steps.filter(s => s.kind === "stroke" ? s.path?.length : s.target?.rect).map(s => { const m = markFor(s, ov, sx, sy); m.parent = ov; return m; });
+    RP = {ov, prevView, raf:0, t:0, playing:true, last:performance.now(), marks:rmarks};
+    const btnPlay = ov.querySelector("[data-play]"), time = ov.querySelector("[data-time]");
+    btnPlay.onclick = () => { if (!RP) return; if (!RP.playing && RP.t >= dur) RP.t = 0; RP.playing = !RP.playing; RP.last = performance.now(); };
+    ov.querySelector("[data-close]").onclick = closeReplay;
+    let ci = 0;
+    const draw = t => {
+      if (t < (cursor[ci]?.[0] ?? Infinity)) ci = 0;
+      while (ci + 1 < cursor.length && cursor[ci + 1][0] <= t) ci++;
+      const c = cursor[ci];
+      if (c && c[0] <= t){ const q = c.length >= 5 ? PTR.project(c[3], c[4]) : null;
+        dot.hidden = false; dot.style.left = (q ? q[0] : c[1] * sx) + "px"; dot.style.top = (q ? q[1] : c[2] * sy) + "px"; } else dot.hidden = true;
+      let caption = "";
+      for (const m of rmarks){
+        const on = t >= (m.s.t_ms || 0), f = m.s.dur_ms ? Math.min(1, (t - m.s.t_ms) / m.s.dur_ms) : 1;
+        placeMark(m, on, f);
+      }
+      for (const s of steps) if (t >= (s.t_ms || 0) && t - (s.t_ms || 0) < 3000) caption = `${s.n}. ${stepWords(s)}`;
+      cap.textContent = caption; cap.style.display = caption ? "block" : "none";
+      time.textContent = fmt(t) + " / " + fmt(dur);
+    };
+    const frame = () => {
+      if (!RP) return;
+      const n = performance.now(); if (RP.playing) RP.t = Math.min(dur, RP.t + (n - RP.last)); RP.last = n;
+      if (RP.t >= dur && RP.playing){ RP.playing = false; }
+      btnPlay.textContent = RP.playing ? "⏸ Pause" : RP.t >= dur ? "↺ Play again" : "▶ Play";
+      draw(RP.t); RP.raf = requestAnimationFrame(frame);
+    };
+    frame();
+  }
+  addEventListener("keydown", e => { if (RP && e.key === "Escape"){ e.preventDefault(); e.stopImmediatePropagation(); closeReplay(); } }, true);
+
+  window.NodachShow = {
+    active: () => !!R?.active,
+    replay,
+    replaying: () => !!RP,
+    /* a readout for tests and graphs: the machine's state, the clock and the transitions so far */
+    state: () => ({state:M.state, id:R?.id || null, elapsed_ms:now(), paused_ms:R?.clock ? R.clock.pausedMs() : 0,
+                   steps:R?.steps.length || 0, live:R?.nLive || 0, paused_steps:R?.nPaused || 0, timer:bar?.querySelector("#showTime")?.textContent || null,
+                   trace:M.trace(), edges:M.edges()}),
+    /* where each replay badge is now (screen px), for tests: [{n, x, y}] */
+    replayMarks: () => RP ? RP.marks.filter(m => m.badge).map(m => ({n:m.s.n, x:parseFloat(m.badge.style.left) + 9, y:parseFloat(m.badge.style.top) + 9})) : [],
+    /* ======== HOOK: local transcript lines (Q-SHOW1 3b) ========
+       Voice is transcribed on Nowed's own PC only. This page never listens: there is no browser speech recognition
+       here, on purpose. The desktop pointer / ActionMap bridge (2c) will call NodachShow.addTranscriptLine(text, t_ms?)
+       for each finished line while a show is recording; each becomes a note step (via "transcript"), shared live like
+       any other step. Nothing calls it yet. Returns false when no show is recording. */
+    addTranscriptLine(text, t_ms){
+      if (!R?.active || R.stopping || !String(text || "").trim()) return false;
+      addStep({kind:"note", t_ms:t_ms ?? now(), text:String(text).trim().slice(0, 2000), via:"transcript"});
+      return true;
+    },
+  };
 })();
 </script>
 <script type="module">
@@ -1871,6 +2438,7 @@ function Inner(p) {
   const [nodes, setNodes] = useState(p.nodes);
   const [pending, setPending] = useState(null); // a connection waiting for its link type
   const rf = useReactFlow();
+  useEffect(() => { RF = rf; }, [rf]);
   useEffect(() => { setNodes(prev => {
       const sel = new Set(prev.filter(n => n.selected).map(n => n.id));
       return p.nodes.map(n => ({ ...n, selected: n.selected || n.id === p.sel || sel.has(n.id) })); }); }, [p.nodes, p.sel]);
@@ -1918,8 +2486,19 @@ function Inner(p) {
 }
 
 let root = null;
+let RF = null;   // the React Flow instance, for map-unit geometry (Show marks that follow pan, zoom and node moves)
 window.NodachCanvas = {
   RELS,
+  geo: {
+    ready: () => !!RF,
+    toFlow: (x, y) => RF.screenToFlowPosition({ x, y }, { snapToGrid: false }),
+    toScreen: (x, y) => RF.flowToScreenPosition({ x, y }),
+    zoom: () => RF.getViewport().zoom,
+    viewport: () => RF.getViewport(),
+    setViewport: v => RF.setViewport(v),
+    node: id => { const n = RF.getInternalNode(id); if (!n) return null; const a = n.internals?.positionAbsolute || n.position;
+      return { x: a.x, y: a.y, w: n.measured?.width || n.width || 0, h: n.measured?.height || n.height || 0 }; },
+  },
   render(el, props) {
     if (!root) root = createRoot(el);
     root.render(h(ReactFlowProvider, null, h(Inner, props)));

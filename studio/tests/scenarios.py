@@ -701,6 +701,219 @@ async def s40_point_mode(b):
     return ok, f"items={len(made)}, part={pt.get('part')}, view after click={view_after_click}, pressed after Esc={off}, errors={p.errors[:1]}"
 
 
+async def s41_multi_point(b):
+    """Shift+clicks two parts of Studio, then Enter, and leaves one note on both. One idea item is written whose point
+    has targets in click order (pointer.v1 each); numbered badges show while picking and go after saving; nothing underneath fires."""
+    st = Store(); p = await open_page(b, st, {})
+    await p.click("#pointBtn"); await p.wait_for_timeout(150)
+    await p.click('#tabs button[data-v="list"]', modifiers=["Shift"]); await p.wait_for_timeout(100)
+    await p.click('#tabs button[data-v="tree"]', modifiers=["Shift"]); await p.wait_for_timeout(100)
+    badges = await p.locator(".ptBadge").all_inner_texts()
+    await p.keyboard.press("Enter"); await p.wait_for_timeout(150)
+    if not await exists(p, "#pointNote textarea"):
+        return False, f"no note box after Enter, badges={badges}"
+    await p.fill("#pointNote textarea", "Group these two"); await p.press("#pointNote textarea", "Enter"); await p.wait_for_timeout(300)
+    made = [e for e in st.events if e.get("kind") == "item.create" and (e.get("body") or {}).get("source") == "point"]
+    pt = (made[0]["body"].get("point") if made else {}) or {}
+    tg = pt.get("targets") or []
+    left = await p.locator(".ptBadge").count()
+    view = await p.evaluate("S.view")
+    body = made[0]["body"]["body"] if made else ""
+    ok = (len(made) == 1 and badges == ["1", "2"] and len(tg) == 2 and all(t.get("schema") == "pointer.v1" and t.get("part") == "studio.tabs" for t in tg)
+          and "data-v=list" in tg[0].get("element", "") and "data-v=tree" in tg[1].get("element", "") and "\n1. studio.tabs" in body and "\n2. studio.tabs" in body
+          and left == 0 and view == "map" and not p.errors)
+    return ok, f"items={len(made)}, badges={badges}, targets={[t.get('element') for t in tg]}, badges left={left}, view={view}, errors={p.errors[:1]}"
+
+
+async def until(cond, timeout=8.0):
+    """Wait for a store condition instead of a fixed sleep (CI runners are slower than a laptop)."""
+    t = 0.0
+    while not cond() and t < timeout:
+        await asyncio.sleep(0.1); t += 0.1
+    await asyncio.sleep(0.2)
+
+
+def now_ts():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+async def stroke(p, x, y, pts=((60, 0), (60, 50), (0, 50), (0, 0))):
+    await p.mouse.move(x, y); await p.mouse.down()
+    for dx, dy in pts:
+        await p.mouse.move(x + dx, y + dy, steps=3); await p.wait_for_timeout(45)
+    await p.mouse.up(); await p.wait_for_timeout(150)
+
+
+async def s42_show_record_save(b):
+    """Records a show for one watcher: two clicks, a drawn stroke and a note. The item is live from the start, the watcher
+    is granted it, each step is a live comment the watcher sees with Claude's reply in between, nothing underneath fires,
+    and Stop saves one item with ordered show.v1 steps, addressable lines, and status open."""
+    st = Store([ev("comment", "Q-layers", {"text": "hello"}, who="github:watcher1", label="Watcher")])
+    p = await open_page(b, st, {})
+    await p.click("#showBtn"); await p.wait_for_timeout(200)
+    has_watcher = await exists(p, '#showBar [data-login="watcher1"]')
+    if has_watcher:
+        await p.click("#showAud summary"); await p.check('#showBar [data-login="watcher1"]'); await p.click("#showAud summary")
+    await p.click("#showGo"); await p.wait_for_timeout(400)
+    created = [e for e in st.events if e["kind"] == "item.create" and e["body"].get("source") == "show"]
+    if not created:
+        return False, "no live item created on start"
+    sid = created[0]["body"]["id"]
+    await p.click('#tabs button[data-v="list"]'); await p.wait_for_timeout(120)
+    await p.click('#tabs button[data-v="ask"]'); await p.wait_for_timeout(300)
+    view_mid = await p.evaluate("S.view")
+    # a watcher opens the live item; Claude replies through the hub
+    w = await open_page(b, st, {"me": "github:watcher1", "owner": False})
+    await st.add("events", ev("comment", sid, {"text": "I see the tabs"}, who="claude", label="Claude", ts=now_ts()))
+    await w.evaluate(f"select('{sid}')"); await w.wait_for_timeout(300)
+    w_live = await exists(w, "#showLive"); w_steps = await w.locator(".showlog li.step").count(); w_reply = await w.locator(".showlog li.reply").count()
+    await stroke(p, 700, 450)
+    await p.keyboard.press("n"); await p.wait_for_timeout(120)
+    await p.fill("#showNoteBox textarea", "Look here"); await p.press("#showNoteBox textarea", "Enter"); await p.wait_for_timeout(300)
+    await w.wait_for_timeout(200); w_steps2 = await w.locator(".showlog li.step").count()
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(150)
+    await p.fill("#showTitle", "Tabs walkthrough"); await p.click("#showSave")
+    await until(lambda: any(e["kind"] == "status" and e["item"] == sid for e in st.events))   # CI run 1: a slow runner needed >700 ms
+    live = [e for e in st.events if e["kind"] == "comment" and e["item"] == sid and (e["body"] or {}).get("step")]
+    grants = [e for e in st.events if e["kind"] == "access.grant"]
+    edits = [e for e in st.events if e["kind"] == "item.edit" and e["item"] == sid]
+    status = [e["body"]["status"] for e in st.events if e["kind"] == "status" and e["item"] == sid]
+    sh = (edits[-1]["body"].get("show") if edits else {}) or {}
+    steps = sh.get("steps") or []
+    kinds = [s["kind"] for s in steps]; ns = [s["n"] for s in steps]
+    body = edits[-1]["body"].get("body", "") if edits else ""
+    await p.evaluate(f"openAddress('{sid}#3')"); await p.wait_for_timeout(200)
+    line3 = await p.evaluate("document.getElementById('L-3')?.textContent || ''")
+    size = len(json.dumps(sh))
+    ok = (has_watcher and created[0]["body"]["status"] == "live" and len(created) == 1
+          and grants and grants[0]["body"] == {"login": "watcher1", "items": [sid]}
+          and view_mid == "map" and kinds == ["point", "point", "stroke", "note"] and ns == [1, 2, 3, 4]
+          and sh.get("schema") == "show.v1" and len(steps[2].get("path") or []) >= 3 and steps[3].get("text") == "Look here"
+          and steps[0]["target"]["part"] == "studio.tabs" and isinstance(sh.get("cursor"), list) and sh.get("audience") == ["watcher1"]
+          and len(live) == 4 and status == ["open"] and "\n3. Drew around" in body and "\n4. Note: Look here" in body
+          and line3.startswith("3. Drew around") and size < 200000
+          and w_live and w_steps == 2 and w_reply == 1 and w_steps2 == 4 and not p.errors and not w.errors)
+    return ok, (f"watcher listed={has_watcher}, grants={[g['body'] for g in grants]}, view after clicks={view_mid}, kinds={kinds}, n={ns}, live comments={len(live)}, "
+                f"status={status}, line 3={line3[:40]!r}, watcher saw live={w_live} steps={w_steps}->{w_steps2} replies={w_reply}, bytes={size}, errors={(p.errors + w.errors)[:1]}")
+
+
+async def s43_show_pause(b):
+    """Pauses mid-show. What he does while paused is not written live and is left out of the saved show unless he ticks
+    include paused steps (default off); numbering of the shared steps stays 1, 2."""
+    st = Store(); p = await open_page(b, st, {})
+    await p.click("#showBtn"); await p.wait_for_timeout(150)
+    await p.click("#showGo"); await p.wait_for_timeout(300)
+    sid = next(e["body"]["id"] for e in st.events if e["kind"] == "item.create")
+    await p.click('#tabs button[data-v="list"]'); await p.wait_for_timeout(150)
+    await p.click("#showPause"); await p.wait_for_timeout(100)
+    await p.click('#tabs button[data-v="tree"]'); await p.wait_for_timeout(150)
+    paused_live = len([e for e in st.events if e["kind"] == "comment" and e["item"] == sid])
+    await p.click("#showPause"); await p.wait_for_timeout(100)
+    await p.click('#tabs button[data-v="ask"]'); await p.wait_for_timeout(300)
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(150)
+    box = await exists(p, "#showInclPaused"); ticked = await p.is_checked("#showInclPaused") if box else None
+    await p.click("#showSave")
+    await until(lambda: any(e["kind"] == "status" and e["item"] == sid for e in st.events))
+    live = [e["body"]["step"] for e in st.events if e["kind"] == "comment" and e["item"] == sid and e["body"].get("step")]
+    edits = [e for e in st.events if e["kind"] == "item.edit" and e["item"] == sid]
+    steps = ((edits[-1]["body"].get("show") if edits else {}) or {}).get("steps") or []
+    els = [s.get("target", {}).get("element", "") for s in steps]
+    ok = (paused_live == 1 and box and ticked is False and len(live) == 2 and [s["n"] for s in live] == [1, 2]
+          and [s["n"] for s in steps] == [1, 2] and not any("tree" in x for x in els) and not any(s.get("paused") for s in steps) and not p.errors)
+    return ok, f"live comments after paused click={paused_live}, include box={box} ticked={ticked}, live n={[s['n'] for s in live]}, saved={els}, errors={p.errors[:1]}"
+
+
+async def s44_show_replay(b):
+    """Opens a saved show and presses Replay: Studio switches to the recorded view and plays the cursor, stroke and numbered
+    badges over it; Esc closes the replay and returns to where he was."""
+    tgt = {"schema": "pointer.v1", "kind": "pointer.studio", "part": "list.items", "element": "button", "text": "x", "view": "list",
+           "rect": {"left": 200, "top": 120, "right": 300, "bottom": 150}, "viewport": {"w": 1200, "h": 800}}
+    show = {"schema": "show.v1", "started": "2026-11-19T10:00:00.000Z", "duration_ms": 1200, "view": "list", "viewport": {"w": 1200, "h": 800},
+            "audience": [], "steps": [{"n": 1, "t_ms": 50, "kind": "point", "target": tgt},
+                                      {"n": 2, "t_ms": 200, "kind": "stroke", "target": tgt, "path": [[100, 100], [200, 160], [300, 100]], "dur_ms": 300}],
+            "cursor": [[0, 10, 10], [300, 150, 120], [900, 300, 100]]}
+    st = Store([ev("item.create", None, {"id": "SH-test", "type": "idea", "title": "A show", "body": "1. Pointed at x\n2. Drew around x",
+                                          "status": "open", "source": "show", "show": show})])
+    p = await open_page(b, st, {})
+    await p.evaluate("select('SH-test')"); await p.wait_for_timeout(200)
+    if not await exists(p, "#showReplayBtn"):
+        return False, "no Replay button on a show item"
+    await p.click("#showReplayBtn"); await p.wait_for_timeout(700)
+    on = await exists(p, "#showReplay"); view = await p.evaluate("S.view")
+    badges = await p.locator("#showReplay .ptBadge").count()
+    pts = await p.evaluate("document.querySelector('#showReplay polyline')?.getAttribute('points') || ''")
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(200)
+    gone = not await exists(p, "#showReplay"); back = await p.evaluate("S.view")
+    ok = on and view == "list" and badges == 2 and pts.count(",") == 3 and gone and back == "map" and not p.errors
+    return ok, f"overlay={on}, view={view}, badges={badges}, stroke points={pts!r}, closed by Esc={gone}, back to={back}, errors={p.errors[:1]}"
+
+
+FAKE_CLOCK = "window.__fake = 0; window.__clockNow = () => window.__fake;"
+
+
+async def s49_show_pause_clock(b):
+    """F-show-pause-clock (20 Nov, staging): pauses a show for five seconds on a fake clock. The timer freezes while paused,
+    and paused time is left out of every step's t_ms, the cursor trail and the saved duration; the save box holds it too."""
+    st = Store(); p = await open_page(b, st, {})
+    await p.evaluate(FAKE_CLOCK)
+    await p.click("#showBtn"); await p.wait_for_timeout(150)
+    await p.click("#showGo"); await p.wait_for_timeout(300)
+    sid = next(e["body"]["id"] for e in st.events if e["kind"] == "item.create")
+    await p.evaluate("window.__fake = 1000"); await p.mouse.move(400, 300); await p.wait_for_timeout(200)
+    await p.click('#tabs button[data-v="list"]'); await p.wait_for_timeout(150)
+    await p.click("#showPause"); await p.wait_for_timeout(100)
+    await p.evaluate("window.__fake = 6000"); await p.mouse.move(420, 320); await p.wait_for_timeout(400)
+    timer_paused = await p.inner_text("#showTime"); el_paused = (await p.evaluate("NodachShow.state()"))["elapsed_ms"]
+    await p.click("#showPause"); await p.wait_for_timeout(100)
+    await p.evaluate("window.__fake = 6500"); await p.mouse.move(440, 340); await p.wait_for_timeout(250)
+    await p.click('#tabs button[data-v="ask"]'); await p.wait_for_timeout(200)
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(150)
+    await p.evaluate("window.__fake = 30000"); await p.wait_for_timeout(300)
+    timer_stop = await p.inner_text("#showTime")
+    await p.click("#showSave")
+    await until(lambda: any(e["kind"] == "status" and e["item"] == sid for e in st.events))
+    edits = [e for e in st.events if e["kind"] == "item.edit" and e["item"] == sid]
+    sh = (edits[-1]["body"].get("show") if edits else {}) or {}
+    t_ms = [s["t_ms"] for s in sh.get("steps") or []]
+    live = [e["body"]["step"]["t_ms"] for e in st.events if e["kind"] == "comment" and e["item"] == sid and e["body"].get("step")]
+    curs = [c[0] for c in sh.get("cursor") or []]
+    await p.evaluate("delete window.__clockNow")
+    ok = (timer_paused == "0:01" and el_paused == 1000 and t_ms == [1000, 1500] and live == [1000, 1500] and sh.get("duration_ms") == 1500
+          and timer_stop == "0:01" and curs and max(curs) <= 1500 and not p.errors)
+    return ok, f"timer while paused={timer_paused} (elapsed {el_paused}), step t_ms={t_ms}, live t_ms={live}, duration={sh.get('duration_ms')}, timer in save box={timer_stop}, cursor times={curs}, errors={p.errors[:1]}"
+
+
+async def s50_show_states(b):
+    """Show is an explicit state machine: open, cancel, open, start, pause, stop, keep (back to paused), resume, stop, discard.
+    NodachShow.state() reads the state and an ordered trace; an event the state doesn't take is refused and traced."""
+    st = Store(); p = await open_page(b, st, {})
+    seq = []
+    async def s(): seq.append((await p.evaluate("NodachShow.state().state")))
+    await s()
+    await p.click("#showBtn"); await p.wait_for_timeout(150); await s()
+    await p.click("#showCancel"); await p.wait_for_timeout(100); await s()
+    await p.click("#showBtn"); await p.wait_for_timeout(150)
+    await p.click("#showGo"); await p.wait_for_timeout(300); await s()
+    await p.click("#showPause"); await p.wait_for_timeout(100); await s()
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(150); await s()
+    await p.click("#showResume"); await p.wait_for_timeout(100); await s()
+    rec_label = await p.inner_text("#showRec")
+    await p.click("#showPause"); await p.wait_for_timeout(100); await s()
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(150)
+    await p.click("#showDiscard"); await p.wait_for_timeout(400); await s()
+    tr = await p.evaluate("NodachShow.state().trace")
+    events = [(t["event"], t["to"]) for t in tr if t["ok"]]
+    want = [("open", "ready"), ("cancel", "idle"), ("open", "ready"), ("start", "recording"), ("pause", "paused"), ("stop", "stopping"),
+            ("keep", "paused"), ("resume", "recording"), ("stop", "stopping"), ("discard", "idle")]
+    refused = await p.evaluate("(() => { const m = NodachFSM.machine('t', SHOW_TABLE, 'idle'); const a = m.send('pause'); return [a, m.state, m.trace()[0].ok]; })()")
+    edges = await p.evaluate("NodachShow.state().edges.length")
+    withdrawn = any(e["kind"] == "status" and e["body"].get("status") == "withdrawn" for e in st.events)
+    ok = (seq == ["idle", "ready", "idle", "recording", "paused", "stopping", "paused", "recording", "idle"] and events == want
+          and "paused" in rec_label and refused == [False, "idle", False] and edges >= 12 and withdrawn and not p.errors)
+    return ok, f"states={seq}, trace={events}, label after keep={rec_label!r}, refused={refused}, edges={edges}, withdrawn={withdrawn}, errors={p.errors[:1]}"
+
+
 VENDOR = HERE.parent / "vendor"
 
 
@@ -844,7 +1057,56 @@ async def s39_scheduled_steps(b):
     return ok, f"post only-new by default={only_new}, no schedule on wired-into step={no_sched_mid}, hours saved={hours}, badge shown={badge}, bad hour refused={refused}, errors={p.errors[:1]}"
 
 
-async def s41_my_queue(b):
+async def s51_show_marks_follow_canvas(b):
+    """F-show-replay-drift (20 Nov, staging): points at a node on the canvas and draws on another while showing, then drags
+    the map and moves the first node. Live and in the replay, each badge stays on the node it marked (map units and
+    node anchor kept), not at the old screen spot."""
+    st = Store([]); p = await open_canvas_page(b, st, {})
+    async def box(nid):
+        return await p.locator(f'.react-flow__node[data-id="{nid}"]').bounding_box()
+    def inside(pt, bb, pad=3):
+        return pt and bb and bb["x"] - pad <= pt[0] <= bb["x"] + bb["width"] + pad and bb["y"] - pad <= pt[1] <= bb["y"] + bb["height"] + pad
+    await p.click("#showBtn"); await p.wait_for_timeout(150)
+    await p.click("#showGo"); await p.wait_for_timeout(300)
+    sid = next(e["body"]["id"] for e in st.events if e["kind"] == "item.create")
+    a = await box("D-001"); await p.mouse.click(a["x"] + 20, a["y"] + 10); await p.wait_for_timeout(150)
+    c = await box("D-002"); await stroke(p, c["x"] + 15, c["y"] + 10, ((40, 0), (40, 25), (0, 25)))
+    vp = await p.evaluate("NodachCanvas.geo.viewport()")
+    await p.evaluate(f"NodachCanvas.geo.setViewport({{x:{vp['x'] + 180}, y:{vp['y'] + 110}, zoom:{vp['zoom']}}})"); await p.wait_for_timeout(250)
+    live_badge = await p.evaluate("(() => { const b = document.querySelector('#showLayer .ptBadge'); return b ? [parseFloat(b.style.left) + 9, parseFloat(b.style.top) + 9] : null; })()")
+    a_live = await box("D-001")
+    await p.keyboard.press("Escape"); await p.wait_for_timeout(150)
+    await p.fill("#showTitle", "Canvas marks"); await p.click("#showSave")
+    await until(lambda: any(e["kind"] == "status" and e["item"] == sid for e in st.events))
+    edits = [e for e in st.events if e["kind"] == "item.edit" and e["item"] == sid]
+    steps = ((edits[-1]["body"].get("show") if edits else {}) or {}).get("steps") or []
+    f1 = (steps[0].get("target") or {}).get("flow") if steps else None
+    f2 = steps[1].get("fpath") if len(steps) > 1 else None
+    # drag the map again and move D-001 somewhere else on the board
+    vp = await p.evaluate("NodachCanvas.geo.viewport()")
+    await p.evaluate(f"NodachCanvas.geo.setViewport({{x:{vp['x'] - 260}, y:{vp['y'] + 40}, zoom:{vp['zoom'] * 1.25}}})")
+    n1 = await p.evaluate("NodachCanvas.geo.node('D-001')")
+    await st.add("events", ev("canvas.layout", None, {"board": "main", "moves": {"D-001": [round(n1["x"]) + 300, round(n1["y"]) + 160]}}, ts=now_ts()))
+    await p.wait_for_timeout(600)
+    await p.evaluate(f"select('{sid}')"); await p.wait_for_timeout(200)
+    await p.click("#showReplayBtn")
+    # The replay plays in real time: a mark appears once the clock passes its step's t_ms. On a slow runner the stroke's
+    # t_ms can be past a fixed 1.5 s wait (CI 21 Nov, 'replay 2 None'), so wait for the replay to reach its end instead.
+    try:
+        await p.wait_for_function("document.querySelector('#showReplay [data-play]')?.textContent.includes('Play again')", timeout=15000)
+    except Exception:
+        pass
+    await p.wait_for_timeout(100)
+    rm = {m["n"]: (m["x"], m["y"]) for m in await p.evaluate("NodachShow.replayMarks()")}
+    a2, c2 = await box("D-001"), await box("D-002")
+    ok = (f1 and f1.get("node") == "D-001" and f2 and steps[1].get("anchor", {}).get("node") == "D-002"
+          and inside(live_badge, a_live) and inside(rm.get(1), a2) and inside(rm.get(2), c2) and not p.errors)
+    return ok, (f"flow kept={bool(f1)} node={f1 and f1.get('node')}, stroke map path={bool(f2)} anchor={steps[1].get('anchor') if len(steps) > 1 else None}, "
+                f"live badge {live_badge} on D-001 {a_live and (round(a_live['x']), round(a_live['y']))}={inside(live_badge, a_live)}, "
+                f"replay 1 {rm.get(1)} on moved D-001={inside(rm.get(1), a2)}, replay 2 {rm.get(2)} on D-002={inside(rm.get(2), c2)}, errors={p.errors[:1]}")
+
+
+async def s45_my_queue(b):
     """Back after a day away, opens My queue. Only what waits on him shows, oldest first: a decision pack, an unanswered
     question, a re-asked one and a finding in his lane. Answered items and Claude-lane items stay out; nothing is written (AS3)."""
     t = lambda h: f"2026-11-19T{h}:00:00.000Z"
@@ -942,7 +1204,9 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s07_names, s08_long_history, s09_ai_relay, s10_keyboard_list, s11_offline_capture, s12_member_rights,
              s13_two_people_at_once, s14_phone, s15_undo_old_status, s16_overwhelm, s17_disagreement, s18_clock_skew, s19_private_area,
              s20_addresses, s21_money_settings, s22_duplicate_id, s23_same_order_everywhere,
-             s24_hub_sync, s25_more_than_1000, s26_hub_not_connected, s27_read_on_open, s28_push_after_clean_runs, s29_runs_timeline, s30_builder_pipeline, s31_content_cycles, s32_private_files_and_views, s33_studio_edits_studio, s34_command_map, s35_history_words, s36_canvas, s37_classic_map_fallback, s38_runnable_steps, s39_scheduled_steps, s40_point_mode, s41_my_queue,
+             s24_hub_sync, s25_more_than_1000, s26_hub_not_connected, s27_read_on_open, s28_push_after_clean_runs, s29_runs_timeline, s30_builder_pipeline, s31_content_cycles, s32_private_files_and_views, s33_studio_edits_studio, s34_command_map, s35_history_words, s36_canvas, s37_classic_map_fallback, s38_runnable_steps, s39_scheduled_steps, s40_point_mode,
+             s41_multi_point, s42_show_record_save, s43_show_pause, s44_show_replay, s45_my_queue,
+             s49_show_pause_clock, s50_show_states, s51_show_marks_follow_canvas,
              s54_sign_out_switch_account]
 
 
@@ -951,7 +1215,8 @@ async def main():
     async with async_playwright() as pw:
         # STUDIO_CHROME: use an installed Chrome instead of Playwright's (e.g. where its download is blocked)
         b = await pw.chromium.launch(executable_path=os.environ["STUDIO_CHROME"]) if os.environ.get("STUDIO_CHROME") else await pw.chromium.launch()
-        for sc in SCENARIOS:
+        only = os.environ.get("STUDIO_ONLY")
+        for sc in [x for x in SCENARIOS if not only or x.__name__.split("_")[0] in only.split(",")]:
             try:
                 ok, note = await sc(b)
             except Exception as e:
