@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Nodach">
+  <rect width="256" height="256" rx="48" fill="#0E4A3D"/>
+  <g transform="translate(16 81) scale(0.9333)">
+    <path d="M8 0 H133 V58 Q133 70 142 62 L204 0 H232 Q240 0 240 8 V92 Q240 100 232 100 H107 V42 Q107 30 98 38 L36 100 H8 Q0 100 0 92 V8 Q0 0 8 0 Z" fill="#F3E3CC"/>
+  </g>
+</svg>
