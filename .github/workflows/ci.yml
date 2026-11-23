@@ -38,6 +38,7 @@ jobs:
       - run: python scripts/test_policy.py
       - run: python scripts/test_run_record.py
       - run: python scripts/test_smoke_hub.py
+      - run: python scripts/test_hub_rollback.py
       - run: python scripts/test_change_intake.py
       - run: python scripts/test_check_no_seed_making.py
       - run: python scripts/test_check_reliability.py
