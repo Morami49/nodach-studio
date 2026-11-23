@@ -43,6 +43,7 @@ jobs:
       - run: python scripts/test_staging_train.py
       - run: python scripts/test_check_worker_names.py
       - run: python scripts/test_restore_drill.py
+      - run: python scripts/test_main_guard.py   # F-main-guard-merge
       - run: python scripts/test_design_tokens.py
   studio:
     runs-on: ubuntu-latest

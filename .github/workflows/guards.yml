@@ -32,30 +32,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 scripts/check_worker_names.py hub/wrangler.toml
   main-guard:
-    # Main may only move to a commit that already passed CI on a branch.
+    # Main may only move to content that already passed CI on a branch (D-087). The rules live in
+    # scripts/main_guard.py (Q58 A same tree; F-main-guard-merge: the exact merge a pull_request run tested; retries
+    # while GitHub catches up after a merge). Anything else opens the issue, as before.
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Was this commit green on a branch first?
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: {fetch-depth: 0}
+      - name: Was this content green on a branch first?
         env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}", SHA: "${{ github.sha }}", REPO: "${{ github.repository }}"}
         run: |
-          ok=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&status=success&per_page=50" \
-               --jq '[.workflow_runs[] | select(.name=="ci" and .head_branch!="main")] | length')
-          echo "green branch runs for $SHA: $ok"
-          if [ "$ok" = "0" ]; then
-            # Q58 A: a GitHub merge/squash/rebase of a PR makes a new SHA that never ran on a branch. It still counts
-            # as green when it came from a merged PR whose tested head has the SAME content (git tree) and a green
-            # branch ci run. Only content identical to what was tested passes; anything else still raises the alarm.
-            tree=$(gh api "repos/$REPO/git/commits/$SHA" --jq .tree.sha)
-            for head in $(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[] | select(.merged_at != null) | .head.sha'); do
-              htree=$(gh api "repos/$REPO/git/commits/$head" --jq .tree.sha)
-              hok=$(gh api "repos/$REPO/actions/runs?head_sha=$head&status=success&per_page=50" \
-                    --jq '[.workflow_runs[] | select(.name=="ci" and .head_branch!="main")] | length')
-              echo "PR head $head: tree $htree (main $tree), green branch runs $hok"
-              if [ "$htree" = "$tree" ] && [ "$hok" != "0" ]; then
-                echo "same content as tested PR head $head: ok"; exit 0
-              fi
-            done
+          if ! python3 scripts/main_guard.py "$SHA"; then
             gh issue create -R "$REPO" --title "main moved without green CI: ${SHA:0:7}" \
               --body "Commit $SHA reached main without a passing ci run on a branch first (D-087). Check it, then revert or confirm." || true
             exit 1
