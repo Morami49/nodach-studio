@@ -269,7 +269,10 @@ impl State {
     pub fn visible_to_hub_owner(&self, login: &str, ev: &Value) -> Option<bool> {
         let v = self.visible(login, ev)?;
         if v { return Some(true); }
-        Some(self.space_of_event(ev).is_some_and(|ts| self.support_open(login, &ts)))
+        // F-ci-token-refused: an event outside every teamspace (e.g. a member's node.share on a node in no teamspace)
+        // is the hub owner's as before #74; teamspaces have no say there.
+        let ts = self.space_of_event(ev)?;
+        Some(self.support_open(login, &ts))
     }
 
     /// The teamspace a teamspace-canvas layout event belongs to: `canvas.layout` on board `ts:<id>` of a teamspace

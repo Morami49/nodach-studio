@@ -177,3 +177,102 @@ fn decision_114a_teamspace_rules_bind_the_hub_owner() {
     let r = authorship::refusal(&acc, "Morami49", &ev("Morami49", "member.remove", Some("TS-pilot"), json!({"teamspace": "TS-pilot", "profile": "P-morami49"}), 40)).unwrap();
     assert!(r.contains("at least one owner"), "{r}");
 }
+
+// ---- F-ci-token-refused (23 Nov): production writers after #74/#79, and the CI token since A1 d (18 Nov) ----
+
+fn tool(h: &mut Hub, login: &str, name: &str, args: Value) -> Value {
+    let key = KeyPair::from_seed([7; 32]);
+    mcp::handle(h, login, &key, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}), at(NOW))
+        .unwrap()["result"].clone()
+}
+
+/// Exactly what scripts/run_record.py sends for one hub-staging / hub-deploy run.
+fn run_record(h: &mut Hub, executor: &str) -> Vec<Value> {
+    let item = format!("RUNS-{executor}");
+    vec![
+        tool(h, access::SERVICE_LOGIN, "write_event", json!({"kind": "item.create", "item": null, "idempotency_key": format!("runs-item/{executor}"),
+            "body": {"id": item, "type": "asset", "title": "Runs", "status": "built", "refs": ["P-13"]}})),
+        tool(h, access::SERVICE_LOGIN, "write_event", json!({"kind": "comment", "item": item, "idempotency_key": format!("run/{executor}/1/1"),
+            "body": {"text": "Staging deploy", "outcome": "failure"}})),
+    ]
+}
+
+#[test]
+fn ci_token_records_runs_on_the_production_hub_again() {
+    // The 23 Nov hub-staging run 45222430169 got {"error": "RUNS-hub-staging isn't in a space you've been given"}
+    let mut h = hub();
+    for executor in ["hub-staging", "hub-deploy", "branch-cleanup"] {
+        for r in run_record(&mut h, executor) {
+            assert_eq!(r["isError"], false, "{executor}: {r}");
+        }
+    }
+    let (docs, _, _, _) = h.studio_events(0, usize::MAX);
+    assert!(docs.iter().any(|d| d["event"]["item"] == "RUNS-hub-staging" && d["event"]["kind"] == "comment"));
+}
+
+#[test]
+fn ci_token_reads_the_deploy_policy_again() {
+    // policy.py read "Studio: unknown" on every run since 18 Nov: SET-policy-hub-deploy was invisible to the token
+    let mut h = hub();
+    assert_eq!(tool(&mut h, "Morami49", "write_event", json!({"kind": "item.create", "item": null,
+        "body": {"id": "SET-policy-hub-deploy", "type": "setting", "title": "hub-deploy policy", "value": "ask"}}))["isError"], false);
+    let seen = items_seen(&h, access::SERVICE_LOGIN);
+    assert!(seen.contains(&"SET-policy-hub-deploy".to_string()), "{seen:?}");
+    // ...but never inside a teamspace it isn't in (it can't open support access either)
+    assert!(!seen.contains(&"N-plan".to_string()) && !seen.contains(&"MR-pilot".to_string()), "{seen:?}");
+}
+
+#[test]
+fn ci_token_is_still_bound_by_teamspaces_and_cannot_grant() {
+    let mut h = hub();
+    let r = tool(&mut h, access::SERVICE_LOGIN, "write_event", json!({"kind": "comment", "item": "N-plan", "body": {"text": "x"}}));
+    assert_eq!(r["structuredContent"]["refused"], true, "{r}");
+    for (kind, item, body) in [
+        ("access.grant", Value::Null, json!({"login": "someone", "prefixes": ["D-"]})),
+        ("member.role", json!("TS-pilot"), json!({"teamspace": "TS-pilot", "profile": "P-nassar", "role": "owner"})),
+        ("node.share", json!("N-plan"), json!({"node": "N-plan", "profile": "P-nassar", "level": "editor"})),
+    ] {
+        let r = tool(&mut h, access::SERVICE_LOGIN, "write_event", json!({"kind": kind, "item": item, "body": body}));
+        assert_eq!(r["structuredContent"]["refused"], true, "{kind}: {r}");
+    }
+}
+
+#[test]
+fn other_production_writers_are_unchanged_outside_teamspaces() {
+    let mut h = hub();
+    // the Claude connector (signed-in owner) writes outside teamspaces
+    assert_eq!(tool(&mut h, "Morami49", "write_event", json!({"kind": "comment", "item": "D-nodach-org-model", "body": {"text": "ok"}}))["isError"], false);
+    // the importer (Studio Web sync, /import and import_studio_events): events outside teamspaces, any author
+    let acc = h.access();
+    let outside = vec![
+        ("w1".to_string(), ev("Morami49", "item.create", None, json!({"id": "Q-1", "type": "question", "title": "q"}), 20)),
+        ("w2".to_string(), ev("Morami49", "comment", Some("Q-1"), json!({"text": "from Studio Web"}), 21)),
+    ];
+    assert_eq!(authorship::batch_refusal(&acc, "Morami49", &outside), None);
+    assert_eq!(authorship::batch_teamspace_refusal(&acc, &outside), None);
+    let made = h.import(&KeyPair::from_seed([9; 32]), outside, at(NOW)).unwrap();
+    assert!(!made.is_empty());
+    // Desktop and Live (POST /studio/api/events as the signed-in owner) outside teamspaces
+    let acc = h.access();
+    for e in [ev("Morami49", "comment", Some("Q-1"), json!({"text": "desktop"}), 22),
+              ev("Morami49", "item.create", None, json!({"id": "LIVE-s1", "type": "session", "title": "live"}), 23),
+              ev("Morami49", "canvas.layout", None, json!({"board": "main", "moves": []}), 24)] {
+        assert_eq!(authorship::refusal(&acc, "Morami49", &e), None, "{e}");
+    }
+    // a member outside their spaces is still refused exactly as before
+    assert!(authorship::refusal(&acc, "nassar", &ev("nassar", "comment", Some("Q-1"), json!({"text": "x"}), 25)).is_some());
+}
+
+#[test]
+fn the_hub_owner_still_sees_shares_of_nodes_outside_every_teamspace() {
+    // "Everything outside teamspaces stays his" (114b a): a member's share of a node in no teamspace was hidden
+    let mut h = hub();
+    let docs = vec![
+        ("s1".to_string(), ev("Morami49", "access.grant", None, json!({"login": "nassar", "prefixes": ["INSYDR-"]}), 30)),
+        ("s2".to_string(), ev("nassar", "item.create", None, json!({"id": "INSYDR-brief", "type": "idea", "title": "brief"}), 31)),
+        ("s3".to_string(), ev("nassar", "node.share", Some("INSYDR-brief"), json!({"node": "INSYDR-brief", "profile": "P-someone", "level": "viewer"}), 32)),
+    ];
+    h.import(&KeyPair::from_seed([9; 32]), docs, at(NOW)).unwrap();
+    let (docs, _, _, _) = h.studio_events_for("Morami49", 0, usize::MAX, at(NOW));
+    assert!(docs.iter().any(|d| d["event"]["kind"] == "node.share" && d["event"]["item"] == "INSYDR-brief"));
+}

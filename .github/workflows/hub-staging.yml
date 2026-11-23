@@ -70,7 +70,7 @@ jobs:
         run: |
           T="$RUNNER_TEMP/train"; mkdir -p "$T"
           # the scripts come from the checked-out workflow ref (main for ci-triggered runs), never from a PR branch
-          cp scripts/staging_train.py scripts/should_automerge.py "$T/"
+          cp scripts/staging_train.py scripts/should_automerge.py scripts/smoke_hub.py "$T/"
           gh api "repos/$R/pulls?state=open&base=main&per_page=100" --paginate --jq '.[]' | jq -s . > "$T/prs.json"
           echo '{}' > "$T/checks.json"
           if [ "$SINGLE" != true ]; then
@@ -155,18 +155,12 @@ jobs:
           [ -n "$NODE_SECRET_STRIPE_TEST_WEBHOOK" ] && printf '%s' "$NODE_SECRET_STRIPE_TEST_WEBHOOK" | $W secret put NODE_SECRET_STRIPE_TEST_WEBHOOK --env staging || true
       - if: steps.ready.outputs.go == 'yes'
         name: Smoke-test staging
+        # F-staging-smoke-silent (23 Nov, run 45222430169): the inline `test "$(curl ...)" = 302` chain exited 1 with no
+        # output while the Worker was still rolling out the secret puts above. The script retries through that settle
+        # window and, when it does fail, names the check, the URL, the code it got and the start of the body.
         run: |
-          set -e
-          short=$(echo "$DEPLOY_SHA" | cut -c1-7)
-          for i in $(seq 1 18); do curl -fsS "$URL/health" | grep -q "ok $short" && break; echo "not live yet ($i/18)"; sleep 10; done
-          curl -fsS "$URL/health" | grep -q "ok $short"
-          # Studio needs sign-in; its API refuses anyone who isn't signed in
-          test "$(curl -s -o /dev/null -w '%{http_code}' "$URL/studio")" = 302
-          test "$(curl -s -o /dev/null -w '%{http_code}' "$URL/studio/api/me")" = 401
-          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL/studio/api/events" -d '{}')" = 401
-          # the connector still starts sign-in
-          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL/mcp" -d '{}')" = 401
-          echo "staging smoke test passed for $short ($TRAIN_NOTE)"
+          python3 "$RUNNER_TEMP/train/smoke_hub.py" --url "$URL" --build "$(echo "$DEPLOY_SHA" | cut -c1-7)"
+          echo "staging smoke test passed ($TRAIN_NOTE)"
       - name: Record the run in Studio
         if: always() && steps.ready.outputs.go == 'yes'
         working-directory: .
