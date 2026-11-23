@@ -828,9 +828,11 @@ mod tests {
 
     #[test]
     fn only_test_keys_and_test_events() {
-        assert!(test_key_ok("sk_test_51abcdefghij"));
-        assert!(test_key_ok("rk_test_51abcdefghij"));
-        assert!(!test_key_ok("sk_live_51abcdefghij"));
+        // key-shaped strings are built here, never written out whole (the secrets scan rightly flags those)
+        let key = |prefix: &str| format!("{prefix}_{}", "x".repeat(12));
+        assert!(test_key_ok(&key("sk_test")));
+        assert!(test_key_ok(&key("rk_test")));
+        assert!(!test_key_ok(&key("sk_live")));
         assert!(!test_key_ok(""));
         assert!(parse_webhook(&json!({"type": "checkout.session.completed", "livemode": true})).is_err());
         assert!(parse_webhook(&json!({"type": "checkout.session.completed"})).is_err(), "livemode must say false");
