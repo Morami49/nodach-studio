@@ -31,6 +31,7 @@ pub mod digest;
 pub mod authorship;
 pub mod teamspaces;
 pub mod usage;
+pub mod money;
 
 pub const IMPORT_KIND: &str = "studio.event";
 /// A Studio-shaped write made on a node other than Studio Web (PC, phone, an AI via the hub).
@@ -231,6 +232,20 @@ impl Hub {
         let prof = self.profiles();
         let teams = teamspaces::State::fold(prof.clone(), &self.owners, pairs.clone());
         usage::State::fold(prof, teams, &self.owners, pairs, month, private_bytes)
+    }
+
+    /// BQ-1 step 4: every teamspace's ledger and the fee rules, folded from the record. Payments, fees, refunds and
+    /// checkout links count only when the hub signed them itself (`studio.write` by the runner), never from an import.
+    pub fn money(&self) -> money::State {
+        let page = self.pull(0, usize::MAX);
+        let docs: Vec<(String, Value, bool)> = page.events.iter().filter_map(|e| match e.u.kind.as_str() {
+            k if k == IMPORT_KIND => Some((e.u.body.get("doc_id")?.as_str()?.to_string(), e.u.body.get("event")?.clone(), false)),
+            k if k == WRITE_KIND => Some((studio_doc_id(&e.id), e.u.body.clone(), true)),
+            _ => None,
+        }).collect();
+        let pairs: Vec<(&str, &Value)> = docs.iter().map(|(d, e, _)| (d.as_str(), e)).collect();
+        let teams = teamspaces::State::fold(self.profiles(), &self.owners, pairs);
+        money::State::fold(teams, &self.owners, docs.iter().map(|(d, e, h)| (d.as_str(), e, *h)))
     }
 
     /// One page of the shared record as `login` may see it: same cursor and total, members get only what's theirs.

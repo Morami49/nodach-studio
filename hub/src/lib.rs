@@ -43,6 +43,16 @@
 //!                            and the limits node (BQ-1 step 3, hub_core::usage). At 100% of a limit AI calls and flow runs
 //!                            are refused with "Monthly free limit reached; a top-up will be available soon", logged as
 //!                            outcome "refused: limit"; storage is warn-only. Notices at 80%/100% go to the owners' queue.
+//! GET  /studio/api/money?teamspace=TS → that teamspace's ledger, invoices, fee lines, Nodach's net, the fee rules and
+//!                            whether Stripe test mode is set up (BQ-1 step 4, hub_core::money). Members and owners only.
+//! POST /studio/api/money/checkout {invoice} → {url}: a Stripe Checkout link (TEST MODE ONLY, NODE_SECRET_STRIPE_TEST)
+//!                            as a destination charge with Nodach's fee as application fee. Logged as "money".
+//! POST /studio/api/money/record {invoice, amount, method: recorded_bank_transfer | own_provider, ref}: a teamspace
+//!                            owner records a payment that didn't go through Stripe; the hub writes it and its fee line.
+//! POST /stripe/webhook       Stripe → hub (no sign-in): the Stripe-Signature header is checked against
+//!                            NODE_SECRET_STRIPE_TEST_WEBHOOK before anything is read; live-mode events are refused. A paid
+//!                            checkout writes payment.received + fee.charged (Nodach's fee) + fee.charged (Stripe's cost,
+//!                            from the balance transaction); charge.refunded writes refund. Retries record nothing new.
 //! GET  /studio/api/private  ?path=data/users/<you>/... → {events:[{doc_id,event}]}: your private items (I1, Q53 A)
 //! POST /studio/api/private  {path, doc_id, event}: one private event, sealed with your own key (hub_core::private)
 //! POST /studio/api/private/batch  {items:[{path, key, event}]}: up to 200 private events, checked whole (M1 d)
@@ -513,6 +523,8 @@ impl Record {
     }
 
     fn node_secret(&self, name: &str) -> std::result::Result<String, String> {
+        // BQ-1 step 4: the Stripe secrets are the hub's own; a flow step can never name them
+        if name.trim().to_ascii_uppercase().starts_with("STRIPE") { return Err(format!("{name:?} is reserved for the hub's payments")); }
         let var = flows::secret_var(name).ok_or_else(|| format!("{name:?} isn't a usable secret name"))?;
         self.secret_opt(&var).ok_or_else(|| format!("the hub has no secret {var} yet (add it in GitHub → Settings → Secrets, then deploy)"))
     }
@@ -687,6 +699,70 @@ impl Record {
             st.set_alarm(3_600_000 - now.rem_euclid(3_600_000) + 60_000).await?;   // a minute past the next hour
         }
         Ok(())
+    }
+
+    /// BQ-1 step 4: the Stripe test key, or the one line Studio shows when it's missing or isn't a test key.
+    fn stripe_key(&self) -> std::result::Result<String, String> {
+        let k = self.secret_opt(hub_core::money::STRIPE_SECRET).ok_or(hub_core::money::NO_KEY)?;
+        if !hub_core::money::test_key_ok(&k) { return Err(hub_core::money::NOT_TEST.into()); }
+        Ok(k)
+    }
+
+    /// One call to Stripe's API (form-encoded POST, or GET when `form` is None). The key is never logged or returned.
+    async fn stripe(&self, path: &str, form: Option<&str>) -> std::result::Result<serde_json::Value, String> {
+        let key = self.stripe_key()?;
+        let h = Headers::new();
+        h.set("authorization", &format!("Bearer {key}")).map_err(|e| e.to_string())?;
+        h.set("content-type", "application/x-www-form-urlencoded").map_err(|e| e.to_string())?;
+        let mut init = RequestInit::new();
+        match form {
+            Some(f) => { init.with_method(Method::Post).with_headers(h).with_body(Some(worker::wasm_bindgen::JsValue::from_str(f))); }
+            None => { init.with_method(Method::Get).with_headers(h); }
+        }
+        let req = Request::new_with_init(&format!("https://api.stripe.com{path}"), &init).map_err(|e| e.to_string())?;
+        let mut r = Fetch::Request(req).send().await.map_err(|e| e.to_string())?;
+        let v: serde_json::Value = r.json().await.map_err(|_| format!("Stripe answered {} without JSON", r.status_code()))?;
+        if r.status_code() >= 300 {
+            let msg = v.pointer("/error/message").and_then(|m| m.as_str()).unwrap_or("no message");
+            return Err(format!("Stripe answered {}: {}", r.status_code(), msg.chars().take(200).collect::<String>()));
+        }
+        Ok(v)
+    }
+
+    /// Write the hub's own money events (payments, fee lines, refunds, checkout links) as the runner, in order.
+    fn money_write(&self, events: Vec<(String, String, serde_json::Value)>, why: &str, now: i64) -> std::result::Result<Vec<String>, String> {
+        events.into_iter().map(|(kind, item, body)| self.runner_write(&kind, Some(&item), body, why, now)).collect()
+    }
+
+    /// POST /stripe/webhook: verify the signature first, then record what's new. 400 for anything unverified.
+    async fn stripe_webhook(&self, req: &mut Request, now: i64) -> Result<Response> {
+        let sig = req.headers().get("stripe-signature").ok().flatten().unwrap_or_default();
+        let body = req.text().await.unwrap_or_default();
+        let Some(secret) = self.secret_opt(hub_core::money::STRIPE_WEBHOOK_SECRET) else {
+            self.log(now, "/stripe/webhook", "webhook", "refused: no signing secret", "stripe");
+            return Response::error("webhook signing secret isn't set up", 503);
+        };
+        let w = match hub_core::money::read_webhook(&sig, &body, &secret, now / 1000) {
+            Ok(w) => w,
+            Err(e) => { self.log(now, "/stripe/webhook", "webhook", &format!("refused: {}", e.chars().take(80).collect::<String>()), "stripe"); return Response::error("refused", 400); }
+        };
+        // Stripe's own fee for a payment, from its balance transaction (estimated and marked if it can't be read)
+        let cost = match &w {
+            hub_core::money::Webhook::Paid { payment_intent, .. } if !payment_intent.is_empty() => {
+                let p = format!("/v1/payment_intents/{}?expand[]=latest_charge.balance_transaction", hub_core::oauth::enc(payment_intent));
+                self.stripe(&p, None).await.ok().as_ref().and_then(hub_core::money::stripe_fee)
+            }
+            _ => None,
+        };
+        let plan = self.hub.borrow().as_ref().unwrap().money().plan(&w, cost);
+        let outcome = match plan {
+            Ok(evs) if evs.is_empty() => "ok: nothing new".to_string(),
+            Ok(evs) => match self.money_write(evs, "stripe webhook", now) { Ok(ids) => format!("ok: {} written", ids.len()), Err(e) => format!("failed: {}", e.chars().take(80).collect::<String>()) },
+            Err(e) => format!("refused: {}", e.chars().take(80).collect::<String>()),
+        };
+        self.log(now, "/stripe/webhook", "webhook", &outcome, "stripe");
+        // 200 for anything verified, so Stripe doesn't retry what can never be recorded (it's in the log)
+        if outcome.starts_with("failed") { Response::error("try again", 500) } else { Response::ok("ok") }
     }
 
     /// Each login's Private tier size in bytes (sealed rows included: they are still held). Never their contents.
@@ -1144,6 +1220,73 @@ impl Record {
                         // BQ-1 step 3: your meters (profiles and teamspaces you're a member or owner of); never anyone else's
                         let v = self.usage_state(now).view_for(&l, profile_hdr.as_deref());
                         json_status(&v, 200)?
+                    }
+                    (Method::Get, "/studio/api/money", Some(l)) => {
+                        // BQ-1 step 4: one teamspace's money, for its members and owners (and hub owners)
+                        let ts = url.query_pairs().find(|(a, _)| a == "teamspace").map(|(_, v)| v.to_string()).unwrap_or_default();
+                        let hub_owner = self.hub.borrow().as_ref().unwrap().access().is_owner(&l);
+                        let v = self.hub.borrow().as_ref().unwrap().money().view_for(&l, &ts, hub_owner);
+                        match v {
+                            Some(mut v) => {
+                                let ready = self.stripe_key();
+                                v["stripe"] = serde_json::json!({"ready": ready.is_ok(), "note": ready.err(), "mode": "test",
+                                    "webhook_ready": self.secret_opt(hub_core::money::STRIPE_WEBHOOK_SECRET).is_some(), "webhook_url": format!("{}/stripe/webhook", cfg.issuer)});
+                                json_status(&v, 200)?
+                            }
+                            None => json_status(&serde_json::json!({"error": "that teamspace's money isn't shared with you"}), 403)?,
+                        }
+                    }
+                    (Method::Post, "/studio/api/money/checkout" | "/studio/api/money/record", Some(l)) => {
+                        if req.headers().get(session::CSRF_HEADER).ok().flatten().as_deref() != Some("1") {
+                            json_status(&serde_json::json!({"error": "missing x-nodach-studio header"}), 403)?
+                        } else {
+                            let body: serde_json::Value = req.json().await.unwrap_or(serde_json::Value::Null);
+                            let invoice = body.get("invoice").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let m = self.hub.borrow().as_ref().unwrap().money();
+                            let teams = self.hub.borrow().as_ref().unwrap().teamspaces();
+                            let ts = m.invoices.get(&invoice).map(|i| i.teamspace.clone()).unwrap_or_default();
+                            let role = teams.role_of(&l, &ts);
+                            use hub_core::teamspaces::Role;
+                            let (status, v) = if ts.is_empty() {
+                                (404, serde_json::json!({"error": format!("invoice {invoice} isn't on the record")}))
+                            } else if p == "/studio/api/money/checkout" {
+                                if !matches!(role, Some(Role::Owner | Role::Member)) {
+                                    (403, serde_json::json!({"error": format!("only members and owners of {ts} take payments there")}))
+                                } else {
+                                    match m.checkout_form(&invoice, &cfg.issuer) {
+                                        Err(e) => (400, serde_json::json!({"error": e})),
+                                        Ok((form, q)) => match self.stripe("/v1/checkout/sessions", Some(&hub_core::money::form(&form))).await {
+                                            Err(e) => (if e == hub_core::money::NO_KEY || e == hub_core::money::NOT_TEST { 503 } else { 502 }, serde_json::json!({"error": e, "stripe_ready": false})),
+                                            Ok(sess) => {
+                                                let url_s = sess.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                let sid = sess.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                let _ = self.money_write(vec![("invoice.checkout".into(), invoice.clone(), serde_json::json!({"invoice": invoice, "teamspace": ts,
+                                                    "provider": "stripe", "mode": "test", "session": sid, "url": url_s, "application_fee": if m.accounts.contains_key(&ts) { q.platform_fee } else { 0 }}))], &l, now);
+                                                (200, serde_json::json!({"url": url_s, "session": sid, "quote": q}))
+                                            }
+                                        },
+                                    }
+                                }
+                            } else if role != Some(Role::Owner) {
+                                (403, serde_json::json!({"error": format!("only an owner of {ts} records payments there")}))
+                            } else {
+                                let amount = body.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let r = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").chars().take(80).collect::<String>();
+                                match hub_core::money::Method::parse(body.get("method").and_then(|v| v.as_str()).unwrap_or("")) {
+                                    Ok(meth) if !meth.through_nodach() => {
+                                        let pref = format!("recorded:{invoice}:{now}:{r}");
+                                        match m.payment_events(&invoice, amount, meth, &pref, None, Some(&l)).and_then(|e| self.money_write(e, &l, now)) {
+                                            Ok(ids) => (200, serde_json::json!({"written": ids})),
+                                            Err(e) => (400, serde_json::json!({"error": e})),
+                                        }
+                                    }
+                                    Ok(_) => (400, serde_json::json!({"error": "card and bank payments are recorded by Stripe's webhook, not by hand"})),
+                                    Err(e) => (400, serde_json::json!({"error": e})),
+                                }
+                            };
+                            self.log(now, p, "money", if status == 200 { "ok" } else { "refused" }, &l);
+                            json_status(&v, status)?
+                        }
                     }
                     (Method::Get, "/studio/api/teamspaces", Some(l)) => {
                         // BQ-1 step 2: the teamspaces you're in (with your role) or invited to; never anyone else's
@@ -1605,7 +1748,7 @@ impl DurableObject for Record {
         let method = req.method().to_string();
         if let Some((r, who)) = self.studio(&mut req, &url).await? {
             // writes log themselves (with the tool name); everything else here gets one line with the login
-            if !((path == "/studio/api/events" || path == "/studio/api/run") && method == "POST") {
+            if !((path == "/studio/api/events" || path == "/studio/api/run" || path.starts_with("/studio/api/money/")) && method == "POST") {
                 self.log(started, &path, &method, &format!("{}", r.status_code()), &who);
             }
             return Ok(r);
@@ -1633,6 +1776,7 @@ impl DurableObject for Record {
                 let docs: Vec<serde_json::Value> = docs.into_iter().map(|(d, e)| serde_json::json!({"doc_id": d, "event": e})).collect();
                 Response::from_json(&serde_json::json!({"docs": docs, "next": next}))
             }
+            (Method::Post, "/stripe/webhook") => self.stripe_webhook(&mut req, started).await,
             (Method::Post, "/push") => {
                 if !self.authorised(&req) { return Response::error("unauthorised", 401); }
                 let evs: Vec<Event> = req.json().await?;

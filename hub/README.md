@@ -16,6 +16,12 @@ this crate only connects it to Cloudflare Workers and a SQLite-backed Durable Ob
   `studio/vendor` (open-source code, no record data, so no sign-in needed).
 - Runnable flows (D-174): `POST /studio/api/run {board, start}` (signed in, `x-nodach-studio` header). Step secrets come
   only from `NODE_SECRET_*` (GitHub secrets `NODE_SECRET_REED`, `NODE_SECRET_GEMINI`, `NODE_SECRET_ADZUNA_ID`, `NODE_SECRET_ADZUNA_KEY`).
+- Money v1 (BQ-1 step 4, `hub_core::money`): each teamspace's ledger is events (invoice.create, payment.received,
+  fee.charged, refund), fee rules are the node `FEE-rules`. Stripe is TEST MODE ONLY and staging only: GitHub secrets
+  `NODE_SECRET_STRIPE_TEST` (sk_test_… / rk_test_…; anything else is refused) and `NODE_SECRET_STRIPE_TEST_WEBHOOK`
+  (the whsec_… of a test-mode webhook endpoint pointing at `https://staging.nodach.com/stripe/webhook`, events
+  `checkout.session.completed` and `charge.refunded`). Flow steps can't name either secret. Without the key, Studio says
+  so in one line and invoices, recorded payments and the ledger still work.
 - Scheduled flows (D-176): the record's Durable Object sets an hourly alarm on first request; each wake-up runs start steps
   whose `schedule` holds the current UK hour, once per slot, as `schedule`. Logged as `/alarm`.
 - Private tier (I1, D-nodach-identity, Q53 A): `GET/POST /studio/api/private` keep each owner's private items on the hub,

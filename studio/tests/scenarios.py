@@ -1796,6 +1796,12 @@ async def open_teams_hub(browser, H, login, owner):
         if path == "/studio/api/usage" and "usage" in H:   # BQ-1 step 3: the hub's meters for this login
             H.setdefault("usage_hdr", []).append(req.headers.get("x-nodach-profile"))
             return await js(H["usage"](login) if callable(H["usage"]) else H["usage"])
+        if path == "/studio/api/money" and "money" in H:   # BQ-1 step 4: the hub's ledger view for one teamspace
+            return await js(H["money"](H, login, q.get("teamspace", [""])[0]))
+        if path in ("/studio/api/money/checkout", "/studio/api/money/record") and req.method == "POST" and "money" in H:
+            b = json.loads(req.post_data or "{}")
+            H.setdefault("money_posts", []).append({"path": path, "body": b, "hdr": req.headers.get("x-nodach-studio")})
+            return await js(*money_post(H, login, path, b))
         if path == "/studio/api/run" and req.method == "POST" and "run" in H:
             H.setdefault("runs", []).append(json.loads(req.post_data or "{}"))
             return await js(H["run"])
@@ -1838,7 +1844,7 @@ async def s64_teamspace_create(b):
     money = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "item.create"), {})
     listed = "Insydr pilot" in await p.inner_text("#tsList")
     members = await p.inner_text("#tsMembers")
-    money_shown = "placeholder" in await p.inner_text("#tsMoney") and "No payments" in await p.inner_text("#tsMoney")
+    money_shown = "Money view" in await p.inner_text("#tsMoney") and await p.locator("#tsOpenMoney").count() == 1   # BQ-1 step 4: no longer a placeholder
     st = Store(); c = await open_page(b, st, {"classic": False})
     await c.evaluate("show('spaces')"); await c.wait_for_timeout(150)
     off = await c.evaluate("document.querySelector('#tsCreate').disabled") and "staging.nodach.com/studio" in await c.inner_text("#tsNote")
@@ -2091,6 +2097,187 @@ async def s71_run_refused_at_limit(b):
     return ok, f"panel says={out.strip()[:90]!r}, runs asked={len(H.get('runs', []))}, writes by the page={len(H['posts']) - before}, writable={still}, errors={p.errors[:1]}"
 
 
+# ---------------------------------------------------------------- BQ-1 step 4: money v1
+NO_KEY = "Stripe test mode isn't set up yet (NODE_SECRET_STRIPE_TEST): invoices, recorded payments and the ledger still work; card links don't."
+FEE_DEFAULT = {"nodach_bps": 450, "co_vendor_bps": 0, "own_provider_bps": 100, "plans": {"free": 0}, "default_plan": "free", "stripe_estimate_bps": 150,
+               "stripe_estimate_fixed": 20, "overrides": {}, "placeholders": ["own_provider_bps", "plans"], "node": None, "version": 0}
+MONEY_KINDS = ("invoice.create", "invoice.checkout", "payment.received", "fee.charged", "refund", "money.charging", "money.account")
+
+
+def tev(author, kind, item, body, n):
+    return {"ts": f"2026-11-22T12:00:{n:02d}.000Z", "kind": kind, "item": item, "branch": "main", "body": body,
+            "author": {"id": f"github:{author}", "label": author, "role": "owner" if author == "Morami49" else "member", "profile": f"P-{author.lower()}"}}
+
+
+def runner_doc(kind, item, body, n):
+    return {"doc_id": f"hub-{kind}-{n}", "event": {"ts": f"2026-11-22T12:10:{n:02d}.000Z", "kind": kind, "item": item, "branch": "main", "body": body,
+            "author": {"id": "flow:runner", "label": "Flow runner (for stripe webhook)", "role": "agent"}, "via": "flow-runner"}}
+
+
+def money_hub():
+    """Nowed's teamspace TS-pilot (Insydr pilot) with Nassar as a member who has joined; the stand-in hub's money view
+    is folded from H's docs the way hub_core::money does (amounts in pence; fee lines are the hub's, never the page's)."""
+    H = team_hub()
+    for i, (a, k, b) in enumerate([("Morami49", "teamspace.create", {"id": "TS-pilot", "label": "Insydr pilot"}),
+                                   ("Morami49", "member.invite", {"teamspace": "TS-pilot", "profile": "P-nassar", "role": "member"}),
+                                   ("nassar", "member.join", {"teamspace": "TS-pilot", "profile": "P-nassar"})]):
+        H["docs"].append({"doc_id": f"t{i}", "event": tev(a, k, "TS-pilot", b, i)})
+    H["money"] = money_view
+    return H
+
+
+def money_view(H, login, ts):
+    evs = [d for d in H["docs"] if d["event"]["kind"] in MONEY_KINDS and (d["event"]["body"].get("teamspace") or d["event"].get("item")) == ts]
+    inv, pays, fees, refunds, charging, acct = {}, [], [], [], {"on": False}, None
+    for d in evs:
+        e = d["event"]; b = e["body"]; k = e["kind"]
+        if k == "invoice.create":
+            inv[b["id"]] = {"id": b["id"], "teamspace": ts, "client": b["client"], "lines": b["lines"], "total": b["total"], "co_vendor": b.get("co_vendor", False),
+                            "paid": 0, "refunded": 0, "status": "open", "checkout_url": None}
+        elif k == "invoice.checkout": inv[b["invoice"]]["checkout_url"] = b["url"]
+        elif k == "payment.received": pays.append(b); inv[b["invoice"]]["paid"] += b["amount"]
+        elif k == "fee.charged": fees.append(b)
+        elif k == "refund": refunds.append(b); inv[b["invoice"]]["refunded"] += b["amount"]
+        elif k == "money.charging": charging = {"on": b["on"], "since": e["ts"], "by": e["author"]["id"].split(":")[1].lower()}
+        elif k == "money.account": acct = b["account"]
+    for i in inv.values():
+        net = i["paid"] - i["refunded"]; i["status"] = "paid" if net >= i["total"] else "part paid" if net > 0 else "open"
+    pf = sum(f["amount"] for f in fees if f["line"] == "platform_fee"); pc = sum(f["amount"] for f in fees if f["line"] == "provider_cost")
+    rec = sum(x["amount"] for x in pays); rf = sum(x["amount"] for x in refunds)
+    owner = login.lower() == "morami49"
+    return {"teamspace": ts, "label": "Insydr pilot", "role": "owner" if owner else "member", "owner": owner, "charging": charging, "account": acct,
+            "rules": FEE_DEFAULT, "rules_node": "FEE-rules", "override": None, "example_100": {"platform_fee": 450, "provider_cost": 170, "nodach_net": 280},
+            "invoices": list(inv.values()), "ledger": [{"doc_id": d["doc_id"], "ts": d["event"]["ts"], "kind": d["event"]["kind"], "body": d["event"]["body"]} for d in evs],
+            "totals": {"invoiced": sum(i["total"] for i in inv.values()), "received": rec, "refunded": rf, "platform_fees": pf, "provider_costs": pc,
+                       "nodach_net": pf - pc, "vendor_net": rec - rf - pf, "outstanding": sum(max(0, i["total"] - i["paid"] + i["refunded"]) for i in inv.values())},
+            "stripe": {"ready": bool(H.get("stripe_ready")), "note": None if H.get("stripe_ready") else NO_KEY, "mode": "test", "webhook_ready": bool(H.get("stripe_ready"))}}
+
+
+def money_post(H, login, path, b):
+    if path.endswith("/checkout"):
+        if not H.get("stripe_ready"):
+            return {"error": NO_KEY, "stripe_ready": False}, 503
+        url = f"https://checkout.stripe.com/c/pay/cs_test_{b['invoice']}"
+        H["docs"].append(runner_doc("invoice.checkout", b["invoice"], {"invoice": b["invoice"], "teamspace": "TS-pilot", "provider": "stripe", "mode": "test", "url": url}, len(H["docs"])))
+        return {"url": url, "session": "cs_test_1"}, 200
+    if login.lower() != "morami49":
+        return {"error": "only an owner of TS-pilot records payments there"}, 403
+    n = len(H["docs"])
+    H["docs"].append(runner_doc("payment.received", b["invoice"], {"id": f"PAY-{n}", "invoice": b["invoice"], "teamspace": "TS-pilot", "amount": b["amount"], "method": b["method"], "provider_ref": "recorded", "recorded_by": login}, n))
+    H["docs"].append(runner_doc("fee.charged", b["invoice"], {"payment": f"PAY-{n}", "invoice": b["invoice"], "teamspace": "TS-pilot", "line": "platform_fee", "rate_bps": 0, "amount": 0, "payer": "vendor", "basis": "recorded bank transfer, plan free (placeholder rate)"}, n + 1))
+    return {"written": [f"PAY-{n}"]}, 200
+
+
+async def to_money(p):
+    await nav_open(p); await p.click("#sections [data-s=teams]"); await p.wait_for_timeout(120)
+    await p.click("#subnav [data-sv=money]"); await p.wait_for_timeout(600)
+
+
+async def s72_money_create_invoice(b):
+    """BQ-1 step 4: Nassar (a member) opens Teams → Money for the Insydr pilot, types a client and two lines (4 chairs
+    at £25.00, fitting £19.99) and clicks Create invoice. One invoice.create is written as his window's profile, in the
+    teamspace, in GBP, with the total in pence equal to its lines (£119.99). Stripe's test key isn't set up, so the page
+    says so in one line, the card-link button is off, and the invoice is still listed as open."""
+    H = money_hub(); p = await open_teams_hub(b, H, "nassar", False)
+    await to_money(p)
+    stripe_line = await p.inner_text("#monStripe")
+    await p.fill("#invClient", "Acme Offices")
+    await p.fill('[data-ldesc="0"]', "Desk chairs"); await p.fill('[data-lqty="0"]', "4"); await p.fill('[data-lunit="0"]', "25")
+    await p.click("#invAddLine"); await p.fill('[data-ldesc="1"]', "Fitting"); await p.fill('[data-lunit="1"]', "19.99")
+    total_shown = await p.inner_text("#invTotal")
+    await p.click("#invCreate"); await p.wait_for_timeout(700)
+    made = [x["event"] for x in H["posts"] if x["event"]["kind"] == "invoice.create"]
+    e = made[0] if made else {"body": {}, "author": {}}
+    listed = await p.inner_text("#monInvoices")
+    pay_off = await p.evaluate("document.querySelector('[data-invpay]')?.disabled")
+    no_owner_controls = await p.locator("#monCharge, [data-invrec], #monAcctSave").count() == 0
+    ok = (NO_KEY in stripe_line and total_shown == "£119.99" and len(made) == 1 and e["item"] == e["body"].get("id") and e["body"].get("teamspace") == "TS-pilot"
+          and e["body"].get("currency") == "GBP" and e["body"].get("total") == 11999 and e["body"].get("lines") == [{"desc": "Desk chairs", "qty": 4, "unit": 2500}, {"desc": "Fitting", "qty": 1, "unit": 1999}]
+          and e["author"].get("profile") == "P-nassar" and "Acme Offices" in listed and "open" in listed and pay_off and no_owner_controls and not p.errors)
+    return ok, (f"stripe line={stripe_line.strip()[:50]!r}, total shown={total_shown}, writes={len(made)} body={ {k: e['body'].get(k) for k in ('teamspace', 'total', 'currency')} }, "
+                f"profile={e['author'].get('profile')}, listed={'Acme Offices' in listed}, card link off={pay_off}, no owner controls={no_owner_controls}, errors={p.errors[:1]}")
+
+
+async def s73_money_ledger_and_nodach_net(b):
+    """BQ-1 step 4: a £100.00 invoice was paid by test card; the hub wrote the payment, Nodach's 4.5% (£4.50) and
+    Stripe's fee (£1.70, paid by Nodach) as separate lines. Nowed sees, in order: invoice, charging, payment, both fee
+    lines, and totals that make Nodach's net visible: £4.50 − £1.70 = £2.80; the vendor keeps £95.50; nothing is
+    outstanding. Someone who isn't in the teamspace gets no teamspace to choose."""
+    H = money_hub()
+    H["docs"].append({"doc_id": "d-inv", "event": tev("nassar", "invoice.create", "INV-1", {"id": "INV-1", "teamspace": "TS-pilot", "client": "Acme Offices", "currency": "GBP",
+                      "lines": [{"desc": "Desk chairs", "qty": 4, "unit": 2500}], "total": 10000}, 10)})
+    H["docs"].append({"doc_id": "d-ch", "event": tev("Morami49", "money.charging", "TS-pilot", {"teamspace": "TS-pilot", "on": True, "note": "first test passed"}, 11)})
+    H["docs"].append(runner_doc("payment.received", "INV-1", {"id": "PAY-1", "invoice": "INV-1", "teamspace": "TS-pilot", "amount": 10000, "method": "card", "provider_ref": "pi_test_1"}, 20))
+    H["docs"].append(runner_doc("fee.charged", "INV-1", {"payment": "PAY-1", "invoice": "INV-1", "teamspace": "TS-pilot", "line": "platform_fee", "rate_bps": 450, "amount": 450, "payer": "vendor", "basis": "through Nodach (Nodach pays Stripe's fee out of it)"}, 21))
+    H["docs"].append(runner_doc("fee.charged", "INV-1", {"payment": "PAY-1", "invoice": "INV-1", "teamspace": "TS-pilot", "line": "provider_cost", "rate_bps": 0, "amount": 170, "payer": "nodach", "basis": "Stripe's processing fee", "estimated": False}, 22))
+    H["stripe_ready"] = True
+    p = await open_teams_hub(b, H, "Morami49", True)
+    await to_money(p)
+    kinds = await p.evaluate("[...document.querySelectorAll('#monLedger [data-kind]')].map(l => l.dataset.kind)")
+    led = await p.inner_text("#monLedger")
+    t = await p.evaluate("Object.fromEntries([...document.querySelectorAll('#monTotals [data-t]')].map(x => [x.dataset.t, x.textContent]))")
+    paid = await p.inner_text("[data-invoice=INV-1] [data-status]")
+    charging = await p.inner_text("#monChargeState")
+    rate = await p.inner_text("#monRate")
+    ready = "4242 4242 4242 4242" in await p.inner_text("#monStripe")
+    s = await open_teams_hub(b, H, "stranger", False)
+    await to_money(s)
+    stranger_none = await s.evaluate("document.querySelector('#monTs').disabled") and "not a member of any teamspace" in await s.inner_text("#monBody")
+    ok = (kinds == ["invoice.create", "money.charging", "payment.received", "fee.charged", "fee.charged"] and "Stripe's fee £1.70, paid by Nodach" in led and "Nodach's fee £4.50 (4.5%)" in led
+          and t.get("received") == "£100.00" and t.get("platform_fees") == "£4.50" and t.get("provider_costs") == "£1.70" and t.get("nodach_net") == "£2.80"
+          and t.get("vendor_net") == "£95.50" and t.get("outstanding") == "£0.00" and paid == "paid" and "Charging started" in charging and rate == "4.5%" and ready
+          and stranger_none and not (p.errors + s.errors))
+    return ok, (f"ledger={kinds}, totals={t}, invoice={paid}, charging={charging.strip()[:30]!r}, rate={rate}, test card shown={ready}, stranger has none={stranger_none}, "
+                f"errors={(p.errors + s.errors)[:1]}")
+
+
+async def s74_money_card_link_test_mode(b):
+    """BQ-1 step 4: with Stripe test mode set up, Nassar clicks Card link (test) on an open invoice. Studio asks the hub
+    (POST /studio/api/money/checkout with the x-nodach-studio header and nothing but the invoice id: the page never
+    sends an amount or a key), and shows the test card link and how to pay with 4242 4242 4242 4242."""
+    H = money_hub(); H["stripe_ready"] = True
+    H["docs"].append({"doc_id": "d-inv", "event": tev("nassar", "invoice.create", "INV-2", {"id": "INV-2", "teamspace": "TS-pilot", "client": "Acme Offices", "currency": "GBP",
+                      "lines": [{"desc": "Survey", "qty": 1, "unit": 5000}], "total": 5000}, 10)})
+    p = await open_teams_hub(b, H, "nassar", False)
+    await to_money(p)
+    on = await p.evaluate("!document.querySelector('[data-invpay=INV-2]').disabled")
+    await p.click("[data-invpay=INV-2]"); await p.wait_for_timeout(900)
+    posts = H.get("money_posts", [])
+    href = await p.evaluate("document.querySelector('[data-paylink=INV-2]')?.href || ''")
+    note = await p.inner_text("#monNote")
+    ok = (on and len(posts) == 1 and posts[0]["path"] == "/studio/api/money/checkout" and posts[0]["body"] == {"invoice": "INV-2"} and posts[0]["hdr"] == "1"
+          and href == "https://checkout.stripe.com/c/pay/cs_test_INV-2" and "4242 4242 4242 4242" in note and not p.errors)
+    return ok, f"button on={on}, asked the hub={[(x['path'], x['body']) for x in posts]}, link={href[-30:]!r}, note={note.strip()[:60]!r}, errors={p.errors[:1]}"
+
+
+async def s75_money_charging_and_recorded_payment(b):
+    """BQ-1 step 4: Nowed (the teamspace's owner) clicks First test passed: start charging, which writes one
+    money.charging {on: true}; then records a £60.00 bank transfer on the invoice with Record a payment, which goes to
+    the hub (the hub writes the payment and its fee line, the page writes no ledger lines itself). The invoice shows
+    part paid. Nassar, a member, gets neither control."""
+    H = money_hub()
+    H["docs"].append({"doc_id": "d-inv", "event": tev("nassar", "invoice.create", "INV-3", {"id": "INV-3", "teamspace": "TS-pilot", "client": "Acme Offices", "currency": "GBP",
+                      "lines": [{"desc": "Survey", "qty": 1, "unit": 12000}], "total": 12000}, 10)})
+    p = await open_teams_hub(b, H, "Morami49", True)
+    await to_money(p)
+    await p.click("#monCharge"); await p.wait_for_timeout(700)
+    ch = [x["event"] for x in H["posts"] if x["event"]["kind"] == "money.charging"]
+    state = await p.inner_text("#monChargeState")
+    await p.fill("[data-recamt=INV-3]", "60"); await p.select_option("[data-recmeth=INV-3]", "recorded_bank_transfer")
+    await p.click("[data-invrec=INV-3]"); await p.wait_for_timeout(900)
+    rec = [x for x in H.get("money_posts", []) if x["path"].endswith("/record")]
+    status = await p.inner_text("[data-invoice=INV-3] [data-status]")
+    page_ledger_writes = [x["event"]["kind"] for x in H["posts"] if x["event"]["kind"] in ("payment.received", "fee.charged", "refund")]
+    n = await open_teams_hub(b, H, "nassar", False)
+    await to_money(n)
+    no_controls = await n.locator("#monCharge, [data-invrec], #monAcctSave").count() == 0
+    ok = (len(ch) == 1 and ch[0]["item"] == "TS-pilot" and ch[0]["body"] == {"teamspace": "TS-pilot", "on": True, "note": "first test passed"} and "Charging started" in state
+          and len(rec) == 1 and rec[0]["body"] == {"invoice": "INV-3", "amount": 6000, "method": "recorded_bank_transfer", "ref": ""} and status == "part paid"
+          and not page_ledger_writes and no_controls and not (p.errors + n.errors))
+    return ok, (f"charging writes={[c['body'] for c in ch]}, state={state.strip()[:30]!r}, record asked={[r['body'] for r in rec]}, invoice={status}, "
+                f"ledger lines written by the page={page_ledger_writes}, no controls for Nassar={no_controls}, errors={(p.errors + n.errors)[:1]}")
+
+
 SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock, s05_branch_awareness, s06_view_only_client,
              s07_names, s08_long_history, s09_ai_relay, s10_keyboard_list, s11_offline_capture, s12_member_rights,
              s13_two_people_at_once, s14_phone, s15_undo_old_status, s16_overwhelm, s17_disagreement, s18_clock_skew, s19_private_area,
@@ -2103,7 +2290,8 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s54_sign_out_switch_account, s55_nav_collapsed_expanded, s56_sections_reach_views, s57_esc_touch_keyboard, s58_classic_tabs,
              s59_dev_mode_proposes, s60_profile_new_window, s61_profile_strip_shown, s62_write_carries_profile, s63_refused_write_shows_message,
              s64_teamspace_create, s65_teamspace_invite, s66_guest_cant_see_unshared, s67_teamspace_export,
-             s68_usage_bars, s69_usage_notice_in_queue, s70_limits_change_is_a_proposal, s71_run_refused_at_limit]
+             s68_usage_bars, s69_usage_notice_in_queue, s70_limits_change_is_a_proposal, s71_run_refused_at_limit,
+             s72_money_create_invoice, s73_money_ledger_and_nodach_net, s74_money_card_link_test_mode, s75_money_charging_and_recorded_payment]
 
 
 async def main():

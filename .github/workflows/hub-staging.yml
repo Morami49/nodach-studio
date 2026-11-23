@@ -123,6 +123,9 @@ jobs:
           NODE_SECRET_GEMINI: ${{ secrets.NODE_SECRET_GEMINI }}
           NODE_SECRET_ADZUNA_ID: ${{ secrets.NODE_SECRET_ADZUNA_ID }}
           NODE_SECRET_ADZUNA_KEY: ${{ secrets.NODE_SECRET_ADZUNA_KEY }}
+          # BQ-1 step 4: Stripe TEST MODE only, staging only (the hub refuses any key that isn't sk_test_/rk_test_)
+          NODE_SECRET_STRIPE_TEST: ${{ secrets.NODE_SECRET_STRIPE_TEST }}
+          NODE_SECRET_STRIPE_TEST_WEBHOOK: ${{ secrets.NODE_SECRET_STRIPE_TEST_WEBHOOK }}
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
@@ -147,6 +150,9 @@ jobs:
           for n in NODE_SECRET_REED NODE_SECRET_GEMINI NODE_SECRET_ADZUNA_ID NODE_SECRET_ADZUNA_KEY; do
             v="${!n}"; [ -n "$v" ] && printf '%s' "$v" | $W secret put "$n" --env staging || true
           done
+          # Stripe test mode (money v1): only a test key is ever put; a live key is skipped here and refused by the hub
+          case "$NODE_SECRET_STRIPE_TEST" in sk_test_*|rk_test_*) printf '%s' "$NODE_SECRET_STRIPE_TEST" | $W secret put NODE_SECRET_STRIPE_TEST --env staging || true;; "") ;; *) echo "::warning::NODE_SECRET_STRIPE_TEST isn't a test key: not deployed";; esac
+          [ -n "$NODE_SECRET_STRIPE_TEST_WEBHOOK" ] && printf '%s' "$NODE_SECRET_STRIPE_TEST_WEBHOOK" | $W secret put NODE_SECRET_STRIPE_TEST_WEBHOOK --env staging || true
       - if: steps.ready.outputs.go == 'yes'
         name: Smoke-test staging
         run: |

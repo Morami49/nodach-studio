@@ -436,8 +436,13 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
   </section>
 
   <section class="view" id="v-money" hidden>
-    <div class="stack" style="max-width:860px">
-      <h2>Money rules</h2>
+    <div class="stack" style="max-width:960px">
+      <h2>Money</h2>
+      <p class="mute" style="margin:0">Each teamspace's ledger: invoices, payments, Nodach's fee and Stripe's cost as their own lines, and Nodach's net. Every line is an event on the record, never an overwritten balance. Stripe runs in <b>test mode only</b>.</p>
+      <div class="row"><label for="monTs">Teamspace</label><select id="monTs" aria-label="Teamspace"></select><span class="mute" id="monNote" role="status"></span></div>
+      <div id="monStripe" class="mute" style="font-size:13px"></div>
+      <div id="monBody"></div>
+      <h3 style="margin-top:18px">Older rules: Nodach's own cut and split (D-078)</h3>
       <p class="mute" style="margin:0">Clanstack's cut and the default split, as versioned settings. Every change is kept on the tree; only editors can change them (charter). The calculator uses the same arithmetic as the engine.</p>
       <div class="card">
         <h3>Calculator</h3>
@@ -2234,6 +2239,7 @@ function split(net){
 }
 const gbp = p => "£" + (p/100).toLocaleString("en-GB",{minimumFractionDigits:2, maximumFractionDigits:2});
 function renderMoney(){
+  renderMoneyLedger();
   const amt = Math.round(+$("#calcAmt").value*100)||0, sales = Math.round(+$("#calcSales").value*100)||0, cls = $("#calcClass").value;
   const {bps, cut} = cutPence(amt, cls, sales), sp = split(cut);
   $("#calcOut").innerHTML = `Buyer pays ${gbp(amt)} (one all-in price).<br>Seller sees: ${gbp(amt)} − cut ${(bps/100).toFixed(2)}% ${gbp(cut)} = <b>${gbp(amt-cut)}</b>.<br>`+
@@ -2250,6 +2256,145 @@ function renderMoney(){
     const id = await write("item.edit", k, {value: v}); if (id) toast(`${k} → ${v}`, [id]); });
 }
 for (const id of ["calcAmt","calcSales","calcClass"]) $("#"+id).oninput = renderMoney;
+
+/* ---------------------------------------------------------------- money v1 (FUN-1 v2, BQ-1 step 4)
+   The hub keeps each teamspace's ledger (hub_core::money) and works out every fee; this page only draws it and writes
+   the two things a person decides: an invoice (members) and the teamspace's money settings (owners: charging started,
+   Stripe connected account). Payments and fee lines are written by the hub alone, from Stripe's signed webhook or
+   from Record a payment. Fee rules are the node FEE-rules ("fee.rules"), changed as versioned proposals.
+   TODO(BQ-1 later step): machine-capacity top-ups are not here yet. */
+const FEE_RULES_ID = "FEE-rules";
+const FEE_DEFAULT = {nodach_bps:450, co_vendor_bps:0, own_provider_bps:100, plans:{free:0}, default_plan:"free", stripe_estimate_bps:150, stripe_estimate_fixed:20, overrides:{}, placeholders:["own_provider_bps","plans"]};
+let MONEY = null;
+S.monTs = null;
+const pctTxt = bps => (bps / 100).toLocaleString("en-GB", {minimumFractionDigits:bps % 100 ? 1 : 0, maximumFractionDigits:2}) + "%";
+const LEDGER_WORDS = {"invoice.create":"Invoice", "invoice.checkout":"Card link", "payment.received":"Payment", "fee.charged":"Fee", "refund":"Refund", "money.charging":"Charging", "money.account":"Stripe account"};
+function ledgerLine(l, i){
+  const b = l.body || {}, k = l.kind;
+  const what = k === "invoice.create" ? `${esc(b.id)} to ${esc(b.client)} · ${gbp(b.total)}${b.co_vendor ? " · co-vendor sale" : ""}`
+    : k === "payment.received" ? `${gbp(b.amount)} for ${esc(b.invoice)} · ${esc(String(b.method || "").replace(/_/g, " "))}${b.recorded_by ? ` · recorded by ${esc(b.recorded_by)}` : ""}`
+    : k === "fee.charged" ? (b.line === "provider_cost" ? `Stripe's fee ${gbp(b.amount)}, paid by Nodach${b.estimated ? " (estimate)" : ""}` : `Nodach's fee ${gbp(b.amount)} (${pctTxt(b.rate_bps || 0)}) · ${esc(b.basis || "")}${b.waived ? ` · waived: ${esc(b.waived)}` : ""}`)
+    : k === "refund" ? `${gbp(b.amount)} refunded on ${esc(b.invoice)}`
+    : k === "invoice.checkout" ? `test card link made for ${esc(b.invoice)}`
+    : k === "money.charging" ? (b.on ? "charging started: first test passed" : "charging paused")
+    : k === "money.account" ? `connected account ${esc(b.account)}` : esc(k);
+  return `<li data-ledger="${esc(l.doc_id)}" data-kind="${esc(k)}"><span class="n">${i + 1}</span><span><b>${esc(LEDGER_WORDS[k] || k)}</b> ${what} <span class="mute mono">${esc(String(l.ts || "").slice(0, 16).replace("T", " "))}</span></span></li>`;
+}
+function invoiceLine(inv, i, M){
+  const due = inv.total - (inv.paid - inv.refunded), can = writable() && tsHere();
+  return `<li data-invoice="${esc(inv.id)}"><span class="n">${i + 1}</span><span><b>${esc(inv.id)}</b> ${esc(inv.client)} · ${gbp(inv.total)} · <b data-status>${esc(inv.status)}</b>${inv.paid ? ` · paid ${gbp(inv.paid)}` : ""}${inv.refunded ? ` · refunded ${gbp(inv.refunded)}` : ""}${inv.co_vendor ? ` <span class="pill">co-vendor: no fee</span>` : ""}
+    ${due > 0 && can ? `<span class="row" style="margin-top:4px;flex-wrap:wrap"><button data-invpay="${esc(inv.id)}" ${M.stripe?.ready ? "" : "disabled"} title="${M.stripe?.ready ? "A Stripe Checkout link in test mode: pay with 4242 4242 4242 4242" : esc(M.stripe?.note || "")}">Card link (test)</button>
+      ${M.owner ? `<input data-recamt="${esc(inv.id)}" type="number" min="0.01" step="0.01" value="${(due / 100).toFixed(2)}" style="width:100px" aria-label="Amount received £">
+      <select data-recmeth="${esc(inv.id)}" aria-label="How it was paid"><option value="recorded_bank_transfer">bank transfer (recorded)</option><option value="own_provider">own payment provider</option></select>
+      <button data-invrec="${esc(inv.id)}">Record a payment</button>` : ""}</span>` : ""}
+    ${inv.checkout_url ? `<br><a data-paylink="${esc(inv.id)}" href="${esc(inv.checkout_url)}" target="_blank" rel="noopener">Open the test card link ↗</a>` : ""}</span></li>`;
+}
+async function moneyFetch(path, body){
+  const r = await fetch(path, {method:"POST", credentials:"same-origin", headers:{"content-type":"application/json", "x-nodach-studio":"1", ...NodachProfile.headers()}, body:JSON.stringify(body)});
+  let v = {}; try { v = await r.json(); } catch {}
+  return r.ok ? v : {error: v.error || `the hub answered ${r.status}`};
+}
+async function renderMoneyLedger(){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), here = tsHere();
+  const mine = [...T.spaces.values()].filter(t => ["owner","member"].includes(T.roleOf(me, t.id)));
+  if (S.monTs && !mine.some(t => t.id === S.monTs)) S.monTs = null;
+  if (!S.monTs && mine.length) S.monTs = (S.ts && mine.some(t => t.id === S.ts)) ? S.ts : mine[mine.length - 1].id;
+  const sel = $("#monTs");
+  sel.innerHTML = mine.length ? mine.map(t => `<option value="${esc(t.id)}"${t.id === S.monTs ? " selected" : ""}>${esc(t.label)}</option>`).join("") : `<option value="">No teamspaces</option>`;
+  sel.disabled = !mine.length;
+  sel.onchange = () => { S.monTs = sel.value; renderMoneyLedger(); };
+  const B = $("#monBody"), St = $("#monStripe");
+  if (!here){ St.textContent = ""; B.innerHTML = `<div class="card"><p class="mute" style="margin:0" id="monAway">Money is kept by the hub: open Studio at staging.nodach.com/studio to see a teamspace's ledger and create invoices.</p></div>`; return; }
+  if (!S.monTs){ St.textContent = ""; B.innerHTML = `<div class="card"><p class="mute" style="margin:0">You're not a member of any teamspace yet. Create one under Teamspaces; its money lives here.</p></div>`; return; }
+  const ts = S.monTs;
+  try { const r = await fetch("/studio/api/money?teamspace=" + encodeURIComponent(ts), {credentials:"same-origin", cache:"no-store", headers:{...NodachProfile.headers()}}); MONEY = r.ok ? await r.json() : null; } catch { MONEY = null; }
+  if (S.view !== "money" || S.monTs !== ts) return;
+  const M = MONEY;
+  if (!M){ St.textContent = ""; B.innerHTML = `<div class="card"><p class="bad" style="margin:0">Couldn't read this teamspace's money from the hub. Nothing was changed.</p></div>`; return; }
+  St.innerHTML = M.stripe?.ready ? `<span class="ok" id="monStripeLine">Stripe test mode is set up${M.stripe.webhook_ready ? "" : " (the webhook signing secret isn't, so payments won't be recorded yet)"}. Pay with the test card 4242 4242 4242 4242.</span>`
+    : `<span id="monStripeLine">${esc(M.stripe?.note || "Stripe test mode isn't set up yet.")}</span>`;
+  const t = M.totals, R = M.rules, can = writable(), ex = M.example_100;
+  const ph = k => (R.placeholders || []).includes(k) ? ` <span class="pill" style="color:var(--warn)">placeholder</span>` : "";
+  const ov = M.override ? ` · this teamspace: <b>${M.override.rate_bps != null ? pctTxt(M.override.rate_bps) : "default rate"}</b>${M.override.plan ? `, plan ${esc(M.override.plan)}` : ""}${M.override.note ? ` (${esc(M.override.note)})` : ""}` : "";
+  const inv = M.invoices.slice().reverse();
+  B.innerHTML = `
+    <div class="card" id="monTotals"><h3>${esc(M.label)} <span class="mute mono" style="font-size:12px">${esc(ts)} · you are ${esc(M.role || "hub owner")}</span></h3>
+      <div class="mono" style="font-size:13px;line-height:1.8">Invoiced <b data-t="invoiced">${gbp(t.invoiced)}</b> · received <b data-t="received">${gbp(t.received)}</b> · outstanding <b data-t="outstanding">${gbp(t.outstanding)}</b> · refunded <b data-t="refunded">${gbp(t.refunded)}</b><br>
+      Nodach's fees <b data-t="platform_fees">${gbp(t.platform_fees)}</b> − Stripe's fees paid by Nodach <b data-t="provider_costs">${gbp(t.provider_costs)}</b> = Nodach's net <b data-t="nodach_net" class="${t.nodach_net < 0 ? "bad" : ""}">${gbp(t.nodach_net)}</b><br>
+      Yours after Nodach's fee and refunds <b data-t="vendor_net">${gbp(t.vendor_net)}</b></div></div>
+    <div class="card" id="monCharging"><h3>Charging</h3>
+      ${M.charging?.on ? `<p style="margin:0" id="monChargeState">Charging started ${esc(String(M.charging.since || "").slice(0, 10))}${M.charging.by ? ` by ${esc(M.charging.by)}` : ""}: Nodach's fee is taken on each payment.</p>`
+        : `<p style="margin:0" id="monChargeState">Not charging yet: fees are shown on the ledger at £0.00 (waived) until this teamspace's first test has passed.</p>${M.owner && can ? `<div class="row" style="margin-top:6px"><button class="primary" id="monCharge">First test passed: start charging</button></div>` : ""}`}
+      <p class="mute" style="margin:6px 0 0;font-size:13px">Stripe connected account: <span class="mono" id="monAcct">${esc(M.account || "none yet (test: the payment stays on Nodach's test account)")}</span></p>
+      ${M.owner && can ? `<div class="row" style="margin-top:4px"><label for="monAcctIn">Account</label><input id="monAcctIn" class="mono" placeholder="acct_…" style="width:200px"><button id="monAcctSave">Save</button></div>` : ""}</div>
+    <div class="card" id="monRules"><h3>Fee rules <span class="mute mono" style="font-size:12px">fee.rules · ${esc(M.rules_node)}${R.version ? ` v${R.version}` : " · defaults"}</span></h3>
+      <ul class="log" style="font-size:13px">
+        <li><span class="n">1</span><span>Through Nodach (card, bank): <b id="monRate">${pctTxt(R.nodach_bps)}</b> of each payment, no cap. Nodach pays Stripe's fee out of it${ov}. On £100.00: fee ${gbp(ex.platform_fee)} − Stripe about ${gbp(ex.provider_cost)} = ${gbp(ex.nodach_net)} to Nodach.</span></li>
+        <li><span class="n">2</span><span>Co-vendor sales: ${pctTxt(R.co_vendor_bps)} (no processing fee).</span></li>
+        <li><span class="n">3</span><span>Own payment provider: ${pctTxt(R.own_provider_bps)} surcharge${ph("own_provider_bps")}</span></li>
+        <li><span class="n">4</span><span>Recorded bank transfers: by plan, ${Object.entries(R.plans).map(([k, v]) => `${esc(k)} ${pctTxt(v)}`).join(", ")}${ph("plans")}</span></li></ul>
+      <div class="row">${F.items.get(FEE_RULES_ID) ? `<button id="monOpenRules">Open ${esc(FEE_RULES_ID)}</button>` : S.owner ? `<button id="monMakeRules">Create the fee rules node</button>` : `<span class="mute">Default rules: no node yet.</span>`}
+        ${S.owner ? `<label for="monRateIn">Nodach %</label><input id="monRateIn" type="number" min="0" max="100" step="0.05" value="${R.nodach_bps / 100}" style="width:80px"><button id="monPropose">Propose new rate</button>` : ""}</div></div>
+    ${can ? `<div class="card" id="monNew"><h3>Create invoice</h3>
+      <div class="row"><label for="invClient">Client</label><input id="invClient" maxlength="200" placeholder="Who pays" style="min-width:220px">
+        <label><input type="checkbox" id="invCoVendor"> co-vendor sale (no fee)</label></div>
+      <div id="invLines"></div>
+      <div class="row"><button id="invAddLine">Add line</button><span>Total <b id="invTotal" class="mono">£0.00</b> (GBP)</span><button class="primary" id="invCreate">Create invoice</button></div></div>` : ""}
+    <div class="card"><h3>Invoices</h3><ul class="log" id="monInvoices">${inv.length ? inv.map((x, i) => invoiceLine(x, i, M)).join("") : `<li><span class="n"></span><span class="mute">No invoices yet.</span></li>`}</ul></div>
+    <div class="card"><h3>Ledger <span class="mute" style="font-size:12px">every line, oldest first</span></h3><ul class="log" id="monLedger">${M.ledger.length ? M.ledger.map(ledgerLine).join("") : `<li><span class="n"></span><span class="mute">Nothing on the ledger yet.</span></li>`}</ul></div>`;
+  const note = m => { $("#monNote").textContent = m; };
+  const again = () => renderMoneyLedger();
+  // invoice lines
+  const lines = [{desc:"", qty:1, unit:""}];
+  const drawLines = () => { const L = $("#invLines"); if (!L) return;
+    L.innerHTML = lines.map((l, i) => `<div class="row" data-line="${i}"><input data-ldesc="${i}" placeholder="What" value="${esc(l.desc)}" style="min-width:220px" aria-label="Line ${i + 1} description">
+      <label>qty <input data-lqty="${i}" type="number" min="1" step="1" value="${l.qty}" style="width:60px" aria-label="Line ${i + 1} quantity"></label>
+      <label>£ <input data-lunit="${i}" type="number" min="0" step="0.01" value="${l.unit}" style="width:100px" aria-label="Line ${i + 1} unit price £"></label></div>`).join("");
+    const sum = () => lines.reduce((a, l) => a + (Math.round(+l.qty) || 0) * Math.round((+l.unit || 0) * 100), 0);
+    $("#invTotal").textContent = gbp(sum());
+    L.querySelectorAll("input").forEach(inp => inp.oninput = () => { const i = +(inp.dataset.ldesc ?? inp.dataset.lqty ?? inp.dataset.lunit);
+      if (inp.dataset.ldesc != null) lines[i].desc = inp.value; else if (inp.dataset.lqty != null) lines[i].qty = inp.value; else lines[i].unit = inp.value;
+      $("#invTotal").textContent = gbp(sum()); }); };
+  drawLines();
+  const al = $("#invAddLine"); if (al) al.onclick = () => { lines.push({desc:"", qty:1, unit:""}); drawLines(); };
+  const ic = $("#invCreate"); if (ic) ic.onclick = async () => {
+    const client = $("#invClient").value.trim();
+    const ls = lines.map(l => ({desc:String(l.desc).trim(), qty:Math.round(+l.qty), unit:Math.round((+l.unit || 0) * 100)})).filter(l => l.desc);
+    if (!client){ note("Name the client the invoice is for."); return; }
+    if (!ls.length || ls.some(l => !(l.qty >= 1) || !(l.unit >= 0))){ note("Each line needs a description, a quantity of 1 or more and a price."); return; }
+    const total = ls.reduce((a, l) => a + l.qty * l.unit, 0); if (total <= 0){ note("The invoice total must be more than £0."); return; }
+    const id = "INV-" + Date.now().toString(36);
+    const w = await write("invoice.create", id, {id, teamspace:ts, client, lines:ls, total, currency:"GBP", co_vendor:$("#invCoVendor").checked});
+    if (w){ note(`Invoice ${id} created for ${gbp(total)}.`); toast(`Invoice ${id} created`, [w]); again(); } };
+  const ch = $("#monCharge"); if (ch) ch.onclick = async () => { const w = await write("money.charging", ts, {teamspace:ts, on:true, note:"first test passed"}); if (w){ toast("Charging started for this teamspace.", [w]); again(); } };
+  const as = $("#monAcctSave"); if (as) as.onclick = async () => { const a = $("#monAcctIn").value.trim();
+    if (!/^acct_[A-Za-z0-9]{1,59}$/.test(a)){ note("A Stripe connected account looks like acct_ followed by letters and digits."); return; }
+    const w = await write("money.account", ts, {teamspace:ts, provider:"stripe", account:a}); if (w){ toast("Connected account saved.", [w]); again(); } };
+  document.querySelectorAll("[data-invpay]").forEach(b => b.onclick = async () => { b.disabled = true; note("Asking Stripe (test mode) for a card link…");
+    const r = await moneyFetch("/studio/api/money/checkout", {invoice:b.dataset.invpay});
+    if (r.error){ note(r.error); b.disabled = false; return; }
+    note("Card link ready: pay with 4242 4242 4242 4242, any future date, any CVC. The ledger updates when Stripe's webhook arrives."); toast("Test card link ready"); await again();
+    const a = document.querySelector(`[data-paylink="${CSS.escape(b.dataset.invpay)}"]`); if (!a && r.url){ const li = document.querySelector(`[data-invoice="${CSS.escape(b.dataset.invpay)}"] > span:last-child`); li?.insertAdjacentHTML("beforeend", `<br><a data-paylink="${esc(b.dataset.invpay)}" href="${esc(r.url)}" target="_blank" rel="noopener">Open the test card link ↗</a>`); } });
+  document.querySelectorAll("[data-invrec]").forEach(b => b.onclick = async () => { const id = b.dataset.invrec;
+    const amount = Math.round((+document.querySelector(`[data-recamt="${CSS.escape(id)}"]`).value || 0) * 100), method = document.querySelector(`[data-recmeth="${CSS.escape(id)}"]`).value;
+    if (!(amount > 0)){ note("Type the amount received."); return; }
+    const r = await moneyFetch("/studio/api/money/record", {invoice:id, amount, method, ref:""});
+    if (r.error){ note(r.error); return; }
+    note(`Recorded ${gbp(amount)} on ${id}.`); toast(`Payment recorded on ${id}`); again(); });
+  const op = $("#monOpenRules"); if (op) op.onclick = () => { show("map"); select(FEE_RULES_ID); };
+  const mk = $("#monMakeRules"); if (mk) mk.onclick = async () => {
+    const id = await write("item.create", null, {id:FEE_RULES_ID, type:"setting", title:"fee.rules · Nodach's fees", status:"agreed", refs:["FUN-1","Q-take-rate"],
+      body:"Nodach's processing fees: 4.5% through Nodach (Nodach pays Stripe's fee out of it), no cap; co-vendor sales free; teamspace overrides; own-provider surcharge and recorded bank transfers per plan are PLACEHOLDERS for Nowed. A change is a versioned proposal (Money view).",
+      value:JSON.stringify(FEE_DEFAULT), meta:{fee_rules:true}});
+    if (id){ toast("Fee rules node created with the defaults.", [id]); again(); } };
+  const pr = $("#monPropose"); if (pr) pr.onclick = async () => {
+    const bps = Math.round(+$("#monRateIn").value * 100); if (!(bps >= 0 && bps <= 10000)){ note("A percentage from 0 to 100."); return; }
+    const cur = jsonValue(FEE_RULES_ID, FEE_DEFAULT), v = {...FEE_DEFAULT, ...cur, nodach_bps:bps};
+    const {id, proposed} = await proposeSelf(FEE_RULES_ID, "fee.rules · Nodach's fees", "Nodach's processing fees. Changed from the Money view.", v, "fees", `Fee rules: Nodach ${pctTxt(bps)} through Nodach`);
+    if (id){ note(proposed ? `Proposed as ${proposed}. It applies only on staging.` : "Saved as a new version of the fee rules."); toast(proposed ? "Fee rules proposed" : "Fee rules saved", [id]); if (!proposed) again(); } };
+}
+if (/^#money-(paid|cancelled)-/.test(location.hash)) setTimeout(() => { const paid = location.hash.includes("-paid-"); show("money");
+  toast(paid ? "Stripe took the test payment. It shows on the ledger once Stripe's webhook reaches the hub (usually seconds)." : "Payment cancelled: nothing was charged."); }, 1500);
 
 /* ---------------------------------------------------------------- usage (FUN-1 v2, BQ-1 step 3)
    One meter per profile and per teamspace, counted by the hub (hub_core::usage) from the record and the private store;
@@ -2308,7 +2453,7 @@ async function renderUsage(){
 
 /* ---------------------------------------------------------------- teamspaces view (FUN-1 v2, BQ-1 step 2)
    Your teamspaces; inside one: members and roles (owners invite and change roles), its nodes and the nodes shared
-   into it, its Money rules node (a placeholder: no payments yet), and, for owners, Export teamspace.
+   into it, a link to its Money view (BQ-1 step 4: ledger, invoices, fees), and, for owners, Export teamspace.
    Teamspace events are signed in as you, so they are written only where the hub serves Studio. */
 S.ts = null;
 const tsHere = () => !!window.__nodach?.standalone;
@@ -2335,9 +2480,9 @@ function renderOneSpace(T, t, me, can){
     ${owner && can ? `<div class="row" style="margin-top:6px"><label for="tsInvProf">Invite profile</label><input id="tsInvProf" class="mono" placeholder="P-their-login" style="width:180px">
       <label for="tsInvRole">as</label><select id="tsInvRole">${opt(["member","guest","owner"], "member")}</select><button id="tsInvite">Invite</button></div>
       <p class="mute" style="margin:4px 0 0;font-size:12px">Everyone has a Personal profile named P- and their GitHub login (P-nassar). They see the invitation in Teamspaces and click Join. Someone new signs in first through Invite on the Hub page.</p>` : ""}
-    <h4 style="margin:12px 0 4px">Money rules</h4>
-    <div id="tsMoney" class="mute" style="font-size:13px">${money ? `<b>${esc(money.title)}</b> <span class="mono">${esc(money.id)}</span> · placeholder: this teamspace's own money rules live in this node, as versions. No payments are taken yet. <button data-tsgo="${esc(money.id)}">Open</button>`
-      : member ? `No money rules node yet.${owner && can ? ` <button id="tsAddMoney">Add the Money rules node</button>` : ""}` : "The money rules node isn't shared with you."}</div>
+    <h4 style="margin:12px 0 4px">Money</h4>
+    <div id="tsMoney" class="mute" style="font-size:13px">${member ? `Invoices, payments, Nodach's fee and its net for this teamspace are in its Money view. <button id="tsOpenMoney" data-tsmoney="${esc(t.id)}">Open Money</button>`
+      + (money ? ` · its notes on money: <b>${esc(money.title)}</b> <button data-tsgo="${esc(money.id)}">Open</button>` : owner && can ? ` <button id="tsAddMoney">Add a money notes node</button>` : "") : "This teamspace's money isn't shared with you."}</div>
     <h4 style="margin:12px 0 4px">Nodes in this teamspace</h4>
     <ul class="log" id="tsNodes">${nodes.length ? nodes.map((it, i) => row(it, i, lvl(it.id) ? ` <span class="mute">shared with ${esc(lvl(it.id))}</span>` : "")).join("") : `<li><span class="n"></span><span class="mute">${member ? "No nodes yet." : "Nothing here is shared with you yet."}</span></li>`}</ul>
     ${member && can ? `<div class="row" style="margin-top:6px"><label for="tsNodeTitle">New node</label><input id="tsNodeTitle" maxlength="200" placeholder="Title" style="min-width:240px"><button id="tsAddNode">Add to teamspace</button></div>` : ""}
@@ -2385,6 +2530,7 @@ function renderSpaces(){
     const title = $("#tsNodeTitle").value.trim(); if (!title){ note("Give the node a title."); return; }
     const id = "TN-" + Date.now().toString(36);
     if (after(await write("item.create", null, {id, type:"idea", title, body:"", status:"open", teamspace:ts}))) toast(`Added ${title} to the teamspace.`); };
+  document.querySelectorAll("[data-tsmoney]").forEach(b => b.onclick = () => { S.monTs = b.dataset.tsmoney; show("money"); });
   const money = $("#tsAddMoney"); if (money) money.onclick = async () => { if (after(await addMoneyNode(ts, T.spaces.get(ts)?.label))) toast("Money rules node added."); };
   const sh = $("#tsShare"); if (sh) sh.onclick = async () => {
     const node = $("#tsShareNode").value, to = $("#tsShareTo").value.trim(), level = $("#tsShareLevel").value;
@@ -2398,7 +2544,7 @@ function renderSpaces(){
 }
 function addMoneyNode(ts, label){
   return write("item.create", null, {id:"MR-" + Date.now().toString(36), type:"setting", title:`Money rules · ${label || ts}`, status:"open", teamspace:ts, meta:{money_rules:true},
-    body:"This teamspace's own money rules, kept as versions. Placeholder: no payments are taken yet."});
+    body:"This teamspace's own notes on money, kept as versions. Its ledger, invoices and fees are in the Money view (hub_core::money)."});
 }
 $("#tsCreate").onclick = async () => {
   const label = $("#tsLabel").value.trim(); if (!label){ $("#tsNote").textContent = "Give the teamspace a name."; return; }
