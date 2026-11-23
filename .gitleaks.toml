@@ -1,0 +1,7 @@
+# Gitleaks config: default rules plus one narrow, reviewed exception.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "118a a (Nowed, 23 Nov 2026): commit cc3783e held three made-up sk_test-style strings in money v1 tests; removed in later commits. Only this commit is exempt."
+commits = ["cc3783eb7a149d8899242e8a7b24224688edaf2f"]
