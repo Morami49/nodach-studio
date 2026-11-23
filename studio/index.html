@@ -221,6 +221,11 @@ h3{font:600 15px/1.3 var(--body);margin:0}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .card{background:var(--raise);border:1px solid var(--line);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;min-width:0}
 .card.sel{border-color:var(--accent)}
+/* BQ-1 step 3: usage bars (Settings → Usage) */
+.ubar{height:10px;border-radius:999px;background:var(--surface);border:1px solid var(--line);overflow:hidden}
+.ubar>i{display:block;height:100%;background:var(--ok)}
+.ubar.warn>i{background:var(--warn)} .ubar.full>i{background:var(--bad)}
+.urow{display:grid;grid-template-columns:120px 1fr 190px;gap:10px;align-items:center;font-size:13px}
 .log{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
 .log li{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:13px}
 .log li.gone{opacity:.55}
@@ -287,7 +292,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
       <button data-sv="spaces">Teamspaces</button><button data-sv="builders">Builders</button><button data-sv="money">Money</button><button data-sv="hub">Hub</button><span data-slot="live"></span><span data-slot="show"></span>
     </div>
     <div class="sub" data-sub="settings" role="toolbar" aria-label="Settings" hidden>
-      <button data-sv="runs">Runs</button><button data-sv="self">Developer mode</button>
+      <button data-sv="runs">Runs</button><button data-sv="usage">Usage</button><button data-sv="self">Developer mode</button>
       <span data-slot="theme"></span><span data-slot="point"></span><span data-slot="branch"></span>
       <span data-slot="classic"></span>
       <span data-slot="status"></span>
@@ -471,6 +476,15 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
         <label for="runOutcome">Outcome</label><select id="runOutcome"><option value="">all</option><option value="success">succeeded</option><option value="failure">failed</option></select>
         <span class="mute" id="runCount"></span></div>
       <ul class="log" id="runList" data-nodach-part="runs.list"></ul>
+    </div>
+  </section>
+
+  <section class="view" id="v-usage" hidden data-nodach-part="studio.usage">
+    <div class="stack" style="max-width:900px">
+      <h2>Usage</h2>
+      <p class="mute" style="margin:0">Nodach is free to use, with generous monthly limits on machine capacity: AI calls, flow runs and storage. Each profile and each teamspace has its own meter, counted per calendar month (UTC). At 80% the owner gets an urgent notice in My queue; at 100% AI calls and runs stop until the month ends ("Monthly free limit reached; a top-up will be available soon"). Storage only warns. Top-ups come later.</p>
+      <div class="card" id="useLimits"></div>
+      <div id="useMeters" class="stack"></div>
     </div>
   </section>
 
@@ -1231,23 +1245,27 @@ function lastTs(i, kinds){ return i.history.filter(h => kinds.includes(h.kind) &
 function myQueue(){
   return [...F.items.values()].filter(i => {
     if (QUEUE_DONE.includes(i.status)) return false;
+    // BQ-1 step 3: items raised for named accounts (usage notices: meta.queue) wait on exactly those accounts
+    if (Array.isArray(i.meta?.queue)) return i.meta.queue.map(x => String(x).toLowerCase()).includes(myLogin()) && !lastTs(i, ["answer","status"]);
     const lane = laneOf(i);
     if (lane && lane !== "nowed") return false;
     if (!(lane === "nowed" || i.type === "question" || i.type === "decision-pack" || /^Q-/.test(i.id))) return false;
     const asked = lastTs(i, ["item.create","item.edit","genesis"]), answered = lastTs(i, ["answer"]);
     return !answered || asked > answered;
-  }).map(i => ({i, since: lastTs(i, ["item.create","item.edit","genesis"])})).sort((a,b) => a.since < b.since ? -1 : a.since > b.since ? 1 : 0);
+  }).map(i => ({i, since: lastTs(i, ["item.create","item.edit","genesis"])})).sort((a,b) => (!!b.i.meta?.urgent - !!a.i.meta?.urgent) || (a.since < b.since ? -1 : a.since > b.since ? 1 : 0));
 }
 function renderQueue(){
   const q = myQueue();
   $("#queueList").innerHTML = q.length ? q.map(({i, since}, k) => { const c = codeOf(i.id) || i.id; return `
     <li class="card${S.sel===i.id?" sel":""}" data-q="${esc(i.id)}">
-      <div class="row"><span class="mono" style="font-weight:600">${k+1}. ${esc(c)}</span><span class="eyebrow">${esc(TYPES[i.type] || i.type || "item")} · ${esc(i.id)}</span><span class="spacer"></span><span class="mute mono" title="asked">${esc((since||"").slice(0,10))}</span></div>
+      <div class="row"><span class="mono" style="font-weight:600">${k+1}. ${esc(c)}</span><span class="eyebrow">${esc(TYPES[i.type] || i.type || "item")} · ${esc(i.id)}</span>${i.meta?.urgent ? `<span class="pill" style="color:var(--bad)" data-urgent>urgent</span>` : ""}<span class="spacer"></span><span class="mute mono" title="asked">${esc((since||"").slice(0,10))}</span></div>
       <h3>${esc(i.title)}</h3>
       <div class="body" style="font-size:13px">${esc((i.body||"").slice(0,280))}${(i.body||"").length>280?"…":""}</div>
-      <div class="row"><span class="spacer"></span><button data-qopen="${esc(i.id)}">Open</button></div>
+      <div class="row"><span class="spacer"></span>${i.meta?.usage ? `<button data-qusage>Usage</button><button data-qdone="${esc(i.id)}">Mark seen</button>` : ""}<button data-qopen="${esc(i.id)}">Open</button></div>
     </li>`; }).join("") : '<li class="empty">Nothing waits on you. Claude carries on with its own lane.</li>';
   $("#queueList").querySelectorAll("[data-qopen]").forEach(b => b.onclick = () => select(b.dataset.qopen));
+  $("#queueList").querySelectorAll("[data-qusage]").forEach(b => b.onclick = () => show("usage"));
+  $("#queueList").querySelectorAll("[data-qdone]").forEach(b => b.onclick = async () => { const id = await write("status", b.dataset.qdone, {status:"done"}); if (id){ toast("Notice marked seen.", [id]); refreshView(); } });
 }
 function badge(){ const n = askable().filter(i => (i.type==="question" || i.status==="challenged") && !i.answers.length && !i.comments.length).length; const b=$("#askBadge"); b.textContent = n; b.hidden = !n; b.setAttribute("aria-label", n+" waiting for you");
   const m = myQueue().length, qb = $("#queueBadge"); qb.textContent = m; qb.hidden = !m; qb.setAttribute("aria-label", m+" in your queue"); }
@@ -1961,9 +1979,9 @@ $("#tyAdd").onclick = async () => {
   if (id){ for (const k of ["#tyKey","#tyLabel"]) $(k).value = ""; $("#tyNote").textContent = proposed ? `Proposed as ${proposed}. It applies only on staging.` : `Added ${label}.`; toast(proposed ? `Type ${label} proposed` : `Type ${label} added`, [id]); } };
 
 /* ---------------------------------------------------------------- views + time */
-const VIEWS = ["map","command","list","ask","queue","capture","tree","pack","money","hub","runs","builders","self","explore","spaces"];
+const VIEWS = ["map","command","list","ask","queue","capture","tree","pack","money","hub","runs","builders","self","explore","spaces","usage"];
 /* NAV-2: sections are saved filters over one graph. Private is home and reaches everything; each view has one section. */
-const SECTIONS = {private:["map","list","tree","queue","ask","capture","pack"], teams:["spaces","builders","money","hub"], settings:["runs","self"],
+const SECTIONS = {private:["map","list","tree","queue","ask","capture","pack"], teams:["spaces","builders","money","hub"], settings:["runs","usage","self"],
   search:["command"], explore:["explore"]};
 const SECTION_OF = Object.fromEntries(Object.entries(SECTIONS).flatMap(([k, vs]) => vs.map(v => [v, k])));
 function show(v){ if (!VIEWS.includes(v)) v = "map"; S.view=v; document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-current", b.dataset.v===v));
@@ -2149,7 +2167,7 @@ $("#asof").oninput = e => { const evs=[...S.events].sort(byTsThenId); const v=+e
   S.asof = v>=evs.length ? null : (v===0 ? "0" : evs[v-1].ts); refresh(); };
 $("#theme").onclick = () => { const r=document.documentElement, dark=matchMedia("(prefers-color-scheme: dark)").matches;
   r.dataset.theme = (r.dataset.theme || (dark?"dark":"light"))==="dark" ? "light" : "dark"; renderMap(false); if (S.view==="tree") renderTree(); if (S.view==="capture") redraw(); };
-function refreshView(){ if (S.view==="map") renderMap(false); if (S.view==="list") renderList(); if (S.view==="ask") renderAsk(); if (S.view==="queue") renderQueue(); if (S.view==="tree") renderTree(); if (S.view==="pack") renderPack(); if (S.view==="money") renderMoney(); if (S.view==="hub") renderHub(); if (S.view==="runs") renderRuns(); if (S.view==="builders") renderBuilders(); if (S.view==="self") renderSelf(); if (S.view==="command") renderCommands(); if (S.view==="spaces") renderSpaces(); }
+function refreshView(){ if (S.view==="map") renderMap(false); if (S.view==="list") renderList(); if (S.view==="ask") renderAsk(); if (S.view==="queue") renderQueue(); if (S.view==="tree") renderTree(); if (S.view==="pack") renderPack(); if (S.view==="money") renderMoney(); if (S.view==="hub") renderHub(); if (S.view==="runs") renderRuns(); if (S.view==="builders") renderBuilders(); if (S.view==="self") renderSelf(); if (S.view==="command") renderCommands(); if (S.view==="spaces") renderSpaces(); if (S.view==="usage") renderUsage(); }
 function refresh(){
   if (S.bulk) return;   // a bulk action redraws once at the end
   CODES = stableCodes(); F = fold();
@@ -2241,6 +2259,61 @@ function renderMoney(){
     const id = await write("item.edit", k, {value: v}); if (id) toast(`${k} → ${v}`, [id]); });
 }
 for (const id of ["calcAmt","calcSales","calcClass"]) $("#"+id).oninput = renderMoney;
+
+/* ---------------------------------------------------------------- usage (FUN-1 v2, BQ-1 step 3)
+   One meter per profile and per teamspace, counted by the hub (hub_core::usage) from the record and the private store;
+   this page only draws it. The free limits are a node, PLAN-limits ("plan.limits"), so a change is a versioned proposal
+   (NVS-4: applied at once only on staging). The defaults are Nowed's decided limits (23 Nov 2026). */
+const LIMITS_ID = "PLAN-limits";
+const USE_DEFAULT = {ai_calls:500, runs:2000, storage_bytes:1000000000};
+let USAGE = null;
+const fmtBytes = n => n >= 1e9 ? (n/1e9).toFixed(n % 1e9 ? 2 : 0) + " GB" : n >= 1e6 ? (n/1e6).toFixed(1) + " MB" : n >= 1e3 ? (n/1e3).toFixed(1) + " KB" : n + " B";
+const fmtUse = (k, n) => k === "storage_bytes" ? fmtBytes(n) : Number(n).toLocaleString("en-GB");
+function usageLimits(){ const v = jsonValue(LIMITS_ID, null); const {placeholder, ...rest} = v && typeof v === "object" ? v : {}; return {...USE_DEFAULT, ...rest}; }
+function usageRow(r){
+  const bars = Object.entries(r.meters).map(([k, m]) => {
+    const p = Math.min(100, m.pct), cls = m.pct >= 100 ? "full" : m.pct >= 80 ? "warn" : "";
+    const note = r.exempt ? "exempt" : m.pct >= 100 ? (m.enforced ? "limit reached: refused" : "over: warn only") : m.pct >= 80 ? "80%: notice sent" : "";
+    return `<div class="urow" data-meter="${esc(k)}"><span>${esc(m.label)}</span>
+      <div class="ubar ${cls}" role="meter" aria-label="${esc(m.label)} used" aria-valuemin="0" aria-valuemax="${m.limit}" aria-valuenow="${m.used}"><i style="width:${r.exempt ? 0 : p}%"></i></div>
+      <span class="mono">${esc(fmtUse(k, m.used))} / ${esc(fmtUse(k, m.limit))} · ${m.pct}%${note ? ` <span class="mute">${esc(note)}</span>` : ""}</span></div>`; }).join("");
+  const what = r.kind === "teamspace" ? `teamspace · you are ${esc(r.role || "")}` : `profile · ${esc(r.profile_kind || "")}${r.active ? " · this window" : ""}`;
+  return `<div class="card" data-scope="${esc(r.scope)}"><h3>${esc(r.label || r.scope)} <span class="mute mono" style="font-size:12px">${esc(r.scope)} · ${what}</span></h3>
+    ${r.exempt ? `<p class="mute" style="margin:0">The hub owner's Developer profile is exempt: counted for no limit, never refused.</p>` : ""}${bars}</div>`;
+}
+async function renderUsage(){
+  const here = !!window.__nodach?.standalone, node = F.items.get(LIMITS_ID), lim = usageLimits();
+  const L = $("#useLimits");
+  const nums = `${lim.ai_calls.toLocaleString("en-GB")} AI calls · ${lim.runs.toLocaleString("en-GB")} flow runs · ${fmtBytes(lim.storage_bytes)} stored, a month`;
+  L.innerHTML = `<h3>Free limits <span class="mute mono" style="font-size:12px">plan.limits</span></h3>
+    <div class="row"><b id="useNums">${esc(nums)}</b></div>
+    <div class="row">${node ? `<button id="useOpenLimits">Open the limits node ${esc(LIMITS_ID)}</button><span class="mute">every change is a version on its tree</span>`
+      : `<span class="mute">No limits node on the record yet: these defaults apply.</span>${S.owner ? ` <button id="useMakeLimits">Create the limits node</button>` : ""}`}</div>
+    ${S.owner ? `<div class="row" style="flex-wrap:wrap"><label for="useAi">AI calls</label><input id="useAi" type="number" min="0" step="1" value="${lim.ai_calls}" style="width:100px">
+      <label for="useRuns">runs</label><input id="useRuns" type="number" min="0" step="1" value="${lim.runs}" style="width:100px">
+      <label for="useGb">GB</label><input id="useGb" type="number" min="0" step="0.1" value="${lim.storage_bytes / 1e9}" style="width:80px">
+      <button id="usePropose">Propose new limits</button><span class="mute" id="useNote" role="status"></span></div>` : ""}`;
+  const M = $("#useMeters");
+  if (!here){ M.innerHTML = `<div class="card"><p class="mute" style="margin:0" id="useAway">Usage is counted by the hub: open Studio at staging.nodach.com/studio to see your meters.</p></div>`; }
+  else {
+    try { const r = await fetch("/studio/api/usage", {credentials:"same-origin", cache:"no-store", headers:{...NodachProfile.headers()}}); USAGE = r.ok ? await r.json() : null; } catch { USAGE = null; }
+    if (S.view !== "usage") return;
+    M.innerHTML = USAGE ? `<p class="mute" style="margin:0">Month <span class="mono" id="useMonth">${esc(USAGE.month)}</span> (UTC). Storage is what is held now: events, files they reference and your Private tier.</p>` + USAGE.meters.map(usageRow).join("")
+      : `<div class="card"><p class="bad" style="margin:0">Couldn't read the meters from the hub. Nothing is refused because of this page.</p></div>`;
+  }
+  const o = $("#useOpenLimits"); if (o) o.onclick = () => { show("map"); select(LIMITS_ID); };
+  const mk = $("#useMakeLimits"); if (mk) mk.onclick = async () => {
+    const id = await write("item.create", null, {id:LIMITS_ID, type:"setting", title:"plan.limits · free monthly limits", status:"agreed", refs:["FUN-1","D-152"],
+      body:"Nodach's free monthly limits per profile and per teamspace (AI calls, flow runs, stored bytes). Storage is counted as the total bytes held. A change is a versioned proposal (Settings → Usage).",
+      value:JSON.stringify(USE_DEFAULT), meta:{plan_limits:true}});
+    if (id){ toast("Limits node created with the default limits.", [id]); renderUsage(); } };
+  const pr = $("#usePropose"); if (pr) pr.onclick = async () => {
+    const v = {ai_calls:Math.max(0, Math.round(+$("#useAi").value)), runs:Math.max(0, Math.round(+$("#useRuns").value)), storage_bytes:Math.max(0, Math.round(+$("#useGb").value * 1e9))};
+    if (![v.ai_calls, v.runs, v.storage_bytes].every(Number.isFinite)){ $("#useNote").textContent = "Whole numbers, 0 or more."; return; }
+    const {id, proposed} = await proposeSelf(LIMITS_ID, "plan.limits · free monthly limits", "Nodach's free monthly limits per profile and per teamspace. Changed from Settings → Usage.", v, "plan",
+      `Limits: ${v.ai_calls} AI calls, ${v.runs} runs, ${fmtBytes(v.storage_bytes)} a month`);
+    if (id){ $("#useNote").textContent = proposed ? `Proposed as ${proposed}. It applies only on staging.` : "Saved as a new version of the limits node."; toast(proposed ? "Limits proposed" : "Limits saved", [id]); if (!proposed) renderUsage(); } };
+}
 
 /* ---------------------------------------------------------------- teamspaces view (FUN-1 v2, BQ-1 step 2)
    Your teamspaces; inside one: members and roles (owners invite and change roles), its nodes and the nodes shared

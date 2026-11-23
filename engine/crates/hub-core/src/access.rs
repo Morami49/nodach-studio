@@ -108,6 +108,8 @@ impl State {
     /// teamspaces say (a node in a teamspace only for its members, or for whoever it is shared with), then granted items.
     pub fn visible(&self, login: &str, ev: &Value) -> bool {
         if author_login(ev).as_deref() == Some(lc(login).as_str()) { return true; }
+        // BQ-1 step 3: a usage notice is readable by the accounts whose queue it was raised for
+        if crate::usage::queued_for(ev, login) { return true; }
         if self.is_owner(login) {
             // 114b a: the hub owner reads every teamspace he is in; any other only while a logged support access
             // (support.access, 24 h) he opened is running. Everything outside teamspaces stays his.

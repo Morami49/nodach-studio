@@ -321,6 +321,14 @@ impl State {
         }).map(|(_, l)| *l).max()
     }
 
+    /// The GitHub logins of a teamspace's owners (BQ-1 step 3: whose queue a usage notice goes to).
+    pub fn owner_logins(&self, ts: &str) -> Vec<String> {
+        let Some(t) = self.teamspaces.get(ts) else { return vec![] };
+        let mut v: Vec<String> = t.members.iter().filter(|(_, r)| **r == Role::Owner)
+            .filter_map(|(p, _)| self.account_of_profile(p)?.strip_prefix("acct:github:").map(str::to_string)).collect();
+        v.sort(); v.dedup(); v
+    }
+
     /// Teamspaces `login` is in (with their role) or invited to, for Studio and /studio/api/me.
     pub fn view_for(&self, login: &str) -> Value {
         let mine: Vec<Value> = self.teamspaces.values().filter_map(|t| {
