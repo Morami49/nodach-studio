@@ -36,6 +36,12 @@
 //!                            x-nodach-profile: <id> (B-profile-windows) names the window's profile; one that isn't an
 //!                            active profile of the signed-in account is refused 403 {profile_mismatch: true} on every
 //!                            POST /studio/api/* route and logged as outcome "profile mismatch".
+//! GET  /studio/api/teamspaces → {teamspaces:[{id,label,role,invited,members,invites,support_log?}], others:[{id,label,
+//!                            support_until}]}: the ones you're in or invited to (BQ-1 step 2); owners of a teamspace get
+//!                            its support access log; a hub owner gets the other teamspaces by id and name only (114b a).
+//!                            The hub owner reads inside those only through support.access {teamspace, reason}: logged,
+//!                            shown to that teamspace's owners, open for 24 hours. Writes that break a teamspace rule (hub_core::teamspaces) are refused 403
+//!                            {teamspace_refused: true} with the rule in words and logged as outcome "refused: teamspace".
 //! GET  /studio/api/private  ?path=data/users/<you>/... → {events:[{doc_id,event}]}: your private items (I1, Q53 A)
 //! POST /studio/api/private  {path, doc_id, event}: one private event, sealed with your own key (hub_core::private)
 //! POST /studio/api/private/batch  {items:[{path, key, event}]}: up to 200 private events, checked whole (M1 d)
@@ -1072,6 +1078,12 @@ impl Record {
                         json_status(&serde_json::json!({"login": l, "id": if email_account { format!("email:{l}") } else { format!("github:{l}") },
                             "label": acc.label_of(&l), "owner": acc.is_owner(&l), "spaces": acc.grants_of(&l)}), 200)?
                     }
+                    (Method::Get, "/studio/api/teamspaces", Some(l)) => {
+                        // BQ-1 step 2: the teamspaces you're in (with your role) or invited to; never anyone else's.
+                        // 114b a: owners get their support access log; a hub owner gets the others by id and name only.
+                        let v = self.hub.borrow().as_ref().unwrap().teamspaces_at(now).view_for(&l);
+                        json_status(&v, 200)?
+                    }
                     (Method::Get, "/studio/api/profiles", Some(l)) => {
                         // I2: your account, profiles, connections (refs only) and findings; never someone else's
                         let v = self.hub.borrow().as_ref().unwrap().profiles().view_for(&l);
@@ -1109,7 +1121,7 @@ impl Record {
                     }
                     (Method::Get, "/studio/api/events", Some(l)) => {
                         let q = |k: &str| url.query_pairs().find(|(a, _)| a == k).and_then(|(_, v)| v.parse::<usize>().ok());
-                        let (events, next, total, _) = self.hub.borrow().as_ref().unwrap().studio_events_for(&l, q("after").unwrap_or(0), q("limit").unwrap_or(500).clamp(1, 2000));
+                        let (events, next, total, _) = self.hub.borrow().as_ref().unwrap().studio_events_for(&l, q("after").unwrap_or(0), q("limit").unwrap_or(500).clamp(1, 2000), now);
                         json_status(&serde_json::json!({"events": events, "next": next, "total": total}), 200)?
                     }
                     (Method::Post, "/studio/api/run", Some(l)) => {
@@ -1138,6 +1150,9 @@ impl Record {
                             // F-profile-kinds-spoofable: profile and access kinds only as yourself; members only as
                             // themselves and inside their spaces (hub_core::authorship)
                             let refused = hub_core::authorship::refusal(&self.hub.borrow().as_ref().unwrap().access(), &l, &ev);
+                            // BQ-1 step 2: teamspace roles (only an owner changes roles; guests touch only what is shared
+                            // with them; a write into a teamspace needs member or editor rights), logged on their own
+                            let team_refused = hub_core::authorship::teamspace_refusal(&self.hub.borrow().as_ref().unwrap().access(), &ev);
                             // B-profile-windows: the event's author.profile must agree with the window and be the author's
                             let wrong_profile = hub_core::authorship::write_profile_refusal(&self.hub.borrow().as_ref().unwrap().profiles(), &l, profile_hdr.as_deref(), &ev);
                             if !valid_doc_id(&doc_id) || !ok_ev {
@@ -1145,6 +1160,9 @@ impl Record {
                             } else if let Some(e) = wrong_profile {
                                 self.log(now, "/studio/api/events", &kind, "profile mismatch", &l);
                                 json_status(&serde_json::json!({"error": e, "refused": true, "profile_mismatch": true}), 403)?
+                            } else if let Some(e) = team_refused {
+                                self.log(now, "/studio/api/events", &kind, "refused: teamspace", &l);
+                                json_status(&serde_json::json!({"error": e, "refused": true, "teamspace_refused": true}), 403)?
                             } else if let Some(e) = refused {
                                 self.log(now, "/studio/api/events", &kind, "refused: author", &l);
                                 json_status(&serde_json::json!({"error": e, "refused": true}), 403)?
@@ -1426,11 +1444,15 @@ impl Record {
                         let refused = |docs: &Vec<(String, serde_json::Value)>| hub_core::authorship::batch_refusal(&self.hub.borrow().as_ref().unwrap().access(), &login, docs);
                         // B-profile-windows: an event's author.profile must be one of its author's own active profiles
                         let wrong_profile = |docs: &Vec<(String, serde_json::Value)>| hub_core::authorship::batch_profile_refusal(&self.hub.borrow().as_ref().unwrap().profiles(), &login, docs);
+                        // BQ-1 step 2: teamspace roles, judged on each event's own author
+                        let team_refused = |docs: &Vec<(String, serde_json::Value)>| hub_core::authorship::batch_teamspace_refusal(&self.hub.borrow().as_ref().unwrap().access(), docs);
                         let v = match mcp::import_docs(&args) {
                             Err(e) => mcp::tool_result(serde_json::json!({"error": e}), true),
                             Ok(docs) => if let Some(e) = wrong_profile(&docs) {
                                 profile_mismatch = true;
                                 mcp::tool_result(serde_json::json!({"error": e, "refused": true, "profile_mismatch": true}), true)
+                            } else if let Some(e) = team_refused(&docs) {
+                                mcp::tool_result(serde_json::json!({"error": e, "refused": true, "teamspace_refused": true}), true)
                             } else if let Some(e) = refused(&docs) {
                                 mcp::tool_result(serde_json::json!({"error": e, "refused": true}), true)
                             } else {
@@ -1453,6 +1475,7 @@ impl Record {
                     };
                     let outcome = match &r {
                         _ if profile_mismatch => "profile mismatch".to_string(),
+                        Some(v) if v.pointer("/result/structuredContent/teamspace_refused") == Some(&serde_json::Value::Bool(true)) => "refused: teamspace".to_string(),
                         None => "notification".to_string(),
                         // a client probing for a method this hub does not offer (e.g. server/discover) is not a failure
                         Some(v) if v.pointer("/error/code") == Some(&serde_json::json!(-32601)) => "not offered".to_string(),

@@ -29,6 +29,8 @@
       // B-profile-windows: the hub refused this window's profile; the page shows the hub's message (not "view only")
       let j = null; try { j = JSON.parse(t); } catch {}
       if (j && j.profile_mismatch) throw { code: "invalid_argument", profile_mismatch: true, message: String(j.error || t) };
+      // BQ-1 step 2: a teamspace rule refused this one write (a role, a guest, a share level): show why, stay writable
+      if (j && j.teamspace_refused) throw { code: "permission_denied", teamspace_refused: true, message: String(j.error || t) };
       throw { code: "invalid_argument", message: t };
     }
     if (!r.ok) throw { code: "unavailable", status: r.status, message: "hub answered " + r.status };
@@ -66,6 +68,12 @@
       return added;
     })().finally(() => { pulling = null; });
     return pulling;
+  }
+
+  // 114b a: a support access opens events that sit before the cursor; read the whole record again (seen dedups)
+  async function resync() {
+    if (pulling) await pulling.catch(() => {});   // a pull in flight would move the cursor back to the end
+    cursor = 0; return pull();
   }
 
   let timer = null;
@@ -286,7 +294,7 @@
     document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
   }
 
-  window.__nodach = { pull, shared, standalone: true, checkVersion, env: ENV, build: BUILD, uploadPrivate };
+  window.__nodach = { pull, resync, shared, standalone: true, checkVersion, env: ENV, build: BUILD, uploadPrivate };
   window.claude = {
     use: async n => {
       if (n === "db") { try { await me(); return db; } catch { return null; } }

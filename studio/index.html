@@ -284,7 +284,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
       <button data-sv="map">ActionMap</button><button data-sv="list">List</button><button data-sv="tree">Version tree</button><button data-sv="queue">My queue</button><button data-sv="ask">Ask</button><button data-sv="capture">Capture</button><button data-sv="pack">Pack</button>
     </div>
     <div class="sub" data-sub="teams" role="toolbar" aria-label="Teamspaces" hidden>
-      <button data-sv="builders">Builders</button><button data-sv="money">Money</button><button data-sv="hub">Hub</button><span data-slot="live"></span><span data-slot="show"></span>
+      <button data-sv="spaces">Teamspaces</button><button data-sv="builders">Builders</button><button data-sv="money">Money</button><button data-sv="hub">Hub</button><span data-slot="live"></span><span data-slot="show"></span>
     </div>
     <div class="sub" data-sub="settings" role="toolbar" aria-label="Settings" hidden>
       <button data-sv="runs">Runs</button><button data-sv="self">Developer mode</button>
@@ -412,6 +412,24 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
         <button id="mergeGo">Merge this branch into main</button>
       </div>
       <ol class="log" id="eventLog" data-nodach-part="tree.log"></ol>
+    </div>
+  </section>
+
+  <section class="view" id="v-spaces" hidden data-nodach-part="studio.teamspaces">
+    <div class="stack" style="max-width:900px">
+      <h2>Teamspaces</h2>
+      <p class="mute" style="margin:0">A teamspace is a shared area inside the one graph. Owners invite people and change roles; members read and add every node in it; guests read only what is shared with them. Every change is an event, so who could see what at any time can be replayed.</p>
+      <div id="tsHome" class="stack">
+      <div class="card" id="tsCreateCard">
+        <h3>Create teamspace</h3>
+        <div class="row"><label for="tsLabel">Name</label><input id="tsLabel" maxlength="80" placeholder="e.g. Insydr pilot" style="min-width:240px">
+          <button class="primary" id="tsCreate">Create teamspace</button><span class="mute" id="tsNote" role="status"></span></div>
+      </div>
+      <div id="tsInvites"></div>
+      <div class="card"><h3>Your teamspaces</h3><ul class="log" id="tsList" aria-label="Your teamspaces"></ul></div>
+      <div id="tsOthers"></div>
+      </div>
+      <div id="tsOne"></div>
     </div>
   </section>
 
@@ -627,9 +645,84 @@ function fold(){
     if (e.kind==="status"){ h.prev = it.status; it.status = e.body.status; }
     if (e.kind==="link") it.refs = [...new Set([...it.refs, ...(e.body.refs||[])])];
   }
+  // BQ-1 step 2: a node in a teamspace shows only for its members and whoever it is shared with (the hub filters the
+  // same way; this keeps a page that was given more, e.g. inside claude.ai, from showing it). Own items always show.
+  TEAMS = foldTeams(S.events);
+  if (!S.owner) for (const [id, it] of items) if (TEAMS.canRead(myLogin(), id) === false && !(it.by && it.by.id === S.me)) items.delete(id);
   return {items, evs, bs};
 }
 let F = {items:new Map(), evs:[], bs:{}};
+
+/* ---------------------------------------------------------------- teamspaces (FUN-1 v2, BQ-1 step 2)
+   The same rules as hub_core::teamspaces, folded from the events this page holds. The hub is the one that enforces
+   them (403 with the rule in words); this copy decides what to show and which buttons to offer. Roles are held by
+   profiles; a person's role is the strongest one any of their profiles holds. */
+const TEAM_KINDS = ["teamspace.create","member.invite","member.join","member.role","member.remove","node.share"];
+const ROLE_RANK = {guest:1, member:2, owner:3}, LEVEL_RANK = {viewer:1, commenter:2, editor:3};
+const SUPPORT_MS = 24 * 60 * 60 * 1000;   // 114b a: one support access opens a teamspace to the hub owner for 24 hours
+const loginOf = id => String(id || "").replace(/^github:/, "").trim().toLowerCase();
+const myLogin = () => loginOf(S.me);
+const personalOf = login => "P-" + String(login || "").toLowerCase();
+const myProfile = () => (S.profile && S.profile.id) || personalOf(myLogin());
+let TEAMS = null;
+function foldTeams(evs){
+  const T = {spaces:new Map(), itemSpace:new Map(), itemAuthor:new Map(), shares:new Map(), profOwner:new Map(), findings:[], support:[]};
+  let mine = []; try { mine = NodachProfile.list(); } catch {}
+  for (const p of mine) T.profOwner.set(p.id, myLogin());
+  for (const e of evs) if (e.author?.profile && !T.profOwner.has(e.author.profile)) T.profOwner.set(e.author.profile, loginOf(e.author.id));
+  const acctOf = pid => T.profOwner.get(pid) || (/^P-/.test(pid || "") ? pid.slice(2).toLowerCase() : null);
+  const best = (pairs, rank) => pairs.reduce((a, x) => !a || rank[x] > rank[a] ? x : a, null);
+  T.acctOf = acctOf;
+  T.roleOf = (login, ts) => { const t = T.spaces.get(ts); if (!t) return null;
+    return best([...t.members].filter(([p]) => acctOf(p) === login).map(([, r]) => r), ROLE_RANK); };
+  T.invitedAs = (login, ts) => { const t = T.spaces.get(ts); if (!t) return null; const hit = [...t.invites].find(([p]) => acctOf(p) === login); return hit ? {profile:hit[0], role:hit[1]} : null; };
+  T.levelOf = (login, node) => { const m = T.shares.get(node); if (!m) return null;
+    return best([...m].filter(([to]) => T.spaces.has(to) ? !!T.roleOf(login, to) : acctOf(to) === login).map(([, l]) => l), LEVEL_RANK); };
+  T.canRead = (login, node) => { const ts = T.itemSpace.get(node);
+    if (ts){ const r = T.roleOf(login, ts); return r === "owner" || r === "member" || !!T.levelOf(login, node); }
+    return T.levelOf(login, node) ? true : null; };
+  T.supportOpen = (login, ts, now = Date.now()) => T.support.filter(x => x.teamspace === ts && x.by === login && Date.parse(x.at) <= now && now < x.until).reduce((a, x) => Math.max(a, x.until), 0) || null;
+  T.canWriteNode = (login, node, kind) => { const ts = T.itemSpace.get(node), r = ts && T.roleOf(login, ts), l = T.levelOf(login, node);
+    return r === "owner" || r === "member" || l === "editor" || (kind === "comment" && LEVEL_RANK[l] >= 2); };
+  const owners = t => [...t.members.values()].filter(r => r === "owner").length;
+  function apply(e){
+    const b = e.body || {}, login = loginOf(e.author?.id), acting = e.author?.profile || personalOf(login);
+    const tsId = e.kind === "teamspace.create" ? (b.id || e.item) : (b.teamspace || e.item);
+    if (e.kind === "teamspace.create"){
+      if (!tsId || T.spaces.has(tsId)) return "exists";
+      const owner = b.profile || acting; if (acctOf(owner) !== login) return "not your profile";
+      T.spaces.set(tsId, {id:tsId, label:String(b.label || tsId).slice(0, 80), created:e.ts, by:e.author, members:new Map([[owner, "owner"]]), invites:new Map()}); return null;
+    }
+    if (e.kind === "node.share"){
+      const node = b.node || e.item, to = b.profile || b.teamspace, space = T.itemSpace.get(node);
+      const may = T.itemAuthor.get(node) === login || (space && T.roleOf(login, space) === "owner") || (!space && e.author?.role === "owner");
+      if (!node || !to || !may) return "can't share";
+      const m = T.shares.get(node) || new Map(); if (b.level === "none") m.delete(to); else if (LEVEL_RANK[b.level]) m.set(to, b.level); else return "level";
+      T.shares.set(node, m); return null;
+    }
+    const t = T.spaces.get(tsId); if (!t) return "no teamspace";
+    const isOwner = T.roleOf(login, tsId) === "owner", target = b.profile || (e.kind === "member.join" ? acting : ""), own = acctOf(target) === login;
+    if (e.kind === "member.invite"){ if (!isOwner || !ROLE_RANK[b.role] || t.members.has(target)) return "invite"; t.invites.set(target, b.role); return null; }
+    if (e.kind === "member.join"){ if (!own || !t.invites.has(target)) return "join"; t.members.set(target, t.invites.get(target)); t.invites.delete(target); return null; }
+    if (e.kind === "member.role"){ const cur = t.members.get(target); if (!isOwner || !cur || !ROLE_RANK[b.role] || (cur === "owner" && b.role !== "owner" && owners(t) === 1)) return "role";
+      t.members.set(target, b.role); return null; }
+    if (e.kind === "member.remove"){ if (!isOwner && !own) return "remove"; if (!t.members.has(target)){ return t.invites.delete(target) ? null : "remove"; }
+      if (t.members.get(target) === "owner" && owners(t) === 1) return "last owner"; t.members.delete(target); return null; }
+    return null;
+  }
+  for (const e of [...evs].sort(byTsThenId)){
+    if (e.kind === "item.create" && e.body?.id && !T.itemAuthor.has(e.body.id)){
+      T.itemAuthor.set(e.body.id, loginOf(e.author?.id)); if (e.body.teamspace) T.itemSpace.set(e.body.id, e.body.teamspace); continue; }
+    if (e.kind === "support.access"){   // 114b a: the hub owner's logged, 24-hour read access to one teamspace
+      const at = Date.parse(e.ts), b = e.body || {};
+      if (b.teamspace && !isNaN(at)) T.support.push({id:e._id, teamspace:b.teamspace, by:loginOf(e.author?.id), reason:String(b.reason || ""), at:e.ts, until:at + SUPPORT_MS});
+      continue; }
+    if (!TEAM_KINDS.includes(e.kind)) continue;
+    const why = apply(e); if (why) T.findings.push({id:e._id, kind:e.kind, why});
+  }
+  return T;
+}
+const teamOfEvent = e => e.kind === "teamspace.create" ? (e.body?.id || e.item) : e.kind === "node.share" ? (e.body?.teamspace || TEAMS?.itemSpace.get(e.body?.node || e.item)) : (e.body?.teamspace || e.item);
 function askable(){ return [...F.items.values()].filter(i => (i.type==="question" && !["closed","withdrawn","agreed"].includes(i.status)) ||
   ((i.type==="term"||i.type==="story"||i.type==="decision") && (i.status==="proposed"||i.status==="challenged"))); }
 
@@ -650,6 +743,7 @@ async function write(kind, item, body, opts={}){
   try { const ref = await S.db.collection(isPrivate ? privPath() : "events").add(ev); return ref?.id || "pending"; }
   catch(err){
     if (err.profile_mismatch){ NodachProfile.refused(err.message); return null; }
+    if (err.teamspace_refused){ S.lastRefusal = err.message; toast(err.message); return null; }
     if (err.code==="invalid_argument"){ S.canWrite = false; renderBanners(); refreshView(); toast("This Studio is view only for you. Nothing was changed."); }
     else toast(err.code==="quota_exceeded" ? "The Studio's storage is full. Nothing was saved." : "Couldn't save — check your connection. Your text is kept.");
     return null;
@@ -1867,9 +1961,9 @@ $("#tyAdd").onclick = async () => {
   if (id){ for (const k of ["#tyKey","#tyLabel"]) $(k).value = ""; $("#tyNote").textContent = proposed ? `Proposed as ${proposed}. It applies only on staging.` : `Added ${label}.`; toast(proposed ? `Type ${label} proposed` : `Type ${label} added`, [id]); } };
 
 /* ---------------------------------------------------------------- views + time */
-const VIEWS = ["map","command","list","ask","queue","capture","tree","pack","money","hub","runs","builders","self","explore"];
+const VIEWS = ["map","command","list","ask","queue","capture","tree","pack","money","hub","runs","builders","self","explore","spaces"];
 /* NAV-2: sections are saved filters over one graph. Private is home and reaches everything; each view has one section. */
-const SECTIONS = {private:["map","list","tree","queue","ask","capture","pack"], teams:["builders","money","hub"], settings:["runs","self"],
+const SECTIONS = {private:["map","list","tree","queue","ask","capture","pack"], teams:["spaces","builders","money","hub"], settings:["runs","self"],
   search:["command"], explore:["explore"]};
 const SECTION_OF = Object.fromEntries(Object.entries(SECTIONS).flatMap(([k, vs]) => vs.map(v => [v, k])));
 function show(v){ if (!VIEWS.includes(v)) v = "map"; S.view=v; document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-current", b.dataset.v===v));
@@ -2055,7 +2149,7 @@ $("#asof").oninput = e => { const evs=[...S.events].sort(byTsThenId); const v=+e
   S.asof = v>=evs.length ? null : (v===0 ? "0" : evs[v-1].ts); refresh(); };
 $("#theme").onclick = () => { const r=document.documentElement, dark=matchMedia("(prefers-color-scheme: dark)").matches;
   r.dataset.theme = (r.dataset.theme || (dark?"dark":"light"))==="dark" ? "light" : "dark"; renderMap(false); if (S.view==="tree") renderTree(); if (S.view==="capture") redraw(); };
-function refreshView(){ if (S.view==="map") renderMap(false); if (S.view==="list") renderList(); if (S.view==="ask") renderAsk(); if (S.view==="queue") renderQueue(); if (S.view==="tree") renderTree(); if (S.view==="pack") renderPack(); if (S.view==="money") renderMoney(); if (S.view==="hub") renderHub(); if (S.view==="runs") renderRuns(); if (S.view==="builders") renderBuilders(); if (S.view==="self") renderSelf(); if (S.view==="command") renderCommands(); }
+function refreshView(){ if (S.view==="map") renderMap(false); if (S.view==="list") renderList(); if (S.view==="ask") renderAsk(); if (S.view==="queue") renderQueue(); if (S.view==="tree") renderTree(); if (S.view==="pack") renderPack(); if (S.view==="money") renderMoney(); if (S.view==="hub") renderHub(); if (S.view==="runs") renderRuns(); if (S.view==="builders") renderBuilders(); if (S.view==="self") renderSelf(); if (S.view==="command") renderCommands(); if (S.view==="spaces") renderSpaces(); }
 function refresh(){
   if (S.bulk) return;   // a bulk action redraws once at the end
   CODES = stableCodes(); F = fold();
@@ -2147,6 +2241,200 @@ function renderMoney(){
     const id = await write("item.edit", k, {value: v}); if (id) toast(`${k} → ${v}`, [id]); });
 }
 for (const id of ["calcAmt","calcSales","calcClass"]) $("#"+id).oninput = renderMoney;
+
+/* ---------------------------------------------------------------- teamspaces view (FUN-1 v2, BQ-1 step 2)
+   Your teamspaces; inside one: members and roles (owners invite and change roles), its nodes and the nodes shared
+   into it, its Money rules node (a placeholder: no payments yet), and, for owners, Export teamspace.
+   Teamspace events are signed in as you, so they are written only where the hub serves Studio. */
+S.ts = null;          // the teamspace that is open (its own page), or null: the list of teamspaces
+S.tsDir = null;       // 114b a: for the hub owner, the other teamspaces on this hub (id and name only, from the hub)
+const tsHere = () => !!window.__nodach?.standalone;
+const ROLE_OPTS = ["owner","member","guest"], LEVEL_OPTS = ["viewer","commenter","editor"];
+function tsWho(T, pid){ const a = T.acctOf(pid); return a && a === myLogin() ? `${esc(pid)} <span class="mute">(you)</span>` : esc(pid); }
+const tsTime = ms => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+function supportLog(T, t){
+  const rows = T.support.filter(x => x.teamspace === t.id);
+  return `<h4 style="margin:12px 0 4px">Support access log</h4>
+    <p class="mute" style="margin:0 0 4px;font-size:12px">The hub owner reads a teamspace he isn't in only through a logged support access, open for 24 hours. Every one is listed here, for this teamspace's owners.</p>
+    <ul class="log" id="tsSupportLog">${rows.length ? rows.map((x, i) => `<li data-support="${esc(x.id || "")}"><span class="n">${i + 1}</span><span><b>${esc(x.by)}</b> · ${esc(tsTime(Date.parse(x.at)))} to ${esc(tsTime(x.until))} · ` +
+      `<span class="${Date.now() < x.until ? "" : "mute"}">${Date.now() < x.until ? "open now" : "ended"}</span><br><span class="mute">Reason:</span> ${esc(x.reason)}</span></li>`).join("")
+      : `<li><span class="n"></span><span class="mute">No support access so far.</span></li>`}</ul>`;
+}
+function renderOneSpace(T, t, me, can){
+  const role = T.roleOf(me, t.id), owner = role === "owner", member = owner || role === "member", support = !role && T.supportOpen(me, t.id);
+  const reading = member || !!support;
+  const opt = (vals, cur) => vals.map(v => `<option value="${v}"${v === cur ? " selected" : ""}>${v}</option>`).join("");
+  const members = [...t.members].map(([pid, r], i) => `<li data-member="${esc(pid)}"><span class="n">${i + 1}</span><span>${tsWho(T, pid)} · <b data-role>${esc(r)}</b>` +
+    (owner && can ? ` <select data-tsrolesel="${esc(pid)}" aria-label="New role for ${esc(pid)}">${opt(ROLE_OPTS, r)}</select> <button data-tsrole="${esc(pid)}">Change role</button>` +
+      (T.acctOf(pid) !== me ? ` <button data-tsremove="${esc(pid)}">Remove</button>` : "") : "") + `</span></li>`).join("");
+  const invites = [...t.invites].map(([pid, r]) => `<li><span class="n">·</span><span>${esc(pid)} <span class="mute">invited as ${esc(r)}, not joined yet</span>` +
+    (owner && can ? ` <button data-tsremove="${esc(pid)}">Cancel invite</button>` : "") + `</span></li>`).join("");
+  const inTs = [...T.itemSpace].filter(([, s]) => s === t.id).map(([n]) => n).filter(n => F.items.has(n));
+  const money = inTs.map(n => F.items.get(n)).find(i => i.meta?.money_rules);
+  const nodes = inTs.filter(n => n !== money?.id).map(n => F.items.get(n));
+  const sharedIn = [...T.shares].filter(([n, m]) => m.has(t.id) && T.itemSpace.get(n) !== t.id && F.items.has(n)).map(([n, m]) => ({it:F.items.get(n), level:m.get(t.id)}));
+  const lvl = n => { const m = T.shares.get(n); return m ? [...m].map(([to, l]) => `${to === t.id ? "this teamspace" : to}: ${l}`).join(", ") : ""; };
+  const row = (it, i, extra) => `<li data-node="${esc(it.id)}"><span class="n">${i + 1}</span><span><b>${esc(it.title || it.id)}</b> <span class="mute mono">${esc(codeOf(it.id) || it.id)}</span>${extra || ""} <button data-tsgo="${esc(it.id)}">Open</button></span></li>`;
+  const shareable = inTs.filter(n => owner || T.itemAuthor.get(n) === me);
+  return `<div class="row"><button id="tsBack">← All teamspaces</button></div>
+  <div class="card" data-teamspace="${esc(t.id)}">
+    <h3 id="tsTitle" tabindex="-1">${esc(t.label)} <span class="mute mono" style="font-size:12px">${esc(t.id)} · ${role ? `you are ${esc(role)}` : `support access until ${esc(tsTime(support))}, read only`}</span></h3>
+    ${support ? `<p class="mute" style="margin:0" id="tsSupportNote">You are reading this teamspace through a logged support access. Its owners see it in their Support access log. It closes by itself after 24 hours; you can't change anything here.</p>` : ""}
+    <h4 style="margin:10px 0 4px">Members and roles</h4><ul class="log" id="tsMembers">${members}${invites}</ul>
+    ${owner && can ? `<div class="row" style="margin-top:6px"><label for="tsInvProf">Invite profile</label><input id="tsInvProf" class="mono" placeholder="P-their-login" style="width:180px">
+      <label for="tsInvRole">as</label><select id="tsInvRole">${opt(["member","guest","owner"], "member")}</select><button id="tsInvite">Invite</button></div>
+      <p class="mute" style="margin:4px 0 0;font-size:12px">Everyone has a Personal profile named P- and their GitHub login (P-nassar). They see the invitation in Teamspaces and click Join. Someone new signs in first through Invite on the Hub page.</p>` : ""}
+    <h4 style="margin:12px 0 4px">Money rules</h4>
+    <div id="tsMoney" class="mute" style="font-size:13px">${money ? `<b>${esc(money.title)}</b> <span class="mono">${esc(money.id)}</span> · placeholder: this teamspace's own money rules live in this node, as versions. No payments are taken yet. <button data-tsgo="${esc(money.id)}">Open</button>`
+      : reading ? `No money rules node yet.${owner && can ? ` <button id="tsAddMoney">Add the Money rules node</button>` : ""}` : "The money rules node isn't shared with you."}</div>
+    <h4 style="margin:12px 0 4px">Nodes in this teamspace</h4>
+    <ul class="log" id="tsNodes">${nodes.length ? nodes.map((it, i) => row(it, i, lvl(it.id) ? ` <span class="mute">shared with ${esc(lvl(it.id))}</span>` : "")).join("") : `<li><span class="n"></span><span class="mute">${reading ? "No nodes yet." : "Nothing here is shared with you yet."}</span></li>`}</ul>
+    ${member && can ? `<div class="row" style="margin-top:6px"><label for="tsNodeTitle">New node</label><input id="tsNodeTitle" maxlength="200" placeholder="Title" style="min-width:240px"><button id="tsAddNode">Add to teamspace</button></div>` : ""}
+    <h4 style="margin:12px 0 4px">Shared into this teamspace</h4>
+    <ul class="log" id="tsShared">${sharedIn.length ? sharedIn.map(({it, level}, i) => row(it, i, ` <span class="mute">${esc(level)}</span>`)).join("") : `<li><span class="n"></span><span class="mute">Nothing shared in from outside.</span></li>`}</ul>
+    ${can && role && shareable.length ? `<div class="row" style="margin-top:6px"><label for="tsShareNode">Share</label><select id="tsShareNode">${shareable.map(n => `<option value="${esc(n)}">${esc(F.items.get(n)?.title || n)}</option>`).join("")}</select>
+      <label for="tsShareTo">with</label><input id="tsShareTo" class="mono" placeholder="P-their-login (blank: everyone here)" style="width:240px">
+      <label for="tsShareLevel">as</label><select id="tsShareLevel">${opt([...LEVEL_OPTS, "none"], "viewer")}</select><button id="tsShare">Share</button></div>` : ""}
+    ${owner ? supportLog(T, t) : ""}
+    <div class="row" style="margin-top:14px">${owner ? `<button class="primary" id="tsExport" title="Download everything members created here, with full history; files as references; nodes shared in by others as links">Export teamspace</button>` : ""}
+      ${can && role ? `<button id="tsLeave">Leave teamspace</button>` : ""}<span class="mute" id="tsOneNote" role="status"></span></div>
+  </div>`;
+}
+function openSpace(id){ S.ts = id; S.tsJump = true; renderSpaces(); }
+async function loadTsDir(force){
+  // 114b a: the hub tells its owner which other teamspaces exist (id and name only) and any support access he has open
+  if (!S.owner || !tsHere()) { S.tsDir = null; return; }
+  if (!force && S.tsDir && Date.now() - S.tsDir.at < 15000) return;
+  try { const r = await fetch("/studio/api/teamspaces", {credentials:"same-origin", cache:"no-store"});
+        if (r.ok){ const v = await r.json(); S.tsDir = {at:Date.now(), others:Array.isArray(v.others) ? v.others : []}; } } catch {}
+}
+async function requestSupport(ts, reason){
+  if (!await write("support.access", ts, {teamspace:ts, reason})) return null;
+  toast(`Support access to ${ts} is open for 24 hours. Its owners see it in their Support access log.`);
+  try { await window.__nodach?.resync?.(); } catch {}
+  await loadTsDir(true); refresh(); openSpace(ts); return ts;
+}
+function renderOthers(T, me, can){
+  const el = $("#tsOthers"); if (!el) return;
+  if (!S.owner || !tsHere()){ el.innerHTML = ""; return; }
+  if (!S.tsDir){ el.innerHTML = ""; loadTsDir().then(() => { if (S.view === "spaces" && S.tsDir && !S.ts) renderOthers(TEAMS || foldTeams(S.events), myLogin(), tsHere() && writable()); }); return; }
+  const others = S.tsDir.others.filter(o => !T.roleOf(me, o.id));
+  el.innerHTML = `<div class="card"><h3>Other teamspaces on this hub</h3>
+    <p class="mute" style="margin:0;font-size:12px">As the hub owner you see only their names. To read one, request support access: it is logged, shown to that teamspace's owners and closes by itself after 24 hours. It never lets you change anything there.</p>
+    <ul class="log" id="tsOtherList">${others.length ? others.map((o, i) => { const open = T.supportOpen(me, o.id) || (o.support_until && Date.parse(o.support_until));
+      return `<li data-other="${esc(o.id)}"><span class="n">${i + 1}</span><span><b>${esc(o.label || o.id)}</b> <span class="mute mono">${esc(o.id)}</span> ` +
+        (open ? `<span class="mute">support access until ${esc(tsTime(open))}</span> <button data-tsopen="${esc(o.id)}">Open</button>`
+          : `<button data-tssupport="${esc(o.id)}" ${can ? "" : "disabled"}>Request support access</button>
+             <span class="row" data-tssupform="${esc(o.id)}" hidden style="margin-top:6px"><label for="tsSupWhy-${esc(o.id)}">Reason</label>
+               <input id="tsSupWhy-${esc(o.id)}" data-tssupwhy="${esc(o.id)}" maxlength="500" placeholder="e.g. Nassar asked for help with an import" style="min-width:280px">
+               <button class="primary" data-tssupgo="${esc(o.id)}">Open with support access</button></span>`) + `</span></li>`; }).join("")
+      : `<li><span class="n"></span><span class="mute">No other teamspaces.</span></li>`}</ul>
+    <span class="mute" id="tsOtherNote" role="status"></span></div>`;
+  el.querySelectorAll("[data-tsopen]").forEach(b => b.onclick = () => openSpace(b.dataset.tsopen));
+  el.querySelectorAll("[data-tssupport]").forEach(b => b.onclick = () => { const f = el.querySelector(`[data-tssupform="${CSS.escape(b.dataset.tssupport)}"]`); f.hidden = false; b.hidden = true; f.querySelector("input").focus(); });
+  el.querySelectorAll("[data-tssupgo]").forEach(b => b.onclick = async () => {
+    const ts = b.dataset.tssupgo, why = el.querySelector(`[data-tssupwhy="${CSS.escape(ts)}"]`).value.trim();
+    if (why.length < 3){ $("#tsOtherNote").textContent = "Say why you need support access: the teamspace's owners will read it."; return; }
+    b.disabled = true; if (!await requestSupport(ts, why)) b.disabled = false; });
+}
+function renderSpaces(){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), here = tsHere(), can = here && writable();
+  $("#tsCreate").disabled = !can; $("#tsLabel").disabled = !can;
+  if (!here) $("#tsNote").textContent = "Teamspaces are shared through the hub: open Studio at staging.nodach.com/studio to create or join one.";
+  const mineTs = [...T.spaces.values()].filter(t => T.roleOf(me, t.id));
+  const invites = [...T.spaces.values()].map(t => ({t, inv:T.invitedAs(me, t.id)})).filter(x => x.inv && !T.roleOf(me, x.t.id));
+  // an open teamspace stays open while you are in it, or while your support access to it runs (114b a)
+  if (S.ts && !(T.spaces.has(S.ts) && (T.roleOf(me, S.ts) || T.supportOpen(me, S.ts)))) S.ts = null;
+  $("#tsHome").hidden = !!S.ts;
+  $("#tsInvites").innerHTML = invites.length ? `<div class="card"><h3>Invitations</h3><ul class="log" id="tsInvList">${invites.map(({t, inv}, i) =>
+    `<li><span class="n">${i + 1}</span><span><b>${esc(t.label)}</b> <span class="mute">as ${esc(inv.role)} (${esc(inv.profile)})</span> <button data-tsjoin="${esc(t.id)}" data-prof="${esc(inv.profile)}" ${can ? "" : "disabled"}>Join</button></span></li>`).join("")}</ul></div>` : "";
+  $("#tsList").innerHTML = mineTs.length ? mineTs.map((t, i) => `<li data-ts="${esc(t.id)}"><span class="n">${i + 1}</span><span><b>${esc(t.label)}</b> ` +
+    `<span class="mute mono">${esc(t.id)} · you: ${esc(T.roleOf(me, t.id))} · ${t.members.size} member${t.members.size === 1 ? "" : "s"}</span> <button data-tsopen="${esc(t.id)}">Open</button></span></li>`).join("")
+    : `<li><span class="n"></span><span class="mute">You're not in any teamspace yet.</span></li>`;
+  if (!S.ts) renderOthers(T, me, can);
+  $("#tsOne").innerHTML = S.ts ? renderOneSpace(T, T.spaces.get(S.ts), me, can) : "";
+  if (S.ts && S.tsJump){ S.tsJump = false; const h = $("#tsTitle"); if (h){ $("#v-spaces").scrollIntoView?.({block:"start"}); window.scrollTo?.(0, 0); h.focus({preventScroll:true}); } }
+  const note = m => { const n = $("#tsOneNote"); if (n) n.textContent = m; };
+  const after = id => { if (id) refreshView(); return id; };
+  $("#tsList").querySelectorAll("[data-tsopen]").forEach(b => b.onclick = () => openSpace(b.dataset.tsopen));
+  const back = $("#tsBack"); if (back) back.onclick = () => { S.ts = null; renderSpaces(); window.scrollTo?.(0, 0); };
+  document.querySelectorAll("[data-tsgo]").forEach(b => b.onclick = () => { show("map"); select(b.dataset.tsgo); });
+  document.querySelectorAll("[data-tsjoin]").forEach(b => b.onclick = async () => {
+    const ts = b.dataset.tsjoin; if (await write("member.join", ts, {teamspace:ts, profile:b.dataset.prof})){ toast(`You joined ${T.spaces.get(ts)?.label || ts}.`); refresh(); openSpace(ts); } });
+  if (!S.ts) return;
+  const ts = S.ts;
+  document.querySelectorAll("[data-tsrole]").forEach(b => b.onclick = async () => {
+    const pid = b.dataset.tsrole, r = document.querySelector(`[data-tsrolesel="${CSS.escape(pid)}"]`).value;
+    if (after(await write("member.role", ts, {teamspace:ts, profile:pid, role:r}))) toast(`${pid} is now ${r}.`); });
+  document.querySelectorAll("[data-tsremove]").forEach(b => b.onclick = async () => {
+    const pid = b.dataset.tsremove; if (after(await write("member.remove", ts, {teamspace:ts, profile:pid}))) toast(`${pid} removed. Their history stays.`); });
+  const inv = $("#tsInvite"); if (inv) inv.onclick = async () => {
+    const pid = $("#tsInvProf").value.trim(), r = $("#tsInvRole").value;
+    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(pid)){ note("Name the profile to invite, e.g. P-nassar."); return; }
+    if (after(await write("member.invite", ts, {teamspace:ts, profile:pid, role:r}))) toast(`${pid} invited as ${r}.`); };
+  const add = $("#tsAddNode"); if (add) add.onclick = async () => {
+    const title = $("#tsNodeTitle").value.trim(); if (!title){ note("Give the node a title."); return; }
+    const id = "TN-" + Date.now().toString(36);
+    if (after(await write("item.create", null, {id, type:"idea", title, body:"", status:"open", teamspace:ts}))) toast(`Added ${title} to the teamspace.`); };
+  const money = $("#tsAddMoney"); if (money) money.onclick = async () => { if (after(await addMoneyNode(ts, T.spaces.get(ts)?.label))) toast("Money rules node added."); };
+  const sh = $("#tsShare"); if (sh) sh.onclick = async () => {
+    const node = $("#tsShareNode").value, to = $("#tsShareTo").value.trim(), level = $("#tsShareLevel").value;
+    if (to && !/^[A-Za-z0-9_.:-]{1,80}$/.test(to)){ note("Share with a profile id like P-nassar, or leave it blank for everyone here."); return; }
+    if (after(await write("node.share", node, to ? {node, profile:to, level} : {node, teamspace:ts, level}))) toast(level === "none" ? "Unshared." : `Shared as ${level}.`); };
+  const ex = $("#tsExport"); if (ex) ex.onclick = () => downloadTeamspace(ts);
+  const lv = $("#tsLeave"); if (lv) lv.onclick = async () => {
+    const mine = [...T.spaces.get(ts).members.keys()].find(p => T.acctOf(p) === me);
+    if (T.roleOf(me, ts) === "owner") note("Export first if you want a copy: owners take everything members created with them.");
+    if (await write("member.remove", ts, {teamspace:ts, profile:mine})){ S.ts = null; toast("You left the teamspace."); refreshView(); } };
+}
+function addMoneyNode(ts, label){
+  return write("item.create", null, {id:"MR-" + Date.now().toString(36), type:"setting", title:`Money rules · ${label || ts}`, status:"open", teamspace:ts, meta:{money_rules:true},
+    body:"This teamspace's own money rules, kept as versions. Placeholder: no payments are taken yet."});
+}
+$("#tsCreate").onclick = async () => {
+  const label = $("#tsLabel").value.trim(); if (!label){ $("#tsNote").textContent = "Give the teamspace a name."; return; }
+  const id = "TS-" + Date.now().toString(36);
+  if (!await write("teamspace.create", id, {id, label})) return;
+  await addMoneyNode(id, label);
+  $("#tsLabel").value = ""; $("#tsNote").textContent = `Created ${label}. You are its owner.`; toast(`Teamspace ${label} created.`); refresh(); openSpace(id);
+};
+
+/* Export on leaving: everything members created in the teamspace, with full history (every event, retracted ones
+   included), files as references (never their bytes), and nodes shared in by others as links only. Codes and
+   addresses are the same ones the context pack uses, so an export still points at the same nodes. */
+function teamspaceExport(id){
+  const T = TEAMS || foldTeams(S.events), t = T.spaces.get(id); if (!t) return null;
+  const evs = S.events.filter(e => !e._private);
+  const about = e => e.kind === "item.create" ? e.body?.id : (e.kind === "node.share" ? (e.body?.node || e.item) : e.item);
+  const clean = e => { const o = {...e}; delete o._private; return o; };
+  const inTs = [...T.itemSpace].filter(([, s]) => s === id).map(([n]) => n);
+  const nodes = inTs.map(n => { const it = F.items.get(n), hist = evs.filter(e => about(e) === n && !TEAM_KINDS.includes(e.kind));
+    return {id:n, code:codeOf(n) || n, address:`studio/${n}@${Math.max(0, hist.length - 1)}`, type:it?.type || hist[0]?.body?.type || null, title:it?.title ?? hist[0]?.body?.title ?? null,
+            body:it?.body ?? null, status:it?.status ?? null, refs:it?.refs || [], created_by:hist.find(e => e.kind === "item.create")?.author || null, history:hist.map(clean)}; });
+  const files = [];
+  for (const n of nodes) for (const e of n.history){ const b = e.body || {};
+    if (b.raw) files.push({node:n.id, event:e._id, asset:b.raw.asset || null, name:b.raw.name || null, type:b.raw.type || null, size:b.raw.size ?? null, where:b.raw.where || null, sealed:!!b.raw.enc});
+    if (b.source && typeof b.source === "object" && (b.source.url || b.source.path)) files.push({node:n.id, event:e._id, url:b.source.url || null, path:b.source.path || null}); }
+  const shareEvs = evs.filter(e => e.kind === "node.share");
+  const sharedIn = [...T.shares].filter(([n, m]) => m.has(id) && !inTs.includes(n)).map(([n, m]) => ({id:n, code:codeOf(n) || n, title:F.items.get(n)?.title || n,
+    link:`studio/${n}`, level:m.get(id), shared_by:shareEvs.filter(e => (e.body?.node || e.item) === n && e.body?.teamspace === id).pop()?.author || null}));
+  return {format:"nodach.teamspace-export/1", exported_at:new Date().toISOString(), exported_by:{id:S.me, profile:myProfile()},
+    teamspace:{id, label:t.label, created:t.created, members:Object.fromEntries(t.members), invites:Object.fromEntries(t.invites)},
+    note:"Nodes created in this teamspace with every event in their history; files are references (asset ids, links), never their contents; nodes shared in by others are links only.",
+    events:evs.filter(e => TEAM_KINDS.includes(e.kind) && teamOfEvent(e) === id).map(clean), nodes, files, shared_in:sharedIn};
+}
+async function downloadTeamspace(id){
+  const T = TEAMS || foldTeams(S.events);
+  if (T.roleOf(myLogin(), id) !== "owner"){ toast("Only an owner can export a teamspace."); return null; }
+  const data = teamspaceExport(id); S.lastTeamspaceExport = data;
+  const name = `teamspace-${id}-${new Date().toISOString().slice(0, 10)}.json`, blob = new Blob([JSON.stringify(data, null, 1)], {type:"application/json"});
+  const dl = window.claude?.use ? await window.claude.use("downloads").catch(() => null) : null;
+  if (dl){ await dl.save({filename:name, data:blob}).catch(e => { if (e?.code !== "declined") toast("The export wasn't saved."); }); return data; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast(`Exported ${data.nodes.length} node${data.nodes.length === 1 ? "" : "s"} and ${data.events.length} teamspace events.`);
+  return data;
+}
 
 /* ---------------------------------------------------------------- account (served by the hub only)
    Who is signed in (login · owner/member, never an email address) and a way out: the hub's /studio/logout clears

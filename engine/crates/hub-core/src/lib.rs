@@ -29,6 +29,7 @@ pub mod guard;
 pub mod access;
 pub mod digest;
 pub mod authorship;
+pub mod teamspaces;
 
 pub const IMPORT_KIND: &str = "studio.event";
 /// A Studio-shaped write made on a node other than Studio Web (PC, phone, an AI via the hub).
@@ -207,24 +208,41 @@ impl Hub {
     pub fn set_owners(&mut self, owners: Vec<String>) { self.owners = owners; }
 
     /// Who may see and change what, folded from the record's access grants (A1 d).
-    pub fn access(&self) -> access::State {
+    pub fn access(&self) -> access::State { self.access_at(None) }
+
+    /// The same rules with reads judged at `now` (ms): 114b a support access is open only inside its 24 hours.
+    pub fn access_at(&self, now: Option<i64>) -> access::State {
         let (docs, _, _, _) = self.studio_events(0, usize::MAX);
         let evs: Vec<Value> = docs.iter().filter_map(|d| d.get("event").cloned()).collect();
-        access::State::fold(&self.owners, &evs)
+        // BQ-1 step 2: teamspace roles and node shares, folded over the same events with the accounts from `profiles`
+        let pairs: Vec<(&str, &Value)> = docs.iter().filter_map(|d| Some((d.get("doc_id")?.as_str()?, d.get("event")?))).collect();
+        let mut teams = teamspaces::State::fold(self.profiles(), &self.owners, pairs);
+        if let Some(n) = now { teams = teams.with_now(n); }
+        access::State::fold(&self.owners, &evs).with_teams(teams)
+    }
+
+    /// Teamspace roles and shares alone (for /studio/api/teamspaces).
+    pub fn teamspaces(&self) -> teamspaces::State {
+        self.access().teams().cloned().unwrap_or_default()
+    }
+
+    /// Teamspace roles and shares with support access judged at `now` (ms).
+    pub fn teamspaces_at(&self, now: i64) -> teamspaces::State {
+        self.access_at(Some(now)).teams().cloned().unwrap_or_default()
     }
 
     /// One page of the shared record as `login` may see it: same cursor and total, members get only what's theirs.
-    pub fn studio_events_for(&self, login: &str, after: usize, limit: usize) -> (Vec<Value>, usize, usize, usize) {
+    /// 114b a: the hub owner too is filtered inside teamspaces (membership, shares, or a support access open at `now`).
+    pub fn studio_events_for(&self, login: &str, after: usize, limit: usize, now: i64) -> (Vec<Value>, usize, usize, usize) {
         let (docs, next, total, skipped) = self.studio_events(after, limit);
-        let acc = self.access();
-        if acc.is_owner(login) { return (docs, next, total, skipped); }
+        let acc = self.access_at(Some(now));
         let mine: Vec<Value> = docs.into_iter().filter(|d| d.get("event").map(|e| acc.visible(login, e)).unwrap_or(false)).collect();
         (mine, next, total, skipped)
     }
 
     /// The resume digest for `login`: active rules, open questions, latest replies (see digest.rs).
-    pub fn digest_for(&self, login: &str) -> serde_json::Value {
-        let (docs, _, _, _) = self.studio_events_for(login, 0, usize::MAX);
+    pub fn digest_for(&self, login: &str, now: i64) -> serde_json::Value {
+        let (docs, _, _, _) = self.studio_events_for(login, 0, usize::MAX, now);
         digest::fold(docs.iter().filter_map(|d| d.get("event")))
     }
 

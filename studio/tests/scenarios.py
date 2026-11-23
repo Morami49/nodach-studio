@@ -1495,13 +1495,13 @@ async def s55_nav_collapsed_expanded(b):
 
 
 async def s56_sections_reach_views(b):
-    """NAV-2: every one of the 13 views is reachable from the new bar. Private holds ActionMap, List, Version tree, My
-    queue, Ask, Capture and Pack; Teamspaces holds Builders, Money, Hub and Show; Settings holds Runs, Developer mode,
+    """NAV-2: every one of the 14 views is reachable from the new bar. Private holds ActionMap, List, Version tree, My
+    queue, Ask, Capture and Pack; Teamspaces holds Teamspaces (BQ-1 step 2), Builders, Money, Hub and Show; Settings holds Runs, Developer mode,
     theme, Point, branch and Classic tabs; Search goes to an address or adds a command (Command map); Explore is a
     placeholder; the avatar menu has the account and profiles (inside claude.ai there is no profile list, so the new-window
     entry is disabled there; s60 covers it served by the hub); as-of sits on the canvas."""
     st = Store(); p = await open_page(b, st, {"classic": False})
-    want = {"private": ["map", "list", "tree", "queue", "ask", "capture", "pack"], "teams": ["builders", "money", "hub"], "settings": ["runs", "self"]}
+    want = {"private": ["map", "list", "tree", "queue", "ask", "capture", "pack"], "teams": ["spaces", "builders", "money", "hub"], "settings": ["runs", "self"]}
     reached, missing = [], []
     for sec, views in want.items():
         await nav_open(p); await p.click(f"#sections [data-s={sec}]"); await p.wait_for_timeout(150)
@@ -1525,8 +1525,8 @@ async def s56_sections_reach_views(b):
     menu = await p.evaluate("""() => { const m = document.querySelector('#avatarMenu'), w = document.querySelector('#profWindow');
       return !m.hidden && w.disabled && w.title === 'No profile to open' && m.querySelectorAll('#profList li').length >= 1 && !!m.querySelector('#signOut') && m.textContent.includes('Signed in'); }""")
     await p.keyboard.press("Escape"); await p.wait_for_timeout(100)
-    ok = (not missing and len(reached) == 13 and show_in_teams and settings_ctl and dev_named and explore and went and cmd and asof_on_canvas and menu and not p.errors)
-    return ok, (f"views reached={len(reached)}/13 missing={missing}, Live and Show in Teamspaces={show_in_teams}, Settings controls={settings_ctl}, Developer mode={dev_named}, "
+    ok = (not missing and len(reached) == 14 and show_in_teams and settings_ctl and dev_named and explore and went and cmd and asof_on_canvas and menu and not p.errors)
+    return ok, (f"views reached={len(reached)}/14 missing={missing}, Live and Show in Teamspaces={show_in_teams}, Settings controls={settings_ctl}, Developer mode={dev_named}, "
                 f"Explore placeholder={explore}, search address={went}, search command={cmd}, as-of on canvas={asof_on_canvas}, avatar menu={menu}, errors={p.errors[:1]}")
 
 
@@ -1752,6 +1752,335 @@ async def s63_refused_write_shows_message(b):
     ok = shown and saved == 0 and p.hub["refused"] == ["P-work"] and still and flagged and len(p.hub["posts"]) == 1 and not p.errors
     return ok, f"message shown={shown}, saved while refused={saved}, still writable={still}, strip marked={flagged}, then saved as personal={len(p.hub['posts'])}, errors={p.errors[:1]}"
 
+
+# ---------------------------------------------------------------- BQ-1 step 2: teamspaces
+async def open_teams_hub(browser, H, login, owner):
+    """Studio served by a stand-in hub shared by several people (one browser context each, so each has its own
+    session). H holds the record; every page reads all of it, so what a guest doesn't see is what the page itself
+    hides (the real hub also filters; hub-core tests cover that). Like the real hub, the stand-in refuses a role
+    change by anyone but the owner with 403 {teamspace_refused} and the rule in words."""
+    import urllib.parse
+    html = ('<!doctype html><html lang=en><head><meta charset=utf-8><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style>'
+            '<script>window.__nodachBuild="test";window.__nodachEnv="production";window.__nodachPollMs=60000;</script>'
+            f'<script>{SHIM.read_text()}</script></head><body>{PAGE.read_text()}</body></html>')
+    me = {"login": login, "id": f"github:{login}", "owner": owner}
+
+    async def serve(route):
+        req = route.request; u = urllib.parse.urlparse(req.url); path = u.path; q = urllib.parse.parse_qs(u.query)
+        js = lambda v, status=200: route.fulfill(status=status, body=json.dumps(v), content_type="application/json")
+        if path in ("/studio", "/studio/"):
+            return await route.fulfill(body=html, content_type="text/html")
+        if path == "/health":
+            return await route.fulfill(body="ok test", content_type="text/plain")
+        if path == "/studio/api/me":
+            return await js(me)
+        if path == "/studio/api/profiles":
+            return await js({"account": {"id": f"acct:github:{login.lower()}"}, "profiles": [{"id": f"P-{login.lower()}", "kind": "personal", "label": "Personal"}], "connections": []})
+        if path == "/studio/api/genesis":
+            return await js(GENESIS)
+        if path == "/studio/api/events" and req.method == "GET":
+            after, lim = int(q.get("after", ["0"])[0]), int(q.get("limit", ["500"])[0])
+            page = H["docs"][after:after + lim]
+            shown = [d for d in page if team_visible(H, login, d["event"])] if H.get("filter") else page
+            return await js({"events": shown, "next": after + len(page), "total": len(H["docs"])})
+        if path == "/studio/api/teamspaces":
+            return await js(team_directory(H, login))
+        if path == "/studio/api/events" and req.method == "POST":
+            b = json.loads(req.post_data or "{}"); e = b.get("event", {})
+            if e.get("kind") == "member.role" and login.lower() != H["owner"]:
+                H["refused"].append(e.get("kind"))
+                return await js({"error": f"only an owner of {e.get('item')} can change roles", "refused": True, "teamspace_refused": True}, 403)
+            H["posts"].append(b)
+            if not any(d["doc_id"] == b["doc_id"] for d in H["docs"]):
+                H["docs"].append({"doc_id": b["doc_id"], "event": e})
+            return await js({"id": b["doc_id"], "imported": 1})
+        if path == "/studio/api/private":
+            return await js({"error": "no private store"}, 503)
+        return await route.fulfill(status=404, body="")
+    ctx = await browser.new_context(viewport={"width": 1440, "height": 900}, accept_downloads=True)
+    await ctx.add_init_script(nav_init(False))
+    await ctx.route("http://hub.test/**", serve)
+    page = await ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    await page.goto("http://hub.test/studio")
+    await page.wait_for_timeout(1200)
+    page.errors = errors; page.ctx = ctx
+    return page
+
+
+def team_hub():
+    return {"docs": [], "posts": [], "refused": [], "owner": "morami49"}
+
+
+def _team_fold(H):
+    """The stand-in's copy of hub_core::teamspaces, as far as reads go: members by login, nodes' teamspaces, support."""
+    from datetime import datetime
+    ms = lambda t: int(datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() * 1000)
+    spaces, labels, owners, item_space, support = {}, {}, {}, {}, []
+    for d in H["docs"]:
+        e = d["event"]; b = e.get("body") or {}; who = (e.get("author") or {}).get("id", "").replace("github:", "").lower()
+        k = e.get("kind")
+        if k == "teamspace.create":
+            spaces[b["id"]] = {who}; owners[b["id"]] = {who}; labels[b["id"]] = b.get("label", b["id"])
+        elif k == "member.join" and b.get("teamspace") in spaces:
+            spaces[b["teamspace"]].add(who)
+        elif k == "item.create" and b.get("teamspace"):
+            item_space[b.get("id")] = b["teamspace"]
+        elif k == "support.access" and who == H["owner"] and b.get("teamspace") in spaces:
+            support.append((b["teamspace"], who, ms(e["ts"])))
+    return spaces, labels, owners, item_space, support
+
+
+def _space_of(e, item_space):
+    b = e.get("body") or {}; k = e.get("kind")
+    if k == "teamspace.create": return b.get("id")
+    if k in ("member.invite", "member.join", "member.role", "member.remove", "support.access"): return b.get("teamspace") or e.get("item")
+    if k == "node.share": return b.get("teamspace") or item_space.get(b.get("node") or e.get("item"))
+    return item_space.get(e.get("item") or b.get("id"))
+
+
+def team_visible(H, login, e):
+    """114b a in the stand-in: the hub owner reads a teamspace he isn't in only while his support access (24 h) runs;
+    a support.access is shown to the teamspace's owners. Other logins get everything (the page filters for them)."""
+    import time
+    login = login.lower(); who = (e.get("author") or {}).get("id", "").replace("github:", "").lower()
+    if who == login: return True
+    spaces, _, owners, item_space, support = _team_fold(H)
+    ts = _space_of(e, item_space)
+    if e.get("kind") == "support.access": return login in owners.get(ts, set())
+    if login != H["owner"] or ts is None or ts not in spaces or login in spaces[ts]: return True
+    now = time.time() * 1000
+    return any(t == ts and w == login and at <= now < at + 24 * 3600 * 1000 for t, w, at in support)
+
+
+def team_directory(H, login):
+    import time
+    spaces, labels, _, _, support = _team_fold(H)
+    login = login.lower()
+    if login != H["owner"]: return {"teamspaces": [], "others": []}
+    now = time.time() * 1000
+    def until(ts):
+        u = [at + 24 * 3600 * 1000 for t, w, at in support if t == ts and at <= now < at + 24 * 3600 * 1000]
+        return datetime_iso(max(u)) if u else None
+    return {"teamspaces": [], "others": [{"id": t, "label": labels[t], "support_until": until(t)} for t in spaces if login not in spaces[t]]}
+
+
+def datetime_iso(ms):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(ms % 1000):03d}Z"
+
+
+async def to_spaces(p):
+    await nav_open(p); await p.click("#sections [data-s=teams]"); await p.wait_for_timeout(120)
+    await p.click("#subnav [data-sv=spaces]"); await p.wait_for_timeout(200)
+
+
+async def open_space(p, ts):
+    """Teamspaces → the teamspace's Open button: its own page (the list of teamspaces steps aside)."""
+    await to_spaces(p); await p.click(f"#tsList [data-tsopen='{ts}']"); await p.wait_for_timeout(250)
+
+
+async def make_space(p, label="Insydr pilot"):
+    await to_spaces(p)
+    await p.fill("#tsLabel", label); await p.click("#tsCreate"); await p.wait_for_timeout(500)
+    return await p.evaluate("S.ts")
+
+
+async def s64_teamspace_create(b):
+    """BQ-1 step 2: Nowed opens Teamspaces from the bar, types a name and clicks Create teamspace. The teamspace is an
+    event signed as his window's profile, he is its owner, and a Money rules node (a placeholder, no payments) is made
+    inside it. Inside claude.ai, where Studio can't sign teamspace events as him, the button is off and says where to go."""
+    H = team_hub(); p = await open_teams_hub(b, H, "Morami49", True)
+    ts = await make_space(p)
+    kinds = [x["event"]["kind"] for x in H["posts"]]
+    create = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "teamspace.create"), {})
+    money = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "item.create"), {})
+    listed = "Insydr pilot" in await p.inner_text("#tsList")
+    members = await p.inner_text("#tsMembers")
+    money_shown = "placeholder" in await p.inner_text("#tsMoney") and "No payments" in await p.inner_text("#tsMoney")
+    st = Store(); c = await open_page(b, st, {"classic": False})
+    await c.evaluate("show('spaces')"); await c.wait_for_timeout(150)
+    off = await c.evaluate("document.querySelector('#tsCreate').disabled") and "staging.nodach.com/studio" in await c.inner_text("#tsNote")
+    ok = (kinds == ["teamspace.create", "item.create"] and create.get("item") == ts and create["body"].get("label") == "Insydr pilot"
+          and create["author"].get("profile") == "P-morami49" and money["body"].get("teamspace") == ts and money["body"].get("meta", {}).get("money_rules")
+          and listed and "P-morami49" in members and "owner" in members and money_shown and off and not (p.errors + c.errors))
+    return ok, (f"writes={kinds}, teamspace={ts} profile={create.get('author', {}).get('profile')}, money node in it={money.get('body', {}).get('teamspace') == ts}, "
+                f"listed={listed}, owner shown={'owner' in members}, money placeholder={money_shown}, off inside claude.ai={off}, errors={(p.errors + c.errors)[:1]}")
+
+
+async def s65_teamspace_invite(b):
+    """BQ-1 step 2: Nowed invites Nassar's profile as a guest. Nassar opens Teamspaces, sees the invitation and clicks
+    Join; Nowed then makes him a member with Change role. Nassar is offered no role controls, and when a role change
+    of his is forced through anyway, the hub's refusal is shown in words and Studio stays writable for him."""
+    H = team_hub(); p = await open_teams_hub(b, H, "Morami49", True)
+    ts = await make_space(p)
+    await p.fill("#tsInvProf", "P-nassar"); await p.select_option("#tsInvRole", "guest"); await p.click("#tsInvite"); await p.wait_for_timeout(400)
+    invited = "invited as guest" in await p.inner_text("#tsMembers")
+    n = await open_teams_hub(b, H, "nassar", False)
+    await to_spaces(n)
+    inv_shown = await n.locator("#tsInvList [data-tsjoin]").count() == 1
+    await n.click("#tsInvList [data-tsjoin]"); await n.wait_for_timeout(400)
+    joined = await n.evaluate(f"TEAMS.roleOf('nassar', '{ts}')")
+    no_controls = await n.locator("[data-tsrole], #tsInvite").count() == 0
+    await n.evaluate(f"write('member.role', '{ts}', {{teamspace: '{ts}', profile: 'P-nassar', role: 'owner'}})"); await n.wait_for_timeout(400)
+    refused_msg = "only an owner" in await visible_text(n); still = await n.evaluate("S.canWrite !== false")
+    p2 = await open_teams_hub(b, H, "Morami49", True)
+    await open_space(p2, ts)
+    await p2.select_option('[data-tsrolesel="P-nassar"]', "member"); await p2.click('[data-tsrole="P-nassar"]'); await p2.wait_for_timeout(400)
+    role_ev = [x["event"] for x in H["posts"] if x["event"]["kind"] == "member.role"]
+    now_member = await p2.evaluate(f"TEAMS.roleOf('nassar', '{ts}')")
+    ok = (invited and inv_shown and joined == "guest" and no_controls and refused_msg and still and H["refused"] == ["member.role"]
+          and len(role_ev) == 1 and role_ev[0]["body"] == {"teamspace": ts, "profile": "P-nassar", "role": "member"} and now_member == "member"
+          and not (p.errors + n.errors + p2.errors))
+    return ok, (f"invite shown={invited}, invitation for Nassar={inv_shown}, joined as {joined}, no role controls for him={no_controls}, "
+                f"forced change refused in words={refused_msg} (still writable={still}), owner's change={role_ev[-1]['body'] if role_ev else None} -> {now_member}, "
+                f"errors={(p.errors + n.errors + p2.errors)[:1]}")
+
+
+async def seeded_space(b, H):
+    """Nowed's teamspace with two nodes (Plan, Quote) and Nassar as a guest who has joined; Quote is shared with him."""
+    p = await open_teams_hub(b, H, "Morami49", True)
+    ts = await make_space(p)
+    for title in ("Plan", "Quote"):
+        await p.fill("#tsNodeTitle", title); await p.click("#tsAddNode"); await p.wait_for_timeout(350)
+    ids = await p.evaluate("Object.fromEntries([...F.items.values()].filter(i => TEAMS.itemSpace.get(i.id) === S.ts).map(i => [i.title, i.id]))")
+    await p.fill("#tsInvProf", "P-nassar"); await p.select_option("#tsInvRole", "guest"); await p.click("#tsInvite"); await p.wait_for_timeout(350)
+    await p.select_option("#tsShareNode", ids["Quote"]); await p.fill("#tsShareTo", "P-nassar"); await p.select_option("#tsShareLevel", "commenter")
+    await p.click("#tsShare"); await p.wait_for_timeout(350)
+    n = await open_teams_hub(b, H, "nassar", False)
+    await to_spaces(n); await n.click("#tsInvList [data-tsjoin]"); await n.wait_for_timeout(400)
+    return p, n, ts, ids
+
+
+async def s66_guest_cant_see_unshared(b):
+    """BQ-1 step 2: Nassar is a guest in Nowed's teamspace. He sees the teamspace, its members and the one node shared
+    with him (Quote, as commenter), and nowhere sees the node that wasn't shared (Plan) or the Money rules node: not in
+    the teamspace, not on the map, not by its address. Nowed, a member of it, sees both."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    n2 = await open_teams_hub(b, H, "nassar", False)
+    await open_space(n2, ts)
+    nodes = await n2.inner_text("#tsNodes")
+    items = await n2.evaluate(f"[{json.dumps(ids['Plan'])}, {json.dumps(ids['Quote'])}].map(id => F.items.has(id))")
+    money_hidden = await n2.evaluate("![...F.items.values()].some(i => i.meta?.money_rules)") and "isn't shared with you" in await n2.inner_text("#tsMoney")
+    await n2.evaluate(f"show('list')"); await n2.wait_for_timeout(150)
+    in_list = "Plan" in await n2.inner_text("#v-list")
+    members_seen = await n2.evaluate(f"[...TEAMS.spaces.get('{ts}').members.keys()].sort()")
+    no_add = await n2.locator("#tsAddNode").count() == 0
+    owner_sees = await p.evaluate(f"[{json.dumps(ids['Plan'])}, {json.dumps(ids['Quote'])}].every(id => F.items.has(id))")
+    ok = ("Quote" in nodes and "Plan" not in nodes and items == [False, True] and money_hidden and not in_list
+          and members_seen == ["P-morami49", "P-nassar"] and no_add and owner_sees and not (p.errors + n.errors + n2.errors))
+    return ok, (f"guest's teamspace nodes={nodes.strip()[:60]!r}, Plan/Quote loaded={items}, money node hidden={money_hidden}, Plan in his list={in_list}, "
+                f"members={members_seen}, no add-node for guest={no_add}, owner sees both={owner_sees}, errors={(p.errors + n.errors + n2.errors)[:1]}")
+
+
+async def s67_teamspace_export(b):
+    """BQ-1 step 2: before leaving, Nowed (owner) clicks Export teamspace and gets a JSON download: every node members
+    created in it (his and Nassar's), each with its full history (a retracted comment included), files as references
+    only (asset id and name, never the contents), the membership events, and a node shared in from outside as a link
+    only (no body, no history). Nassar, not an owner, has no Export button."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    await p.evaluate(f"write('member.role', '{ts}', {{teamspace: '{ts}', profile: 'P-nassar', role: 'member'}})"); await p.wait_for_timeout(300)
+    n2 = await open_teams_hub(b, H, "nassar", False)
+    await open_space(n2, ts)
+    await n2.fill("#tsNodeTitle", "Nassar's site notes"); await n2.click("#tsAddNode"); await n2.wait_for_timeout(350)
+    no_export_for_member = await n2.locator("#tsExport").count() == 0
+    plan = ids["Plan"]
+    p2 = await open_teams_hub(b, H, "Morami49", True)
+    c1 = await p2.evaluate(f"write('comment', {json.dumps(plan)}, {{text: 'first thought'}})"); await p2.wait_for_timeout(250)
+    await p2.evaluate(f"write('retract', {json.dumps(plan)}, {{of: {json.dumps(c1)}}})"); await p2.wait_for_timeout(250)
+    await p2.evaluate(f"write('comment', {json.dumps(plan)}, {{text: 'Raw material: quote.pdf', raw: {{kind: 'document', asset: 'a77', name: 'quote.pdf', size: 1234, type: 'application/pdf', enc: 'aes-256-gcm/pbkdf2-sha256-310k'}}}})")
+    await p2.wait_for_timeout(250)
+    await p2.evaluate(f"write('node.share', 'D-001', {{node: 'D-001', teamspace: '{ts}', level: 'viewer'}})"); await p2.wait_for_timeout(300)
+    await open_space(p2, ts)
+    shared_listed = await p2.locator("#tsShared [data-node='D-001']").count() == 1
+    async with p2.expect_download() as info:
+        await p2.click("#tsExport")
+    dl = await info.value
+    path = await dl.path(); data = json.loads(Path(path).read_text())
+    titles = sorted(x["title"] for x in data["nodes"])
+    plan_n = next(x for x in data["nodes"] if x["id"] == plan)
+    hist = [e["kind"] for e in plan_n["history"]]
+    files = data["files"]
+    shared = data["shared_in"]
+    ev_kinds = sorted({e["kind"] for e in data["events"]})
+    raw_text = json.dumps(data)
+    ok = (dl.suggested_filename.startswith(f"teamspace-{ts}") and data["format"] == "nodach.teamspace-export/1" and data["teamspace"]["id"] == ts
+          and "Nassar's site notes" in titles and "Plan" in titles and "Quote" in titles and any(t.startswith("Money rules") for t in titles)
+          and hist == ["item.create", "comment", "retract", "comment"]
+          and files == [{"node": plan, "event": files[0]["event"], "asset": "a77", "name": "quote.pdf", "type": "application/pdf", "size": 1234, "where": None, "sealed": True}]
+          and [s["id"] for s in shared] == ["D-001"] and set(shared[0]) == {"id", "code", "title", "link", "level", "shared_by"} and shared[0]["link"] == "studio/D-001"
+          and "D-001" not in [x["id"] for x in data["nodes"]]
+          and {"teamspace.create", "member.invite", "member.join", "member.role"} <= set(ev_kinds)
+          and data["teamspace"]["members"] == {"P-morami49": "owner", "P-nassar": "member"} and no_export_for_member and shared_listed
+          and not (p.errors + n2.errors + p2.errors))
+    return ok, (f"file={dl.suggested_filename}, nodes={titles}, Plan history={hist}, files={[(f.get('asset'), f.get('name')) for f in files]}, "
+                f"shared in={[(s['id'], s['link']) for s in shared]}, events={ev_kinds}, members={data['teamspace']['members']}, "
+                f"member has no export={no_export_for_member}, errors={(p.errors + n2.errors + p2.errors)[:1]}")
+
+
+async def s68_owner_opens_created_teamspace(b):
+    """F-teamspace-open (22 Nov, staging): Nowed, the hub owner, creates a teamspace, then a second one with the same
+    name, goes back to all teamspaces and clicks Open on the first. Its own page opens at the top of the screen (the
+    list and the create form step aside), says which teamspace it is and that he is its owner, and a Back button
+    returns to the list. Before the fix Open only redrew a card below the list, off to the side of where he looked,
+    so nothing seemed to happen."""
+    H = team_hub(); p = await open_teams_hub(b, H, "Morami49", True)
+    first = await make_space(p, "Test space")
+    back = await p.locator("#tsBack").count()
+    if back: await p.click("#tsBack"); await p.wait_for_timeout(250)
+    second = await make_space(p, "Test space")
+    if await p.locator("#tsBack").count(): await p.click("#tsBack"); await p.wait_for_timeout(250)
+    await to_spaces(p)
+    rows = await p.locator("#tsList [data-tsopen]").count()
+    await p.click(f"#tsList [data-tsopen='{first}']"); await p.wait_for_timeout(300)
+    page = await p.evaluate("""() => { const h = document.querySelector('#tsTitle') || document.querySelector('#tsOne h3');
+        const r = h && h.getBoundingClientRect(), list = document.querySelector('#tsCreateCard'), lr = list.getBoundingClientRect();
+        return {title: h ? h.innerText : '', top: r ? Math.round(r.top) : null, vh: innerHeight,
+                list_on_screen: !!(list.offsetParent && lr.bottom > 0 && lr.top < innerHeight), focused: document.activeElement === h}; }""")
+    opened = page["title"].startswith("Test space") and first in page["title"] and "you are owner" in page["title"]
+    in_view = page["top"] is not None and 0 <= page["top"] < page["vh"] / 2
+    went_back = False
+    if await p.locator("#tsBack").count():
+        await p.click("#tsBack"); await p.wait_for_timeout(250)
+        went_back = await p.locator("#tsCreateCard").is_visible() and await p.locator("#tsTitle").count() == 0
+    ids_listed = first in await p.inner_text("#tsList") and second in await p.inner_text("#tsList")
+    ok = opened and in_view and not page["list_on_screen"] and page["focused"] and went_back and rows == 2 and ids_listed and first != second and not p.errors
+    return ok, (f"opened={opened} ({page['title'][:48]!r}), heading top={page['top']}px of {page['vh']}, list still on screen={page['list_on_screen']}, "
+                f"focused={page['focused']}, back to list={went_back}, rows={rows}, ids listed={ids_listed}, errors={p.errors[:1]}")
+
+
+async def s69_support_access(b):
+    """114b a: Nassar has his own teamspace with a node in it. Nowed, the hub owner, isn't in it: Teamspaces lists it
+    under Other teamspaces by name only and the node isn't on his record. He clicks Request support access, types why
+    and clicks Open with support access: a support.access {teamspace, reason} event is written, the teamspace opens
+    read only (no Add node, no Leave) with its node, and says it closes after 24 hours. Nassar, its owner, sees the
+    entry with the reason in the teamspace's Support access log."""
+    H = team_hub(); H["filter"] = True
+    n = await open_teams_hub(b, H, "nassar", False)
+    ts = await make_space(n, "Insydr internal")
+    await n.fill("#tsNodeTitle", "Margins"); await n.click("#tsAddNode"); await n.wait_for_timeout(350)
+    o = await open_teams_hub(b, H, "Morami49", True)
+    await to_spaces(o); await o.wait_for_timeout(300)
+    listed = ts in await o.inner_text("#tsOthers") and "Insydr internal" in await o.inner_text("#tsOthers")
+    hidden_before = await o.evaluate("![...F.items.values()].some(i => i.title === 'Margins')")
+    await o.click(f"[data-tssupport='{ts}']"); await o.click(f"[data-tssupgo='{ts}']"); await o.wait_for_timeout(200)
+    asked_reason = "Say why" in await o.inner_text("#tsOtherNote")
+    await o.fill(f"[data-tssupwhy='{ts}']", "Nassar asked for help with an import"); await o.click(f"[data-tssupgo='{ts}']"); await o.wait_for_timeout(900)
+    sup = [x["event"] for x in H["posts"] if x["event"]["kind"] == "support.access"]
+    title = await o.inner_text("#tsTitle") if await o.locator("#tsTitle").count() else ""
+    nodes = await o.inner_text("#tsNodes") if await o.locator("#tsNodes").count() else ""
+    read_only = await o.locator("#tsAddNode, #tsLeave, #tsInvite, #tsExport").count() == 0 and await o.locator("#tsSupportNote").count() == 1
+    n2 = await open_teams_hub(b, H, "nassar", False)
+    await open_space(n2, ts)
+    log = await n2.inner_text("#tsSupportLog") if await n2.locator("#tsSupportLog").count() else ""
+    ok = (listed and hidden_before and asked_reason and len(sup) == 1 and sup[0]["body"] == {"teamspace": ts, "reason": "Nassar asked for help with an import"}
+          and "support access until" in title and "Margins" in nodes and read_only
+          and "morami49" in log and "Nassar asked for help with an import" in log and "open now" in log and not (n.errors + o.errors + n2.errors))
+    return ok, (f"listed by name={listed}, node hidden before={hidden_before}, reason required={asked_reason}, events={[e['body'] for e in sup]}, "
+                f"title={title[:70]!r}, node readable={'Margins' in nodes}, read only={read_only}, owner's log={log.strip()[:90]!r}, errors={(n.errors + o.errors + n2.errors)[:1]}")
+
+
 SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock, s05_branch_awareness, s06_view_only_client,
              s07_names, s08_long_history, s09_ai_relay, s10_keyboard_list, s11_offline_capture, s12_member_rights,
              s13_two_people_at_once, s14_phone, s15_undo_old_status, s16_overwhelm, s17_disagreement, s18_clock_skew, s19_private_area,
@@ -1762,7 +2091,9 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s49_show_pause_clock, s50_show_states, s51_show_marks_follow_canvas,
              s52_live_connector_reply_in_seconds, s53_live_states,
              s54_sign_out_switch_account, s55_nav_collapsed_expanded, s56_sections_reach_views, s57_esc_touch_keyboard, s58_classic_tabs,
-             s59_dev_mode_proposes, s60_profile_new_window, s61_profile_strip_shown, s62_write_carries_profile, s63_refused_write_shows_message]
+             s59_dev_mode_proposes, s60_profile_new_window, s61_profile_strip_shown, s62_write_carries_profile, s63_refused_write_shows_message,
+             s64_teamspace_create, s65_teamspace_invite, s66_guest_cant_see_unshared, s67_teamspace_export,
+             s68_owner_opens_created_teamspace, s69_support_access]
 
 
 async def main():
