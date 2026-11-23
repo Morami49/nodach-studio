@@ -22,9 +22,9 @@ use serde_json::{json, Value};
 pub const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Commit the node was built from (set by the deploy as BUILD_SHA), so a test knows which code answered.
 pub const BUILD: &str = match option_env!("BUILD_SHA") { Some(b) => b, None => "dev" };
-pub const WRITE_KINDS: [&str; 22] = ["answer", "comment", "status", "item.create", "item.edit", "link",
+pub const WRITE_KINDS: [&str; 23] = ["answer", "comment", "status", "item.create", "item.edit", "link",
     "account.link", "profile.create", "profile.revoke", "profile.assign", "connection.create", "connection.revoke", "access.grant", "access.revoke", "access.invite", "access.uninvite",
-    "teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share"];
+    "teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share", "support.access"];
 
 /// Milliseconds since 1970 → `YYYY-MM-DDTHH:MM:SS.mmmZ` (Studio's timestamp shape).
 pub fn iso(ms: i64) -> String {
@@ -180,7 +180,7 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
                 Err(e) => text_result(json!({"error": e, "refused": true}), true),
             }
         }
-        "resume" => text_result(hub.digest_for(login), false),
+        "resume" => text_result(hub.digest_for(login, now), false),
         "read_claims" => {
             let g = hub.guard();
             text_result(json!({"active": g.active(now), "now": iso(now)}), false)
@@ -206,7 +206,7 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
             let after = args.get("after").and_then(Value::as_u64).unwrap_or(0) as usize;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 200) as usize;
             // A1 d: a member gets only the spaces they were given and their own writes
-            let (events, next, total, skipped) = hub.studio_events_for(login, after, limit);
+            let (events, next, total, skipped) = hub.studio_events_for(login, after, limit, now);
             // F-55: say what was skipped, so nobody guesses (a key's first fact is its identity, not a Studio event)
             text_result(json!({"events": events, "next": next, "total": total, "skipped_non_studio": skipped,
                 "note": "Events that are not Studio events (e.g. a key's identity fact) are skipped and counted in skipped_non_studio. Private items are never in this shared record: they are kept apart, encrypted, and only read_private serves them to their owner."}), false)
@@ -356,7 +356,7 @@ fn begin_answer(hub: &mut Hub, login: &str, key: &KeyPair, args: &Value, now: i6
         return text_result(json!({"error": e}), true);
     }
     let mut r = json!({"session": session, "role": role, "branch": branch, "claimed": mine, "until": iso(now + minutes * 60_000), "locked_by_others": locked,
-                       "resume": hub.digest_for(login)});
+                       "resume": hub.digest_for(login, now)});
     if let Some(d) = duplicate {
         r["duplicate_of"] = json!({"session": d.session, "role": d.role, "since": d.since, "reply": d.reply, "still_working": d.released.is_none() && now < d.until_ms});
         r["note"] = json!("Another session already took this message. Read its reply (or its recent writes) and add only what's missing.");

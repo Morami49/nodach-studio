@@ -80,7 +80,7 @@ fn a_signed_test_webhook_records_the_payment_and_both_fee_lines_once() {
 
     // who sees the ledger: the member yes, the guest and a stranger no
     let seen = |login: &str| -> usize {
-        let (docs, _, _, _) = h.studio_events_for(login, 0, usize::MAX);
+        let (docs, _, _, _) = h.studio_events_for(login, 0, usize::MAX, 0);
         docs.iter().filter(|d| d.pointer("/event/kind").and_then(Value::as_str).is_some_and(money::is_money_kind)).count()
     };
     assert!(seen("nassar") >= 5, "invoice, charging, payment, two fee lines");

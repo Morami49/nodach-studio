@@ -1781,7 +1781,10 @@ async def open_teams_hub(browser, H, login, owner):
         if path == "/studio/api/events" and req.method == "GET":
             after, lim = int(q.get("after", ["0"])[0]), int(q.get("limit", ["500"])[0])
             page = H["docs"][after:after + lim]
-            return await js({"events": page, "next": after + len(page), "total": len(H["docs"])})
+            shown = [d for d in page if team_visible(H, login, d["event"])] if H.get("filter") else page
+            return await js({"events": shown, "next": after + len(page), "total": len(H["docs"])})
+        if path == "/studio/api/teamspaces":
+            return await js(team_directory(H, login))
         if path == "/studio/api/events" and req.method == "POST":
             b = json.loads(req.post_data or "{}"); e = b.get("event", {})
             if e.get("kind") == "member.role" and login.lower() != H["owner"]:
@@ -1822,9 +1825,72 @@ def team_hub():
     return {"docs": [], "posts": [], "refused": [], "owner": "morami49"}
 
 
+def _team_fold(H):
+    """The stand-in's copy of hub_core::teamspaces, as far as reads go: members by login, nodes' teamspaces, support."""
+    from datetime import datetime
+    ms = lambda t: int(datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() * 1000)
+    spaces, labels, owners, item_space, support = {}, {}, {}, {}, []
+    for d in H["docs"]:
+        e = d["event"]; b = e.get("body") or {}; who = (e.get("author") or {}).get("id", "").replace("github:", "").lower()
+        k = e.get("kind")
+        if k == "teamspace.create":
+            spaces[b["id"]] = {who}; owners[b["id"]] = {who}; labels[b["id"]] = b.get("label", b["id"])
+        elif k == "member.join" and b.get("teamspace") in spaces:
+            spaces[b["teamspace"]].add(who)
+        elif k == "item.create" and b.get("teamspace"):
+            item_space[b.get("id")] = b["teamspace"]
+        elif k == "support.access" and who == H["owner"] and b.get("teamspace") in spaces:
+            support.append((b["teamspace"], who, ms(e["ts"])))
+    return spaces, labels, owners, item_space, support
+
+
+def _space_of(e, item_space):
+    b = e.get("body") or {}; k = e.get("kind")
+    if k == "teamspace.create": return b.get("id")
+    if k in ("member.invite", "member.join", "member.role", "member.remove", "support.access"): return b.get("teamspace") or e.get("item")
+    if k == "node.share": return b.get("teamspace") or item_space.get(b.get("node") or e.get("item"))
+    return item_space.get(e.get("item") or b.get("id"))
+
+
+def team_visible(H, login, e):
+    """114b a in the stand-in: the hub owner reads a teamspace he isn't in only while his support access (24 h) runs;
+    a support.access is shown to the teamspace's owners. Other logins get everything (the page filters for them)."""
+    import time
+    login = login.lower(); who = (e.get("author") or {}).get("id", "").replace("github:", "").lower()
+    if who == login: return True
+    spaces, _, owners, item_space, support = _team_fold(H)
+    ts = _space_of(e, item_space)
+    if e.get("kind") == "support.access": return login in owners.get(ts, set())
+    if login != H["owner"] or ts is None or ts not in spaces or login in spaces[ts]: return True
+    now = time.time() * 1000
+    return any(t == ts and w == login and at <= now < at + 24 * 3600 * 1000 for t, w, at in support)
+
+
+def team_directory(H, login):
+    import time
+    spaces, labels, _, _, support = _team_fold(H)
+    login = login.lower()
+    if login != H["owner"]: return {"teamspaces": [], "others": []}
+    now = time.time() * 1000
+    def until(ts):
+        u = [at + 24 * 3600 * 1000 for t, w, at in support if t == ts and at <= now < at + 24 * 3600 * 1000]
+        return datetime_iso(max(u)) if u else None
+    return {"teamspaces": [], "others": [{"id": t, "label": labels[t], "support_until": until(t)} for t in spaces if login not in spaces[t]]}
+
+
+def datetime_iso(ms):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(ms % 1000):03d}Z"
+
+
 async def to_spaces(p):
     await nav_open(p); await p.click("#sections [data-s=teams]"); await p.wait_for_timeout(120)
     await p.click("#subnav [data-sv=spaces]"); await p.wait_for_timeout(200)
+
+
+async def open_space(p, ts):
+    """Teamspaces → the teamspace's Open button: its own page (the list of teamspaces steps aside)."""
+    await to_spaces(p); await p.click(f"#tsList [data-tsopen='{ts}']"); await p.wait_for_timeout(250)
 
 
 async def make_space(p, label="Insydr pilot"):
@@ -1872,7 +1938,7 @@ async def s65_teamspace_invite(b):
     await n.evaluate(f"write('member.role', '{ts}', {{teamspace: '{ts}', profile: 'P-nassar', role: 'owner'}})"); await n.wait_for_timeout(400)
     refused_msg = "only an owner" in await visible_text(n); still = await n.evaluate("S.canWrite !== false")
     p2 = await open_teams_hub(b, H, "Morami49", True)
-    await to_spaces(p2)
+    await open_space(p2, ts)
     await p2.select_option('[data-tsrolesel="P-nassar"]', "member"); await p2.click('[data-tsrole="P-nassar"]'); await p2.wait_for_timeout(400)
     role_ev = [x["event"] for x in H["posts"] if x["event"]["kind"] == "member.role"]
     now_member = await p2.evaluate(f"TEAMS.roleOf('nassar', '{ts}')")
@@ -1905,7 +1971,7 @@ async def s66_guest_cant_see_unshared(b):
     the teamspace, not on the map, not by its address. Nowed, a member of it, sees both."""
     H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
     n2 = await open_teams_hub(b, H, "nassar", False)
-    await to_spaces(n2)
+    await open_space(n2, ts)
     nodes = await n2.inner_text("#tsNodes")
     items = await n2.evaluate(f"[{json.dumps(ids['Plan'])}, {json.dumps(ids['Quote'])}].map(id => F.items.has(id))")
     money_hidden = await n2.evaluate("![...F.items.values()].some(i => i.meta?.money_rules)") and "isn't shared with you" in await n2.inner_text("#tsMoney")
@@ -1928,7 +1994,7 @@ async def s67_teamspace_export(b):
     H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
     await p.evaluate(f"write('member.role', '{ts}', {{teamspace: '{ts}', profile: 'P-nassar', role: 'member'}})"); await p.wait_for_timeout(300)
     n2 = await open_teams_hub(b, H, "nassar", False)
-    await to_spaces(n2)
+    await open_space(n2, ts)
     await n2.fill("#tsNodeTitle", "Nassar's site notes"); await n2.click("#tsAddNode"); await n2.wait_for_timeout(350)
     no_export_for_member = await n2.locator("#tsExport").count() == 0
     plan = ids["Plan"]
@@ -1938,7 +2004,7 @@ async def s67_teamspace_export(b):
     await p2.evaluate(f"write('comment', {json.dumps(plan)}, {{text: 'Raw material: quote.pdf', raw: {{kind: 'document', asset: 'a77', name: 'quote.pdf', size: 1234, type: 'application/pdf', enc: 'aes-256-gcm/pbkdf2-sha256-310k'}}}})")
     await p2.wait_for_timeout(250)
     await p2.evaluate(f"write('node.share', 'D-001', {{node: 'D-001', teamspace: '{ts}', level: 'viewer'}})"); await p2.wait_for_timeout(300)
-    await to_spaces(p2)
+    await open_space(p2, ts)
     shared_listed = await p2.locator("#tsShared [data-node='D-001']").count() == 1
     async with p2.expect_download() as info:
         await p2.click("#tsExport")
@@ -1965,6 +2031,67 @@ async def s67_teamspace_export(b):
                 f"member has no export={no_export_for_member}, errors={(p.errors + n2.errors + p2.errors)[:1]}")
 
 
+async def s68_owner_opens_created_teamspace(b):
+    """F-teamspace-open (22 Nov, staging): Nowed, the hub owner, creates a teamspace, then a second one with the same
+    name, goes back to all teamspaces and clicks Open on the first. Its own page opens at the top of the screen (the
+    list and the create form step aside), says which teamspace it is and that he is its owner, and a Back button
+    returns to the list. Before the fix Open only redrew a card below the list, off to the side of where he looked,
+    so nothing seemed to happen."""
+    H = team_hub(); p = await open_teams_hub(b, H, "Morami49", True)
+    first = await make_space(p, "Test space")
+    back = await p.locator("#tsBack").count()
+    if back: await p.click("#tsBack"); await p.wait_for_timeout(250)
+    second = await make_space(p, "Test space")
+    if await p.locator("#tsBack").count(): await p.click("#tsBack"); await p.wait_for_timeout(250)
+    await to_spaces(p)
+    rows = await p.locator("#tsList [data-tsopen]").count()
+    await p.click(f"#tsList [data-tsopen='{first}']"); await p.wait_for_timeout(300)
+    page = await p.evaluate("""() => { const h = document.querySelector('#tsTitle') || document.querySelector('#tsOne h3');
+        const r = h && h.getBoundingClientRect(), list = document.querySelector('#tsCreateCard'), lr = list.getBoundingClientRect();
+        return {title: h ? h.innerText : '', top: r ? Math.round(r.top) : null, vh: innerHeight,
+                list_on_screen: !!(list.offsetParent && lr.bottom > 0 && lr.top < innerHeight), focused: document.activeElement === h}; }""")
+    opened = page["title"].startswith("Test space") and first in page["title"] and "you are owner" in page["title"]
+    in_view = page["top"] is not None and 0 <= page["top"] < page["vh"] / 2
+    went_back = False
+    if await p.locator("#tsBack").count():
+        await p.click("#tsBack"); await p.wait_for_timeout(250)
+        went_back = await p.locator("#tsCreateCard").is_visible() and await p.locator("#tsTitle").count() == 0
+    ids_listed = first in await p.inner_text("#tsList") and second in await p.inner_text("#tsList")
+    ok = opened and in_view and not page["list_on_screen"] and page["focused"] and went_back and rows == 2 and ids_listed and first != second and not p.errors
+    return ok, (f"opened={opened} ({page['title'][:48]!r}), heading top={page['top']}px of {page['vh']}, list still on screen={page['list_on_screen']}, "
+                f"focused={page['focused']}, back to list={went_back}, rows={rows}, ids listed={ids_listed}, errors={p.errors[:1]}")
+
+
+async def s69_support_access(b):
+    """114b a: Nassar has his own teamspace with a node in it. Nowed, the hub owner, isn't in it: Teamspaces lists it
+    under Other teamspaces by name only and the node isn't on his record. He clicks Request support access, types why
+    and clicks Open with support access: a support.access {teamspace, reason} event is written, the teamspace opens
+    read only (no Add node, no Leave) with its node, and says it closes after 24 hours. Nassar, its owner, sees the
+    entry with the reason in the teamspace's Support access log."""
+    H = team_hub(); H["filter"] = True
+    n = await open_teams_hub(b, H, "nassar", False)
+    ts = await make_space(n, "Insydr internal")
+    await n.fill("#tsNodeTitle", "Margins"); await n.click("#tsAddNode"); await n.wait_for_timeout(350)
+    o = await open_teams_hub(b, H, "Morami49", True)
+    await to_spaces(o); await o.wait_for_timeout(300)
+    listed = ts in await o.inner_text("#tsOthers") and "Insydr internal" in await o.inner_text("#tsOthers")
+    hidden_before = await o.evaluate("![...F.items.values()].some(i => i.title === 'Margins')")
+    await o.click(f"[data-tssupport='{ts}']"); await o.click(f"[data-tssupgo='{ts}']"); await o.wait_for_timeout(200)
+    asked_reason = "Say why" in await o.inner_text("#tsOtherNote")
+    await o.fill(f"[data-tssupwhy='{ts}']", "Nassar asked for help with an import"); await o.click(f"[data-tssupgo='{ts}']"); await o.wait_for_timeout(900)
+    sup = [x["event"] for x in H["posts"] if x["event"]["kind"] == "support.access"]
+    title = await o.inner_text("#tsTitle") if await o.locator("#tsTitle").count() else ""
+    nodes = await o.inner_text("#tsNodes") if await o.locator("#tsNodes").count() else ""
+    read_only = await o.locator("#tsAddNode, #tsLeave, #tsInvite, #tsExport").count() == 0 and await o.locator("#tsSupportNote").count() == 1
+    n2 = await open_teams_hub(b, H, "nassar", False)
+    await open_space(n2, ts)
+    log = await n2.inner_text("#tsSupportLog") if await n2.locator("#tsSupportLog").count() else ""
+    ok = (listed and hidden_before and asked_reason and len(sup) == 1 and sup[0]["body"] == {"teamspace": ts, "reason": "Nassar asked for help with an import"}
+          and "support access until" in title and "Margins" in nodes and read_only
+          and "morami49" in log and "Nassar asked for help with an import" in log and "open now" in log and not (n.errors + o.errors + n2.errors))
+    return ok, (f"listed by name={listed}, node hidden before={hidden_before}, reason required={asked_reason}, events={[e['body'] for e in sup]}, "
+                f"title={title[:70]!r}, node readable={'Margins' in nodes}, read only={read_only}, owner's log={log.strip()[:90]!r}, errors={(n.errors + o.errors + n2.errors)[:1]}")
+
 # ---------------------------------------------------------------- BQ-1 step 3: usage meter and free limits
 REFUSAL = "Monthly free limit reached; a top-up will be available soon"
 
@@ -1977,7 +2104,7 @@ def meter(label, used, limit, enforced=True):
 def usage_view(login):
     """What the hub's /studio/api/usage gives (hub_core::usage::State::view_for): Nowed's Personal profile at 80% of
     AI calls, his Developer profile (exempt), and the Insydr pilot teamspace at its run limit."""
-    lim = {"ai_calls": 500, "runs": 2000, "storage_bytes": 1000000000, "placeholder": True, "node": None, "version": 0}
+    lim = {"ai_calls": 500, "runs": 2000, "storage_bytes": 1000000000, "node": None, "version": 0}
     rows = [
         {"scope": f"P-{login.lower()}", "kind": "profile", "label": "Personal", "profile_kind": "personal", "active": True, "exempt": False, "notices": [],
          "meters": {"ai_calls": meter("AI calls", 400, 500), "runs": meter("flow runs", 120, 2000), "storage_bytes": meter("stored bytes", 52_000_000, 1_000_000_000, False)}},
@@ -1994,11 +2121,11 @@ async def to_usage(p):
     await p.click("#subnav [data-sv=usage]"); await p.wait_for_timeout(500)
 
 
-async def s68_usage_bars(b):
+async def s70_usage_bars(b):
     """BQ-1 step 3: Nowed opens Settings → Usage. He sees one card per meter scope: his Personal profile first (this
     window's), with AI calls at 80% (amber, "notice sent"), his Developer profile marked exempt, and the Insydr pilot
-    teamspace with runs at the limit (red, "refused"). The free limits read 500 AI calls, 2,000 runs, 1 GB, marked as
-    placeholders, and the hub was asked as this window's profile."""
+    teamspace with runs at the limit (red, "refused"). The free limits read 500 AI calls, 2,000 runs, 1 GB (Nowed's
+    decided limits, with no "placeholder" label), and the hub was asked as this window's profile."""
     H = team_hub(); H["usage"] = usage_view
     p = await open_teams_hub(b, H, "Morami49", True)
     await to_usage(p)
@@ -2009,16 +2136,16 @@ async def s68_usage_bars(b):
     runs_txt = await p.inner_text("[data-scope=TS-pilot] [data-meter=runs]")
     dev = await p.inner_text("[data-scope=P-dev]")
     store_txt = await p.inner_text("[data-scope=TS-pilot] [data-meter=storage_bytes]")
-    nums = await p.inner_text("#useNums"); placeholder = await p.locator("#usePlaceholder").count() == 1
+    nums = await p.inner_text("#useNums"); placeholder = await p.locator("#usePlaceholder").count() == 0 and "placeholder" not in (await p.inner_text("#useLimits")).lower()
     hdr = H.get("usage_hdr", [])
     ok = (scopes == ["P-morami49", "P-dev", "TS-pilot"] and "warn" in ai and "400 / 500" in ai_txt and "notice sent" in ai_txt
           and "full" in runs_cls and "refused" in runs_txt and "exempt" in dev and "warn only" not in store_txt and "900.0 MB" in store_txt
           and "500 AI calls" in nums and "2,000 flow runs" in nums and "1 GB" in nums and placeholder and hdr and hdr[-1] == "P-morami49" and not p.errors)
     return ok, (f"cards={scopes}, AI bar={ai!r} {ai_txt.strip()!r}, team runs={runs_cls!r} {runs_txt.strip()!r}, dev exempt={'exempt' in dev}, "
-                f"limits={nums!r} placeholder={placeholder}, asked as={hdr[-1:] }, errors={p.errors[:1]}")
+                f"limits={nums!r} no placeholder label={placeholder}, asked as={hdr[-1:] }, errors={p.errors[:1]}")
 
 
-async def s69_usage_notice_in_queue(b):
+async def s71_usage_notice_in_queue(b):
     """BQ-1 step 3: the hub raised an urgent notice for Nowed (AI calls at 80% in his Personal profile). It sits at the
     top of his My queue marked urgent, with a Usage button that opens the meters and Mark seen, which writes one status
     and takes it out of the queue. Nassar, whose queue it isn't, never sees it in his."""
@@ -2050,9 +2177,9 @@ async def s69_usage_notice_in_queue(b):
                 f"left queue={gone}, not in Nassar's queue={not_his}, errors={(p.errors + n.errors)[:1]}")
 
 
-async def s70_limits_change_is_a_proposal(b):
+async def s72_limits_change_is_a_proposal(b):
     """BQ-1 step 3: the limits are a node. Nowed (hub owner) clicks Create the limits node: PLAN-limits is made with the
-    placeholder numbers, marked placeholder, and the card links to it. He then types 800 AI calls and clicks Propose
+    default limits (500, 2,000, 1 GB; no placeholder mark) and the card links to it. He then types 800 AI calls and clicks Propose
     new limits: on production that writes a change proposal (status proposed, target PLAN-limits) and the limits
     themselves stay as they were. Nassar, not an owner, gets no create or propose controls."""
     H = team_hub(); H["usage"] = usage_view
@@ -2071,7 +2198,7 @@ async def s70_limits_change_is_a_proposal(b):
     n = await open_teams_hub(b, H, "nassar", False)
     await to_usage(n)
     no_controls = await n.locator("#useMakeLimits, #usePropose").count() == 0
-    ok = (made and val == {"ai_calls": 500, "runs": 2000, "storage_bytes": 1000000000, "placeholder": True} and made["body"].get("type") == "setting"
+    ok = (made and val == {"ai_calls": 500, "runs": 2000, "storage_bytes": 1000000000} and "placeholder" not in made["body"].get("body", "").lower() and made["body"].get("type") == "setting"
           and linked and cr and cr["body"]["status"] == "proposed" and cr["body"]["meta"]["target"] == "PLAN-limits"
           and json.loads(cr["body"]["meta"]["value"])["ai_calls"] == 800 and not edits and "500 AI calls" in still and opened and no_controls
           and not (p.errors + n.errors))
@@ -2079,7 +2206,7 @@ async def s70_limits_change_is_a_proposal(b):
                 f"direct edits={len(edits)}, limits still={still!r}, opens node={opened}, no controls for Nassar={no_controls}, errors={(p.errors + n.errors)[:1]}")
 
 
-async def s71_run_refused_at_limit(b):
+async def s73_run_refused_at_limit(b):
     """BQ-1 step 3: at the monthly limit Nowed presses Run from here on a step. The hub refuses the run, and the step
     panel says so in the hub's words ("Monthly free limit reached; a top-up will be available soon"); Studio stays
     writable and nothing else is written by the page."""
@@ -2173,7 +2300,7 @@ async def to_money(p):
     await p.click("#subnav [data-sv=money]"); await p.wait_for_timeout(600)
 
 
-async def s72_money_create_invoice(b):
+async def s74_money_create_invoice(b):
     """BQ-1 step 4: Nassar (a member) opens Teams → Money for the Insydr pilot, types a client and two lines (4 chairs
     at £25.00, fitting £19.99) and clicks Create invoice. One invoice.create is written as his window's profile, in the
     teamspace, in GBP, with the total in pence equal to its lines (£119.99). Stripe's test key isn't set up, so the page
@@ -2198,7 +2325,7 @@ async def s72_money_create_invoice(b):
                 f"profile={e['author'].get('profile')}, listed={'Acme Offices' in listed}, card link off={pay_off}, no owner controls={no_owner_controls}, errors={p.errors[:1]}")
 
 
-async def s73_money_ledger_and_nodach_net(b):
+async def s75_money_ledger_and_nodach_net(b):
     """BQ-1 step 4: a £100.00 invoice was paid by test card; the hub wrote the payment, Nodach's 4.5% (£4.50) and
     Stripe's fee (£1.70, paid by Nodach) as separate lines. Nowed sees, in order: invoice, charging, payment, both fee
     lines, and totals that make Nodach's net visible: £4.50 − £1.70 = £2.80; the vendor keeps £95.50; nothing is
@@ -2231,7 +2358,7 @@ async def s73_money_ledger_and_nodach_net(b):
                 f"errors={(p.errors + s.errors)[:1]}")
 
 
-async def s74_money_card_link_test_mode(b):
+async def s76_money_card_link_test_mode(b):
     """BQ-1 step 4: with Stripe test mode set up, Nassar clicks Card link (test) on an open invoice. Studio asks the hub
     (POST /studio/api/money/checkout with the x-nodach-studio header and nothing but the invoice id: the page never
     sends an amount or a key), and shows the test card link and how to pay with 4242 4242 4242 4242."""
@@ -2250,7 +2377,7 @@ async def s74_money_card_link_test_mode(b):
     return ok, f"button on={on}, asked the hub={[(x['path'], x['body']) for x in posts]}, link={href[-30:]!r}, note={note.strip()[:60]!r}, errors={p.errors[:1]}"
 
 
-async def s75_money_charging_and_recorded_payment(b):
+async def s77_money_charging_and_recorded_payment(b):
     """BQ-1 step 4: Nowed (the teamspace's owner) clicks First test passed: start charging, which writes one
     money.charging {on: true}; then records a £60.00 bank transfer on the invoice with Record a payment, which goes to
     the hub (the hub writes the payment and its fee line, the page writes no ledger lines itself). The invoice shows
@@ -2290,8 +2417,9 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s54_sign_out_switch_account, s55_nav_collapsed_expanded, s56_sections_reach_views, s57_esc_touch_keyboard, s58_classic_tabs,
              s59_dev_mode_proposes, s60_profile_new_window, s61_profile_strip_shown, s62_write_carries_profile, s63_refused_write_shows_message,
              s64_teamspace_create, s65_teamspace_invite, s66_guest_cant_see_unshared, s67_teamspace_export,
-             s68_usage_bars, s69_usage_notice_in_queue, s70_limits_change_is_a_proposal, s71_run_refused_at_limit,
-             s72_money_create_invoice, s73_money_ledger_and_nodach_net, s74_money_card_link_test_mode, s75_money_charging_and_recorded_payment]
+             s68_owner_opens_created_teamspace, s69_support_access,
+             s70_usage_bars, s71_usage_notice_in_queue, s72_limits_change_is_a_proposal, s73_run_refused_at_limit,
+             s74_money_create_invoice, s75_money_ledger_and_nodach_net, s76_money_card_link_test_mode, s77_money_charging_and_recorded_payment]
 
 
 async def main():

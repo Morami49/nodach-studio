@@ -637,11 +637,13 @@ impl State {
         Ok((f, q))
     }
 
-    /// The Money view of one teamspace for `login` (a member or owner of it, or a hub owner). None: not theirs.
-    pub fn view_for(&self, login: &str, teamspace: &str, hub_owner: bool) -> Option<Value> {
+    /// The Money view of one teamspace for `login`: a member or owner of it, or (114b a) the hub owner while a logged
+    /// support access he opened is running (`support_open`, judged by the caller at the request's clock; read only).
+    /// None: not theirs.
+    pub fn view_for(&self, login: &str, teamspace: &str, support_open: bool) -> Option<Value> {
         let t = self.teams.teamspaces.get(teamspace)?;
         let role = self.teams.role_of(login, teamspace);
-        if !hub_owner && !matches!(role, Some(Role::Owner | Role::Member)) { return None; }
+        if !support_open && !matches!(role, Some(Role::Owner | Role::Member)) { return None; }
         let invoices: Vec<&Invoice> = self.invoices.values().filter(|i| i.teamspace == teamspace).collect();
         let payments: Vec<&Payment> = self.payments.values().filter(|p| p.teamspace == teamspace).collect();
         let fees: Vec<&FeeLine> = self.fees.iter().filter(|f| f.teamspace == teamspace).collect();

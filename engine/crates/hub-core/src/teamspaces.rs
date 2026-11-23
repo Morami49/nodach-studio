@@ -29,13 +29,59 @@
 //!   3. a write into a teamspace needs member (or owner) rights, or an editor share on that node; a commenter share
 //!      allows comments only;
 //!   4. a node is shared by its author or an owner of its teamspace (or a hub owner, for nodes outside teamspaces).
+//!
+//! Decision 114a (a): these rules bind the hub owner too. A hub owner has no role inside anyone's teamspace by being
+//! the hub owner; every write is judged on its own author.
+//! Decision 114b (a): the hub owner reads only the teamspaces he is a member of. Any other teamspace is reachable only
+//! through a logged support access event:
+//!   support.access   {teamspace, reason}              hub owner only; opens that teamspace to him for reading, for
+//!                                                     24 hours from the event's ts (SUPPORT_MS), then closes by itself.
+//! The event is shown to that teamspace's owners (their "Support access log"), so access is never silent. It grants
+//! reads only: writes still need a role there (114a). The hub owner sees a directory of other teamspaces (id and
+//! name only, `directory_for`) so he can ask; nothing inside them.
 //! Rollback: revert the PR. The events stay on the record (append-only) and simply stop meaning anything.
 use crate::profiles;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-pub const KINDS: [&str; 6] = ["teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share"];
+pub const KINDS: [&str; 7] = ["teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share", "support.access"];
+
+/// How long one support.access event opens a teamspace to the hub owner (114b a): 24 hours.
+pub const SUPPORT_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// `YYYY-MM-DDTHH:MM:SS(.fff)Z` → milliseconds since 1970 (days-from-civil, Howard Hinnant). None if it isn't that shape.
+pub fn iso_ms(ts: &str) -> Option<i64> {
+    let b = ts.trim().as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' { return None; }
+    let num = |r: std::ops::Range<usize>| std::str::from_utf8(&b[r]).ok()?.parse::<i64>().ok();
+    let (y, m, d, hh, mm, ss) = (num(0..4)?, num(5..7)?, num(8..10)?, num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 { return None; }
+    let mut ms = 0;
+    if b[19] == b'.' {
+        let frac: String = b[20..].iter().take_while(|c| c.is_ascii_digit()).map(|&c| c as char).collect();
+        if frac.is_empty() { return None; }
+        ms = format!("{:0<3}", &frac[..frac.len().min(3)]).parse::<i64>().ok()?;
+    }
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 86_400) + hh * 3600 + mm * 60 + ss) * 1000 + ms)
+}
+
+/// One support access (114b a): who opened which teamspace, when, why, and until when.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Support {
+    pub doc_id: String,
+    pub teamspace: String,
+    pub by: String,
+    pub reason: String,
+    pub at: String,
+    pub until_ms: i64,
+}
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -85,8 +131,12 @@ pub struct State {
     /// node id → share target (a profile id or a teamspace id) → level
     pub shares: HashMap<String, BTreeMap<String, Level>>,
     pub findings: Vec<profiles::Finding>,
+    /// 114b a: every accepted support.access, in record order
+    pub support: Vec<Support>,
     profiles: profiles::State,
     hub_owners: Vec<String>,
+    /// The clock reads are judged at (ms); None: no support access is open (safe default)
+    now_ms: Option<i64>,
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -149,6 +199,13 @@ impl State {
             return;
         }
         if !KINDS.contains(&kind) { return; }
+        if kind == "support.access" {
+            match self.support_check(ev) {
+                Ok(sup) => self.support.push(Support { doc_id: doc_id.into(), ..sup }),
+                Err(reason) => self.findings.push(profiles::Finding { doc_id: doc_id.into(), kind: kind.into(), reason }),
+            }
+            return;
+        }
         if let Err(reason) = self.apply(ev) {
             self.findings.push(profiles::Finding { doc_id: doc_id.into(), kind: kind.into(), reason });
         }
@@ -156,7 +213,74 @@ impl State {
 
     /// Would this teamspace event be accepted now?
     pub fn check(&self, ev: &Value) -> Result<(), String> {
+        if s(ev, "kind") == "support.access" { return self.support_check(ev).map(|_| ()); }
         self.clone().apply(ev)
+    }
+
+    /// Judge reads at this clock (ms since 1970); support access is open only while `now` is inside its 24 hours.
+    pub fn with_now(mut self, now_ms: i64) -> Self { self.now_ms = Some(now_ms); self }
+
+    pub fn is_hub_owner(&self, login: &str) -> bool { self.hub_owners.contains(&lc(login)) }
+
+    /// 114b a: a support.access is written by a hub owner, names a teamspace that exists and says why.
+    fn support_check(&self, ev: &Value) -> Result<Support, String> {
+        let login = author_login(ev).ok_or("support access needs a signed-in GitHub author")?;
+        if !self.is_hub_owner(&login) { return Err("only the hub owner can open support access to a teamspace".into()); }
+        let b = ev.get("body").cloned().unwrap_or(Value::Null);
+        let ts = s(&b, "teamspace");
+        if !self.teamspaces.contains_key(ts) { return Err(format!("teamspace {ts} doesn't exist")); }
+        let reason: String = s(&b, "reason").chars().take(500).collect();
+        if reason.chars().count() < 3 { return Err("say why you need support access (a few words): it is shown to the teamspace's owners".into()); }
+        let at = s(ev, "ts").to_string();
+        let start = iso_ms(&at).ok_or("support access needs the event's time (ts)")?;
+        Ok(Support { doc_id: String::new(), teamspace: ts.to_string(), by: login, reason, at, until_ms: start + SUPPORT_MS })
+    }
+
+    /// Is a support access by `login` to `ts` open at the clock these reads are judged at?
+    pub fn support_open(&self, login: &str, ts: &str) -> bool {
+        let Some(now) = self.now_ms else { return false };
+        let l = lc(login);
+        self.support.iter().any(|x| x.teamspace == ts && x.by == l
+            && iso_ms(&x.at).is_some_and(|start| start <= now) && now < x.until_ms)
+    }
+
+    /// The teamspace an event touches, if any: its own (teamspace kinds), the node's (node.share and node events).
+    pub fn space_of_event(&self, ev: &Value) -> Option<String> {
+        let kind = s(ev, "kind");
+        if kind == "node.share" {
+            let b = ev.get("body").cloned().unwrap_or(Value::Null);
+            let t = s(&b, "teamspace");
+            if !t.is_empty() && self.teamspaces.contains_key(t) { return Some(t.to_string()); }
+            return self.item_space.get(&node_of(ev)).cloned();
+        }
+        if KINDS.contains(&kind) { return Some(teamspace_of(ev)).filter(|t| !t.is_empty()); }
+        // BQ-1 step 4: a money event belongs to its teamspace (so support access can open it for reading)
+        if crate::money::is_money_kind(kind) { return Some(crate::money::teamspace_of(ev)).filter(|t| self.teamspaces.contains_key(t)); }
+        let n = subject(ev)?;
+        self.item_space.get(&n).cloned()
+    }
+
+    /// 114b a: the hub owner's reads. Teamspace events and nodes are his only where he is in the teamspace, where
+    /// they are shared with him, or while a support access he opened is running. None: teamspaces have no say.
+    pub fn visible_to_hub_owner(&self, login: &str, ev: &Value) -> Option<bool> {
+        let v = self.visible(login, ev)?;
+        if v { return Some(true); }
+        Some(self.space_of_event(ev).is_some_and(|ts| self.support_open(login, &ts)))
+    }
+
+    /// For a hub owner: the other teamspaces, by id and name only (never members or nodes), with any open support.
+    pub fn directory_for(&self, login: &str) -> Value {
+        if !self.is_hub_owner(login) { return json!([]); }
+        let l = lc(login);
+        json!(self.teamspaces.values().filter(|t| self.role_of(login, &t.id).is_none()).map(|t| {
+            let open = self.support.iter().filter(|x| x.teamspace == t.id && x.by == l && self.support_open(login, &t.id)).map(|x| x.until_ms).max();
+            json!({"id": t.id, "label": t.label, "support_until": open.map(crate::mcp::iso)})
+        }).collect::<Vec<_>>())
+    }
+
+    /// The support access log of a teamspace, for its owners only (newest last).
+    pub fn support_log_for(&self, login: &str, ts: &str) -> Option<Vec<Support>> {
+        (self.role_of(login, ts) == Some(Role::Owner)).then(|| self.support.iter().filter(|x| x.teamspace == ts).cloned().collect())
     }
 
     fn account_of_login(&self, login: &str) -> String {
@@ -212,9 +336,11 @@ impl State {
         let mine: Vec<Value> = self.teamspaces.values().filter_map(|t| {
             let r = self.role_of(login, &t.id);
             if r.is_none() && !self.invited(login, &t.id) { return None; }
-            Some(json!({"id": t.id, "label": t.label, "role": r, "invited": r.is_none(), "members": t.members, "invites": t.invites}))
+            let mut v = json!({"id": t.id, "label": t.label, "role": r, "invited": r.is_none(), "members": t.members, "invites": t.invites});
+            if let Some(log) = self.support_log_for(login, &t.id) { v["support_log"] = json!(log); }
+            Some(v)
         }).collect();
-        json!({"teamspaces": mine})
+        json!({"teamspaces": mine, "others": self.directory_for(login)})
     }
 
     /// May `login` read this node? None when no teamspace or share is involved (the access rules decide).
@@ -240,6 +366,10 @@ impl State {
             };
             let to_my_space = { let t = s(&b, "teamspace"); !t.is_empty() && self.role_of(login, t).is_some() };
             return Some(to_me || to_my_space || self.can_read(login, &node).unwrap_or(false));
+        }
+        if kind == "support.access" {
+            // 114b a: logged where the teamspace's owners see it (the hub owner sees his own as their author)
+            return Some(self.role_of(login, &teamspace_of(ev)) == Some(Role::Owner));
         }
         if KINDS.contains(&kind) {
             let ts = teamspace_of(ev);
@@ -519,5 +649,46 @@ mod tests {
         assert!(st.decide(&ev("rad", "teamspace.create", Some("TS-b"), json!({"id": "TS-b", "label": "b", "profile": "P-nowed"}))).unwrap().is_err());
         assert!(st.decide(&ev("rad", "teamspace.create", Some("TS-b"), json!({"id": "TS-b", "label": ""}))).unwrap().is_err());
         assert_eq!(st.decide(&ev("rad", "teamspace.create", Some("TS-b"), json!({"id": "TS-b", "label": "Rad's"}))), Some(Ok(())));
+    }
+
+    #[test]
+    fn iso_ms_reads_studio_timestamps() {
+        for ms in [0i64, 1_795_000_000_123, 951_782_400_000 /* 2000-02-29 */, 4_102_444_799_999] {
+            assert_eq!(iso_ms(&crate::mcp::iso(ms)), Some(ms));
+        }
+        assert_eq!(iso_ms("2026-11-22T12:00:00Z"), iso_ms("2026-11-22T12:00:00.000Z"));
+        assert_eq!(iso_ms("yesterday"), None);
+        assert_eq!(iso_ms("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn support_access_rules() {
+        let sup = |who: &str, ts: &str, reason: &str| ev(who, "support.access", Some(ts), json!({"teamspace": ts, "reason": reason}));
+        // rad owns TS-r; nowed (hub owner) is not in it
+        let st = world(vec![ev("rad", "teamspace.create", Some("TS-r"), json!({"id": "TS-r", "label": "Rad's"})),
+                            ev("rad", "item.create", None, json!({"id": "N-r", "teamspace": "TS-r"}))]);
+        assert_eq!(st.decide(&sup("nowed", "TS-r", "helping with an import")), Some(Ok(())));
+        assert!(st.decide(&sup("rad", "TS-a", "nosy")).unwrap().unwrap_err().contains("only the hub owner"));
+        assert!(st.decide(&sup("nowed", "TS-zz", "help")).unwrap().unwrap_err().contains("doesn't exist"));
+        assert!(st.decide(&sup("nowed", "TS-r", " ")).unwrap().unwrap_err().contains("say why"));
+        let about = ev("rad", "comment", Some("N-r"), json!({"text": "x"}));
+        let start = iso_ms("2026-11-22T12:00:00.000Z").unwrap();
+        // without one: the hub owner reads nothing in it; with one: only inside the 24 hours
+        let st0 = st.clone().with_now(start + 1);
+        assert_eq!(st0.visible_to_hub_owner("nowed", &about), Some(false));
+        let st = world(vec![ev("rad", "teamspace.create", Some("TS-r"), json!({"id": "TS-r", "label": "Rad's"})),
+                            ev("rad", "item.create", None, json!({"id": "N-r", "teamspace": "TS-r"})),
+                            sup("nowed", "TS-r", "helping with an import")]);
+        assert!(st.findings.is_empty(), "{:?}", st.findings);
+        assert_eq!(st.clone().with_now(start + 1).visible_to_hub_owner("nowed", &about), Some(true));
+        assert_eq!(st.clone().with_now(start + SUPPORT_MS).visible_to_hub_owner("nowed", &about), Some(false));
+        assert_eq!(st.visible_to_hub_owner("nowed", &about), Some(false), "no clock, no support access");
+        // the log: rad (owner of TS-r) sees it; gus, rad's... nobody else
+        assert_eq!(st.visible("rad", &sup("nowed", "TS-r", "x")), Some(true));
+        assert_eq!(st.visible("gus", &sup("nowed", "TS-r", "x")), Some(false));
+        assert_eq!(st.support_log_for("rad", "TS-r").map(|l| l.len()), Some(1));
+        assert_eq!(st.support_log_for("nowed", "TS-r"), None);
+        // outside teamspaces the hub owner still reads everything
+        assert_eq!(st.visible_to_hub_owner("nowed", &ev("rad", "comment", Some("D-001"), json!({}))), None);
     }
 }
