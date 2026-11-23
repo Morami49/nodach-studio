@@ -43,6 +43,13 @@ def record(executor: str, title: str, outcome: str, text: str, policy: str = "",
     ]
 
 
+def refusal(result: dict) -> str | None:
+    """The hub's reason when it refused a write_event (None when it was written or repeated)."""
+    if isinstance(result, dict) and result.get("refused"):
+        return str(result.get("error") or "refused")
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("executor")
@@ -60,7 +67,11 @@ def main(argv=None) -> int:
         return 0
     try:
         for w in record(a.executor, a.title, a.outcome, a.text, a.policy, a.undo, fields):
-            print(json.dumps(call_tool(url, token, "write_event", w)))
+            r = call_tool(url, token, "write_event", w)
+            print(json.dumps(r))
+            if refusal(r):
+                # F-ci-token-refused: five days of refused records went unnoticed as plain JSON lines in the log
+                print(f"::warning title=Run record refused::RUNS-{a.executor}: {refusal(r)}")
     except Exception as e:
         print(f"::warning title=Run record not written::{type(e).__name__}: {e}")
     return 0

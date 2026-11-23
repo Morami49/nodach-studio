@@ -17,6 +17,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with: {toolchain: stable, targets: wasm32-unknown-unknown}
       - run: cargo check --target wasm32-unknown-unknown
+      # F-ci-token-refused: the Worker's pure glue (token identity, hub log outcomes) is unit-tested natively
+      - run: cargo test
   actionmap:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: actionmap}}
@@ -35,6 +37,7 @@ jobs:
       - run: python scripts/test_chat_index.py
       - run: python scripts/test_policy.py
       - run: python scripts/test_run_record.py
+      - run: python scripts/test_smoke_hub.py
       - run: python scripts/test_change_intake.py
       - run: python scripts/test_check_no_seed_making.py
       - run: python scripts/test_check_reliability.py

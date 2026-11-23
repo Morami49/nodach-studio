@@ -1365,7 +1365,8 @@ impl Record {
                 let bearer = req.headers().get("authorization").ok().flatten();
                 let mut login = self.oauth.borrow().as_ref().unwrap().authenticate(bearer.as_deref(), now);
                 // F-46 follow-up: the deploy's smoke test drives /mcp with HUB_WRITE_TOKEN (already full-access via /push)
-                if login.is_none() && self.authorised(req) { login = Some("service:deploy-check".into()); }
+                // F-ci-token-refused: hub_core::access::SERVICE_LOGIN keeps the token's pre-A1 d rights (run records, policy reads)
+                if login.is_none() && self.authorised(req) { login = Some(token_login()); }
                 let Some(login) = login else {
                     self.log(now, "/mcp", "-", "401 sign-in needed", "-");
                     let h = Headers::new();
@@ -1545,16 +1546,7 @@ impl Record {
                         let mut b = self.hub.borrow_mut();
                         mcp::handle(b.as_mut().unwrap(), &login, &key, m, now)
                     };
-                    let outcome = match &r {
-                        _ if profile_mismatch => "profile mismatch".to_string(),
-                        Some(v) if v.pointer("/result/structuredContent/teamspace_refused") == Some(&serde_json::Value::Bool(true)) => "refused: teamspace".to_string(),
-                        None => "notification".to_string(),
-                        // a client probing for a method this hub does not offer (e.g. server/discover) is not a failure
-                        Some(v) if v.pointer("/error/code") == Some(&serde_json::json!(-32601)) => "not offered".to_string(),
-                        Some(v) if v.get("error").is_some() => format!("error {}", v.pointer("/error/code").cloned().unwrap_or_default()),
-                        Some(v) if v.pointer("/result/isError") == Some(&serde_json::Value::Bool(true)) => "tool error".to_string(),
-                        Some(_) => "ok".to_string(),
-                    };
+                    let outcome = mcp_log_outcome(r.as_ref(), profile_mismatch);
                     if tool != "hub_log" { self.log(now, "/mcp", &tool, &outcome, &login); }
                     if let Some(v) = r { replies.push(v); }
                 }
@@ -1658,5 +1650,75 @@ impl DurableObject for Record {
             }
             _ => Response::error("not found", 404),
         }
+    }
+}
+
+/// The login /mcp gives a caller holding HUB_WRITE_TOKEN (the CI executors); see hub_core::access::SERVICE_LOGIN.
+fn token_login() -> String { hub_core::access::SERVICE_LOGIN.to_string() }
+
+/// The hub log's outcome for one /mcp reply. F-ci-token-refused: a refused write is logged as "refused: access"
+/// (it was a bare "tool error" for five days, so nobody saw that every CI run record was being refused).
+fn mcp_log_outcome(r: Option<&serde_json::Value>, profile_mismatch: bool) -> String {
+    let t = serde_json::Value::Bool(true);
+    match r {
+        _ if profile_mismatch => "profile mismatch".to_string(),
+        Some(v) if v.pointer("/result/structuredContent/teamspace_refused") == Some(&t) => "refused: teamspace".to_string(),
+        Some(v) if v.pointer("/result/structuredContent/refused") == Some(&t) => "refused: access".to_string(),
+        None => "notification".to_string(),
+        // a client probing for a method this hub does not offer (e.g. server/discover) is not a failure
+        Some(v) if v.pointer("/error/code") == Some(&serde_json::json!(-32601)) => "not offered".to_string(),
+        Some(v) if v.get("error").is_some() => format!("error {}", v.pointer("/error/code").cloned().unwrap_or_default()),
+        Some(v) if v.pointer("/result/isError") == Some(&t) => "tool error".to_string(),
+        Some(_) => "ok".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! F-ci-token-refused (23 Nov): the Worker's own glue, run natively by ci (`cargo test` in hub/).
+    use super::*;
+    use hub_core::{access, mcp, Hub};
+    use foundation_core::event::KeyPair;
+    use serde_json::json;
+
+    fn call(hub: &mut Hub, login: &str, name: &str, args: serde_json::Value) -> serde_json::Value {
+        mcp::handle(hub, login, &KeyPair::from_seed([3; 32]), &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args}}), 1_763_900_000_000).unwrap()
+    }
+
+    #[test]
+    fn the_token_identity_is_the_one_hub_core_trusts() {
+        assert_eq!(token_login(), access::SERVICE_LOGIN);
+        assert!(access::is_service(&token_login()));
+    }
+
+    #[test]
+    fn a_ci_run_record_through_the_workers_identity_is_written_on_an_owned_hub() {
+        // what hub-deploy / hub-staging's "Record the run in Studio" step does against production
+        let mut hub = Hub::new();
+        hub.set_owners(vec!["Morami49".into()]);
+        for (i, args) in [
+            json!({"kind": "item.create", "item": null, "body": {"id": "RUNS-hub-staging", "type": "asset", "title": "Staging deploys"}}),
+            json!({"kind": "comment", "item": "RUNS-hub-staging", "body": {"text": "run", "outcome": "success"}}),
+            json!({"kind": "comment", "item": "RUNS-hub-deploy", "body": {"text": "run", "outcome": "success"}}),
+        ].into_iter().enumerate() {
+            let r = call(&mut hub, &token_login(), "write_event", args);
+            assert_eq!(mcp_log_outcome(Some(&r), false), "ok", "write {i}: {r}");
+        }
+    }
+
+    #[test]
+    fn refusals_are_logged_as_refusals_not_tool_errors() {
+        let mut hub = Hub::new();
+        hub.set_owners(vec!["Morami49".into()]);
+        let r = call(&mut hub, &token_login(), "write_event", json!({"kind": "access.grant", "item": null, "body": {"login": "x", "prefixes": ["D-"]}}));
+        assert_eq!(mcp_log_outcome(Some(&r), false), "refused: access");
+        let r = call(&mut hub, "stranger", "write_event", json!({"kind": "comment", "item": "RUNS-hub-deploy", "body": {"text": "x"}}));
+        assert_eq!(mcp_log_outcome(Some(&r), false), "refused: access");
+        assert_eq!(mcp_log_outcome(Some(&json!({"result": {"isError": true, "structuredContent": {"error": "body must be an object"}}})), false), "tool error");
+        assert_eq!(mcp_log_outcome(Some(&json!({"result": {"structuredContent": {"teamspace_refused": true, "refused": true}}})), false), "refused: teamspace");
+        assert_eq!(mcp_log_outcome(None, false), "notification");
+        assert_eq!(mcp_log_outcome(Some(&json!({"error": {"code": -32601}})), false), "not offered");
+        assert_eq!(mcp_log_outcome(Some(&json!({"result": {}})), true), "profile mismatch");
     }
 }

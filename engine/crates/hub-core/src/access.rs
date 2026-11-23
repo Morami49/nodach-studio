@@ -15,6 +15,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const KINDS: [&str; 4] = ["access.grant", "access.revoke", "access.invite", "access.uninvite"];
 
+/// The login the hub gives callers of /mcp that present HUB_WRITE_TOKEN instead of signing in: the CI executors
+/// (hub-deploy's smoke test, run records on RUNS-<executor>, policy reads of SET-policy-*, drift findings, watch,
+/// automerge, branch-cleanup, restore drill). It can never be a GitHub or email login (those can't contain ':').
+///
+/// F-ci-token-refused (23 Nov): A1 d (18 Nov) judged this login as a member with no spaces, so every run record was
+/// refused ("RUNS-hub-deploy isn't in a space you've been given") and every policy read saw an empty record. It keeps
+/// the rights it had before A1 d: it reads and writes ordinary events outside teamspaces like the hub owner, but it
+/// never grants access, changes profiles or teamspace roles, and teamspaces bind it like anyone else.
+pub const SERVICE_LOGIN: &str = "service:deploy-check";
+
+/// Is this the CI token's identity (see SERVICE_LOGIN)?
+pub fn is_service(login: &str) -> bool { lc(login) == SERVICE_LOGIN }
+
 #[derive(Default, Clone, Debug)]
 struct Grant {
     items: BTreeSet<String>,
@@ -110,9 +123,11 @@ impl State {
         if author_login(ev).as_deref() == Some(lc(login).as_str()) { return true; }
         // BQ-1 step 3: a usage notice is readable by the accounts whose queue it was raised for
         if crate::usage::queued_for(ev, login) { return true; }
-        if self.is_owner(login) {
+        if self.is_owner(login) || is_service(login) {
             // 114b a: the hub owner reads every teamspace he is in; any other only while a logged support access
             // (support.access, 24 h) he opened is running. Everything outside teamspaces stays his.
+            // F-ci-token-refused: the CI token reads like the hub owner outside teamspaces (it is in none, and can't
+            // open support access), so policy reads see SET-policy-* again.
             return self.teams.as_ref().and_then(|t| t.visible_to_hub_owner(login, ev)).unwrap_or(true);
         }
         if let Some(b) = self.teams.as_ref().and_then(|t| t.visible(login, ev)) { return b; }
@@ -139,6 +154,13 @@ impl State {
     /// May `login` write an event of `kind` about `item`? Grants are owner-only; members write only inside grants.
     pub fn check_write(&self, login: &str, kind: &str, item: Option<&str>) -> Result<(), String> {
         if self.is_owner(login) { return Ok(()); }
+        if is_service(login) {
+            // F-ci-token-refused: run records, findings and comments as before A1 d; never who-may-see-what
+            if KINDS.contains(&kind) || crate::profiles::KINDS.contains(&kind) || crate::teamspaces::KINDS.contains(&kind) {
+                return Err(format!("the CI token can't write {kind}: access, profile and teamspace events need a signed-in owner"));
+            }
+            return Ok(());
+        }
         if KINDS.contains(&kind) { return Err("only an owner can grant or revoke access".into()); }
         match item {
             Some(i) if self.granted(login, i) => Ok(()),
@@ -213,6 +235,24 @@ mod tests {
         assert_eq!(st.invited_logins().len(), 1, "a non-owner's invite doesn't count");
         let un = ev("morami49", "access.uninvite", None, json!({"email_sha256": h}));
         assert!(!State::fold(&owners, &[inv, un]).is_invited(&login));
+    }
+
+    #[test]
+    fn the_ci_token_keeps_its_pre_a1d_rights_outside_teamspaces() {
+        // F-ci-token-refused: RUNS-hub-deploy / RUNS-hub-staging records were refused from 18 Nov 22:14 on
+        let owners = vec!["Morami49".to_string()];
+        let st = State::fold(&owners, &[]);
+        assert!(!st.is_owner(SERVICE_LOGIN), "the token is not an owner (it can't grant)");
+        assert!(st.check_write(SERVICE_LOGIN, "item.create", Some("RUNS-hub-staging")).is_ok());
+        assert!(st.check_write(SERVICE_LOGIN, "comment", Some("RUNS-hub-deploy")).is_ok());
+        assert!(st.check_write(SERVICE_LOGIN, "comment", Some("DRIFT-SET-policy-hub-deploy")).is_ok());
+        assert!(st.visible(SERVICE_LOGIN, &ev("Morami49", "status", Some("SET-policy-hub-deploy"), json!({"value": "ask"}))));
+        for k in ["access.grant", "access.invite", "profile.create", "teamspace.create", "member.role", "node.share", "support.access"] {
+            assert!(st.check_write(SERVICE_LOGIN, k, None).is_err(), "{k} must stay owner-only");
+        }
+        // only the exact service identity; a look-alike login is an ordinary member
+        assert!(!is_service("service-deploy-check"));
+        assert!(st.check_write("service-deploy-check", "comment", Some("RUNS-hub-deploy")).is_err());
     }
 
     #[test]
