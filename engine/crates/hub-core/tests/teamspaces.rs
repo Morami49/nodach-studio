@@ -100,9 +100,12 @@ fn decision_114b_the_hub_owner_reads_only_teamspaces_he_is_in() {
     assert!(!seen.contains(&"N-margin".to_string()) && !seen.contains(&"TS-n".to_string()), "{seen:?}");
     assert!(seen.contains(&"N-plan".to_string()), "his own teamspace stays his");
     assert!(items_seen(&h, "nassar").contains(&"N-margin".to_string()));
-    // he is told it exists (id and name only), so he can ask for support access
+    // he is told it exists (117b a: by id only, no name), so he can ask for support access
     let v = h.teamspaces_at(at(NOW)).view_for("Morami49");
-    assert_eq!(v["others"], json!([{"id": "TS-n", "label": "Insydr internal", "support_until": null}]));
+    assert_eq!(v["others"], json!([{"id": "TS-n", "label": null, "support_until": null}]));
+    assert!(!v.to_string().contains("Insydr internal"), "the name stays out of everything the hub owner reads");
+    let (docs, _, _, _) = h.studio_events_for("Morami49", 0, usize::MAX, at(NOW));
+    assert!(!serde_json::to_string(&docs).unwrap().contains("Insydr internal"), "not in the record he reads either");
     assert!(v["teamspaces"].as_array().unwrap().iter().all(|t| t["id"] != "TS-n"));
     // nobody else gets a directory
     assert_eq!(h.teamspaces_at(at(NOW)).view_for("nassar")["others"], json!([]));
@@ -128,9 +131,14 @@ fn decision_114b_support_access_is_logged_shown_to_owners_and_ends_after_24_hour
     assert!(items_seen_at(&h, "Morami49", opened + teamspaces::SUPPORT_MS - 1).contains(&"N-margin".to_string()));
     assert!(!items_seen_at(&h, "Morami49", opened + teamspaces::SUPPORT_MS).contains(&"N-margin".to_string()), "closed after 24 h");
     assert!(!items_seen_at(&h, "Morami49", opened - 1).contains(&"N-margin".to_string()), "not before it was asked for");
-    // the directory says until when
+    // the directory says until when, and (117b a) names it now that support access is open
     let v = h.teamspaces_at(opened + 60_000).view_for("Morami49");
     assert_eq!(v["others"][0]["support_until"], json!("2026-11-23T12:00:30.000Z"));
+    assert_eq!(v["others"][0]["label"], json!("Insydr internal"));
+    let (docs, _, _, _) = h.studio_events_for("Morami49", 0, usize::MAX, opened + 60_000);
+    assert!(serde_json::to_string(&docs).unwrap().contains("Insydr internal"), "and the record he reads names it too");
+    let v = h.teamspaces_at(opened + teamspaces::SUPPORT_MS).view_for("Morami49");
+    assert_eq!(v["others"][0]["label"], json!(null), "ids only again after 24 hours");
     // the teamspace's owner sees the event in the record and in the support access log
     let (docs, _, _, _) = h.studio_events_for("nassar", 0, usize::MAX, at(NOW));
     assert!(docs.iter().any(|d| d["event"]["kind"] == "support.access"), "the teamspace's owner sees it");

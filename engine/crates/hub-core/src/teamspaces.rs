@@ -38,7 +38,12 @@
 //!                                                     24 hours from the event's ts (SUPPORT_MS), then closes by itself.
 //! The event is shown to that teamspace's owners (their "Support access log"), so access is never silent. It grants
 //! reads only: writes still need a role there (114a). The hub owner sees a directory of other teamspaces (id and
-//! name only, `directory_for`) so he can ask; nothing inside them.
+//! id only, `directory_for`) so he can ask; nothing inside them. Decision 117b (a): not even the name: a teamspace's
+//! label reaches him only while a support access he opened is running.
+//!
+//! Teamspace canvas (B-teamspace-graph, 23 Nov): "Open teamspace" opens the ActionMap focused on the teamspace. Positions
+//! dragged there are `canvas.layout {board: "ts:<id>", moves}` events; they belong to that teamspace (`layout_space`):
+//! owners and members read and save them, guests don't (they would carry the ids of nodes not shared with them).
 //! Rollback: revert the PR. The events stay on the record (append-only) and simply stop meaning anything.
 use crate::profiles;
 use serde::Serialize;
@@ -247,6 +252,7 @@ impl State {
     /// The teamspace an event touches, if any: its own (teamspace kinds), the node's (node.share and node events).
     pub fn space_of_event(&self, ev: &Value) -> Option<String> {
         let kind = s(ev, "kind");
+        if let Some(ts) = self.layout_space(ev) { return Some(ts); }
         if kind == "node.share" {
             let b = ev.get("body").cloned().unwrap_or(Value::Null);
             let t = s(&b, "teamspace");
@@ -266,13 +272,23 @@ impl State {
         Some(self.space_of_event(ev).is_some_and(|ts| self.support_open(login, &ts)))
     }
 
-    /// For a hub owner: the other teamspaces, by id and name only (never members or nodes), with any open support.
+    /// The teamspace a teamspace-canvas layout event belongs to: `canvas.layout` on board `ts:<id>` of a teamspace
+    /// that exists. Its moves name the nodes on that canvas, so it is read like the teamspace's own nodes.
+    pub fn layout_space(&self, ev: &Value) -> Option<String> {
+        if s(ev, "kind") != "canvas.layout" { return None; }
+        let b = ev.get("body").cloned().unwrap_or(Value::Null);
+        let ts = s(&b, "board").strip_prefix("ts:")?;
+        self.teamspaces.contains_key(ts).then(|| ts.to_string())
+    }
+
+    /// For a hub owner: the other teamspaces, by id only (never members or nodes), with any open support. 117b a: the
+    /// name (label) comes only while a support access he opened is running; before that it is null.
     pub fn directory_for(&self, login: &str) -> Value {
         if !self.is_hub_owner(login) { return json!([]); }
         let l = lc(login);
         json!(self.teamspaces.values().filter(|t| self.role_of(login, &t.id).is_none()).map(|t| {
             let open = self.support.iter().filter(|x| x.teamspace == t.id && x.by == l && self.support_open(login, &t.id)).map(|x| x.until_ms).max();
-            json!({"id": t.id, "label": t.label, "support_until": open.map(crate::mcp::iso)})
+            json!({"id": t.id, "label": open.map(|_| t.label.clone()), "support_until": open.map(crate::mcp::iso)})
         }).collect::<Vec<_>>())
     }
 
@@ -363,6 +379,10 @@ impl State {
             let to_my_space = { let t = s(&b, "teamspace"); !t.is_empty() && self.role_of(login, t).is_some() };
             return Some(to_me || to_my_space || self.can_read(login, &node).unwrap_or(false));
         }
+        if let Some(ts) = self.layout_space(ev) {
+            // B-teamspace-graph: a teamspace canvas's positions are for its owners and members
+            return Some(matches!(self.role_of(login, &ts), Some(Role::Owner | Role::Member)));
+        }
         if kind == "support.access" {
             // 114b a: logged where the teamspace's owners see it (the hub owner sees his own as their author)
             return Some(self.role_of(login, &teamspace_of(ev)) == Some(Role::Owner));
@@ -383,10 +403,17 @@ impl State {
         let kind = s(ev, "kind");
         if KINDS.contains(&kind) { return Some(self.check(ev)); }
         let Some(login) = author_login(ev) else {
-            // not a GitHub author: only refuse when it touches a teamspace node
+            // not a GitHub author: only refuse when it touches a teamspace node or a teamspace canvas
+            if let Some(ts) = self.layout_space(ev) { return Some(Err(format!("positions on {ts}'s canvas need a signed-in author"))); }
             let n = subject(ev)?;
             return self.item_space.contains_key(&n).then(|| Err("writes into a teamspace need a signed-in author".into()));
         };
+        if let Some(ts) = self.layout_space(ev) {
+            return Some(match self.role_of(&login, &ts) {
+                Some(Role::Owner | Role::Member) => Ok(()),
+                _ => Err(format!("only owners and members save positions on {ts}'s canvas; yours stay on this screen. Nothing was saved.")),
+            });
+        }
         if kind == "item.create" {
             let ts = ev.pointer("/body/teamspace").and_then(Value::as_str).map(str::trim).unwrap_or("");
             if !ts.is_empty() {
@@ -684,5 +711,42 @@ mod tests {
         assert_eq!(st.support_log_for("nowed", "TS-r"), None);
         // outside teamspaces the hub owner still reads everything
         assert_eq!(st.visible_to_hub_owner("nowed", &ev("rad", "comment", Some("D-001"), json!({}))), None);
+    }
+
+    #[test]
+    fn decision_117b_the_directory_names_a_teamspace_only_while_support_access_runs() {
+        let start = iso_ms("2026-11-22T12:00:00.000Z").unwrap();
+        let base = vec![ev("rad", "teamspace.create", Some("TS-r"), json!({"id": "TS-r", "label": "Rad's secret project"}))];
+        let st = world(base.clone()).with_now(start + 1);
+        let d = st.directory_for("nowed");
+        assert_eq!(d, json!([{"id": "TS-r", "label": null, "support_until": null}]), "ids only before support access");
+        assert!(!d.to_string().contains("secret"));
+        let mut with_sup = base.clone();
+        with_sup.push(ev("nowed", "support.access", Some("TS-r"), json!({"teamspace": "TS-r", "reason": "helping with an import"})));
+        let st = world(with_sup.clone()).with_now(start + 1);
+        assert_eq!(st.directory_for("nowed")[0]["label"], json!("Rad's secret project"), "named while support access runs");
+        let st = world(with_sup).with_now(start + SUPPORT_MS);
+        assert_eq!(st.directory_for("nowed")[0]["label"], Value::Null, "ids only again once it has closed");
+        // teamspaces he is in are not in the directory at all (he has them, with names, in view_for)
+        assert!(world(vec![]).with_now(start).directory_for("nowed").as_array().unwrap().iter().all(|t| t["id"] != "TS-a"));
+    }
+
+    #[test]
+    fn a_teamspace_canvas_layout_belongs_to_the_teamspace() {
+        let st = world(vec![]);
+        let lay = |who: &str, board: &str| ev(who, "canvas.layout", None, json!({"board": board, "moves": {"N-in": [10, 20]}}));
+        // owners and members save and read it; guests and outsiders do neither
+        assert_eq!(st.decide(&lay("nowed", "ts:TS-a")), Some(Ok(())));
+        assert_eq!(st.decide(&lay("rad", "ts:TS-a")), Some(Ok(())));
+        assert!(st.decide(&lay("gus", "ts:TS-a")).unwrap().unwrap_err().contains("only owners and members"));
+        assert!(st.decide(&lay("eve", "ts:TS-a")).unwrap().is_err());
+        assert_eq!(st.visible("rad", &lay("nowed", "ts:TS-a")), Some(true));
+        assert_eq!(st.visible("gus", &lay("nowed", "ts:TS-a")), Some(false), "it names nodes not shared with guests");
+        assert_eq!(st.visible("eve", &lay("nowed", "ts:TS-a")), Some(false));
+        // the main board, and boards of teamspaces that don't exist, are left to the access rules
+        assert_eq!(st.decide(&lay("eve", "main")), None);
+        assert_eq!(st.visible("eve", &lay("nowed", "main")), None);
+        assert_eq!(st.layout_space(&lay("nowed", "ts:TS-zz")), None);
+        assert_eq!(st.space_of_event(&lay("nowed", "ts:TS-a")).as_deref(), Some("TS-a"));
     }
 }

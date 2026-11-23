@@ -813,6 +813,9 @@ function buildFilters(){
     cy.nodes().forEach(n => n.style("opacity", !q || (n.data("label")+" "+n.id()).toLowerCase().includes(q) ? 1 : .15)); };
 }
 function renderMap(relayout){
+  // B-teamspace-graph: a teamspace opened on the map stays focused while you are in Teamspaces; Private's ActionMap is the whole graph
+  if (S.tsFocus && ((S.section !== "teams" && !S.tsKeep) || !tsCanvasOk())) tsUnfocus();
+  if (S.tsFocus && tsCanvasOk()) return renderTsFocus(relayout);
   if (window.NodachCanvas && !S.classicMap) return renderCanvas(relayout);
   $("#canvas").hidden = true; $("#cy").hidden = false;
   if (!window.cytoscape){ $("#cy").innerHTML = '<p class="empty" style="padding:60px 16px">The map couldn\'t load. Use the List view; everything is there.</p>'; return; }
@@ -1156,6 +1159,7 @@ function stepWords(st){
   return st.kind === "note" ? "Note: " + (st.text || "") : st.kind === "stroke" ? `Drew around ${what}${part}` : `Pointed at ${what}${part}`;
 }
 function renderInspector(){
+  if (!S.sel && S.tsPanel && S.tsFocus) return renderTsPanel();   // B-teamspace-graph: a teamspace, profile or money node
   const it = F.items.get(S.sel);
   $("#inspEmpty").hidden = !!it; $("#insp").hidden = !it; if (!it) return;
   const back = [...F.items.values()].filter(x => (x.refs||[]).includes(it.id)).map(x=>x.id);
@@ -2349,7 +2353,7 @@ function renderOneSpace(T, t, me, can){
   const lvl = n => { const m = T.shares.get(n); return m ? [...m].map(([to, l]) => `${to === t.id ? "this teamspace" : to}: ${l}`).join(", ") : ""; };
   const row = (it, i, extra) => `<li data-node="${esc(it.id)}"><span class="n">${i + 1}</span><span><b>${esc(it.title || it.id)}</b> <span class="mute mono">${esc(codeOf(it.id) || it.id)}</span>${extra || ""} <button data-tsgo="${esc(it.id)}">Open</button></span></li>`;
   const shareable = inTs.filter(n => owner || T.itemAuthor.get(n) === me);
-  return `<div class="row"><button id="tsBack">← All teamspaces</button></div>
+  return `<div class="row"><button id="tsBack">← All teamspaces</button>${tsCanvasOk() ? `<button id="tsMapView" title="The teamspace's area of the graph">Open on the map</button>` : ""}<span class="mute" style="font-size:12px">List view</span></div>
   <div class="card" data-teamspace="${esc(t.id)}">
     <h3 id="tsTitle" tabindex="-1">${esc(t.label)} <span class="mute mono" style="font-size:12px">${esc(t.id)} · ${role ? `you are ${esc(role)}` : `support access until ${esc(tsTime(support))}, read only`}</span></h3>
     ${support ? `<p class="mute" style="margin:0" id="tsSupportNote">You are reading this teamspace through a logged support access. Its owners see it in their Support access log. It closes by itself after 24 hours; you can't change anything here.</p>` : ""}
@@ -2373,7 +2377,10 @@ function renderOneSpace(T, t, me, can){
       ${can && role ? `<button id="tsLeave">Leave teamspace</button>` : ""}<span class="mute" id="tsOneNote" role="status"></span></div>
   </div>`;
 }
-function openSpace(id){ S.ts = id; S.tsJump = true; renderSpaces(); }
+function openSpace(id, mode){
+  // B-teamspace-graph: Open goes to the teamspace's area of the graph; List view (this page) where the canvas can't load or was chosen
+  if ((mode || tsPref()) === "map" && tsCanvasOk() && (TEAMS || foldTeams(S.events)).spaces.has(id)) return focusSpace(id);
+  S.ts = id; S.tsJump = true; if (S.view !== "spaces") show("spaces"); else renderSpaces(); }
 async function loadTsDir(force){
   // 114b a: the hub tells its owner which other teamspaces exist (id and name only) and any support access he has open
   if (!S.owner || !tsHere()) { S.tsDir = null; return; }
@@ -2393,9 +2400,9 @@ function renderOthers(T, me, can){
   if (!S.tsDir){ el.innerHTML = ""; loadTsDir().then(() => { if (S.view === "spaces" && S.tsDir && !S.ts) renderOthers(TEAMS || foldTeams(S.events), myLogin(), tsHere() && writable()); }); return; }
   const others = S.tsDir.others.filter(o => !T.roleOf(me, o.id));
   el.innerHTML = `<div class="card"><h3>Other teamspaces on this hub</h3>
-    <p class="mute" style="margin:0;font-size:12px">As the hub owner you see only their names. To read one, request support access: it is logged, shown to that teamspace's owners and closes by itself after 24 hours. It never lets you change anything there.</p>
+    <p class="mute" style="margin:0;font-size:12px">As the hub owner you see only their ids, not their names (117b a). To read one, request support access: it is logged, shown to that teamspace's owners and closes by itself after 24 hours. It never lets you change anything there.</p>
     <ul class="log" id="tsOtherList">${others.length ? others.map((o, i) => { const open = T.supportOpen(me, o.id) || (o.support_until && Date.parse(o.support_until));
-      return `<li data-other="${esc(o.id)}"><span class="n">${i + 1}</span><span><b>${esc(o.label || o.id)}</b> <span class="mute mono">${esc(o.id)}</span> ` +
+      return `<li data-other="${esc(o.id)}"><span class="n">${i + 1}</span><span>${open && o.label ? `<b>${esc(o.label)}</b> ` : ""}<b class="mono">${esc(o.id)}</b> ` +
         (open ? `<span class="mute">support access until ${esc(tsTime(open))}</span> <button data-tsopen="${esc(o.id)}">Open</button>`
           : `<button data-tssupport="${esc(o.id)}" ${can ? "" : "disabled"}>Request support access</button>
              <span class="row" data-tssupform="${esc(o.id)}" hidden style="margin-top:6px"><label for="tsSupWhy-${esc(o.id)}">Reason</label>
@@ -2431,6 +2438,7 @@ function renderSpaces(){
   const after = id => { if (id) refreshView(); return id; };
   $("#tsList").querySelectorAll("[data-tsopen]").forEach(b => b.onclick = () => openSpace(b.dataset.tsopen));
   const back = $("#tsBack"); if (back) back.onclick = () => { S.ts = null; renderSpaces(); window.scrollTo?.(0, 0); };
+  const onMap = $("#tsMapView"); if (onMap) onMap.onclick = () => { store.set("ts.view", "map"); openSpace(S.ts, "map"); };
   document.querySelectorAll("[data-tsgo]").forEach(b => b.onclick = () => { show("map"); select(b.dataset.tsgo); });
   document.querySelectorAll("[data-tsjoin]").forEach(b => b.onclick = async () => {
     const ts = b.dataset.tsjoin; if (await write("member.join", ts, {teamspace:ts, profile:b.dataset.prof})){ toast(`You joined ${T.spaces.get(ts)?.label || ts}.`); refresh(); openSpace(ts); } });
@@ -2507,6 +2515,210 @@ async function downloadTeamspace(id){
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   toast(`Exported ${data.nodes.length} node${data.nodes.length === 1 ? "" : "s"} and ${data.events.length} teamspace events.`);
   return data;
+}
+
+/* ---------------------------------------------------------------- teamspace on the map (B-teamspace-graph, 23 Nov)
+   "Open teamspace" opens the ActionMap focused on that teamspace's area of the one graph (88a, 99a): the teamspace at
+   the centre, its members as profile nodes linked by their role (owner, member, guest; invitations dashed), the nodes
+   created in it, the nodes shared into it and its Money rules node. Depth starts at 1 hop; clicking a node opens one
+   more hop (96a), up to two ceilings: the lens (TS_MAX_HOPS from the centre, never a private node) and permissions
+   (only what the hub let this page read, F.items). Layout is hybrid (88c): a new node takes the next free slot, a node
+   once placed never moves; dragged positions are canvas.layout events on board "ts:<id>", which the hub keeps to the
+   teamspace's owners and members (hub_core::teamspaces::layout_space). The teamspace's own page stays as List view. */
+const TS_MAX_HOPS = 3;
+S.tsFocus = null;   // {ts, open: canvas ids clicked open, sel: the selected canvas id}
+S.tsPanel = null;   // {ts, id}: a teamspace, profile or money node shown in the detail panel
+S.tsAuto = {};      // ts → canvas id → {x, y} auto-placed this session (placed nodes never move)
+const tsPref = () => store.get("ts.view") === "list" ? "list" : "map";
+const tsCanvasOk = () => !!window.NodachCanvas && !S.classicMap;
+const tsProf = pid => "prof:" + pid;
+function focusSpace(ts){
+  S.tsFocus = {ts, open:new Set(), sel:null}; S.tsPanel = null; S.sel = null; S.ts = null;
+  const one = $("#tsOne"); if (one) one.innerHTML = "";
+  S.tsKeep = true; try { show("map"); } finally { S.tsKeep = false; }
+  navSection("teams"); renderMap(true);
+}
+function tsUnfocus(){
+  S.tsFocus = null; S.tsPanel = null; $("#tsBar")?.remove(); $("#filters").hidden = false;
+}
+function tsSaved(ts){
+  const pos = {}, board = "ts:" + ts;
+  for (const e of F.evs){ const b = e.body || {};
+    if (e.kind === "canvas.layout" && b.board === board)
+      for (const [id, xy] of Object.entries(b.moves || {})) if (Array.isArray(xy) && isFinite(xy[0]) && isFinite(xy[1])) pos[id] = {x:+xy[0], y:+xy[1]}; }
+  return pos;
+}
+function tsProfileOrder(ts, t){
+  const seen = [];
+  for (const e of [...S.events].sort(byTsThenId)){ const b = e.body || {};
+    if (!TEAM_KINDS.includes(e.kind) || e.kind === "node.share" || teamOfEvent(e) !== ts) continue;
+    const pid = b.profile || (e.kind === "teamspace.create" || e.kind === "member.join" ? e.author?.profile || personalOf(loginOf(e.author?.id)) : "");
+    if (pid && !seen.includes(pid)) seen.push(pid); }
+  for (const pid of [...t.members.keys(), ...t.invites.keys()]) if (!seen.includes(pid)) seen.push(pid);
+  return seen;
+}
+function tsItemData(it){ const c = codeOf(it.id); return {label:(c && c !== it.id ? c + " · " : "") + it.id, title:(it.title || "").slice(0, 90), type:typeKey(it.type)}; }
+/* The teamspace's area of the graph as this person may see it: {nodes, edges, hidden}. Pure: reads TEAMS and F only. */
+function tsGraph(ts, open){
+  const T = TEAMS || foldTeams(S.events), t = T.spaces.get(ts); if (!t) return null;
+  const me = myLogin(), nodes = new Map(), edges = new Map(), rels = canvasLayout().rels;
+  const readable = id => { const it = F.items.get(id); return !!it && !it.private; };
+  const addN = (id, n) => { if (!nodes.has(id)) nodes.set(id, {id, ...n}); return nodes.get(id); };
+  const addE = (source, target, label, extra) => { const id = source + ">" + target; if (!edges.has(id) && !edges.has(target + ">" + source)) edges.set(id, {id, source, target, label, ...(extra || {})}); };
+  addN(ts, {kind:"teamspace", hop:0, label:"TEAMSPACE · " + ts, title:t.label, type:"lead"});
+  for (const pid of tsProfileOrder(ts, t)){
+    const r = t.members.get(pid), inv = t.invites.get(pid); if (!r && !inv) continue;
+    addN(tsProf(pid), {kind:"profile", hop:1, pid, role:r || null, invited:!r, type:"story", label:"PROFILE · " + pid,
+      title:(r ? r : "invited as " + inv) + (T.acctOf(pid) === me ? " · you" : "")});
+    addE(tsProf(pid), ts, r || "invited · " + inv, {role:!!r, dashed:!r});
+  }
+  const inTs = [...T.itemSpace].filter(([, s]) => s === ts).map(([n]) => n);
+  for (const n of inTs){ const it = F.items.get(n); if (!it) continue;
+    if (it.meta?.money_rules){ addN(n, {kind:"money", hop:1, item:n, ...tsItemData(it), label:"MONEY · " + (codeOf(n) || n), type:"setting"}); addE(ts, n, "money rules"); continue; }
+    if (it.private) continue;
+    addN(n, {kind:"node", hop:1, item:n, ...tsItemData(it)}); addE(ts, n, "in"); }
+  for (const [n, m] of T.shares) if (m.has(ts) && T.itemSpace.get(n) !== ts && readable(n)){
+    addN(n, {kind:"node", hop:1, item:n, shared:m.get(ts), ...tsItemData(F.items.get(n))}); addE(n, ts, "shared · " + m.get(ts)); }
+  // one hop out of a node: its links (both ways) to nodes this page may read; a profile: the nodes it created here
+  const around = n => {
+    if (n.kind === "profile"){ const acct = T.acctOf(n.pid);
+      return inTs.filter(id => readable(id) && T.itemAuthor.get(id) === acct).map(id => ({id, source:n.id, target:id, label:"created"})); }
+    if (!n.item) return [];
+    const it = F.items.get(n.item), out = [];
+    for (const r of it?.refs || []) if (readable(r)) out.push({id:r, source:n.item, target:r, label:REL_LABEL[rels[n.item + ">" + r]] || "links"});
+    for (const x of F.items.values()) if ((x.refs || []).includes(n.item) && readable(x.id)) out.push({id:x.id, source:x.id, target:n.item, label:REL_LABEL[rels[x.id + ">" + n.item]] || "links"});
+    return out;
+  };
+  const opened = open || S.tsFocus?.open || new Set();
+  for (let grew = true; grew;){ grew = false;
+    for (const id of opened){ const n = nodes.get(id); if (!n || n.expanded || n.hop >= TS_MAX_HOPS) continue;
+      n.expanded = grew = true;
+      for (const x of around(n)){
+        if (!nodes.has(x.id)){ const it = F.items.get(x.id); addN(x.id, {kind:"node", hop:n.hop + 1, item:x.id, from:n.id, ...tsItemData(it)}); }
+        addE(x.source, x.target, x.label); } } }
+  for (const n of nodes.values()) n.more = n.expanded || n.hop >= TS_MAX_HOPS ? 0 : around(n).filter(x => !nodes.has(x.id) || !edges.has(x.source + ">" + x.target) && !edges.has(x.target + ">" + x.source)).length;
+  const hidden = inTs.filter(n => !F.items.has(n)).length;
+  return {ts, t, nodes:[...nodes.values()], edges:[...edges.values()], hidden, depth:Math.max(1, ...[...nodes.values()].map(n => n.hop))};
+}
+function tsPositions(ts, g){
+  const saved = tsSaved(ts), auto = S.tsAuto[ts] || (S.tsAuto[ts] = {}), pos = {}, taken = new Set();
+  const key = p => Math.round(p.x / 30) + "," + Math.round(p.y / 30);
+  for (const n of g.nodes){ const p = saved[n.id] || auto[n.id]; if (p){ pos[n.id] = p; taken.add(key(p)); } }
+  const free = (x, y) => { let p = {x, y}; while (taken.has(key(p))) p = {x, y:p.y + 90}; taken.add(key(p)); return p; };
+  for (const n of g.nodes){ if (pos[n.id]) continue;
+    const from = n.from && pos[n.from];
+    const p = n.kind === "teamspace" ? free(0, 0) : n.kind === "profile" ? free(-340, 0) : n.kind === "money" ? free(0, 180)
+      : from ? free(from.x + (from.x < 0 ? -300 : 300), from.y) : n.shared ? free(360, 540) : free(360, 0);
+    pos[n.id] = auto[n.id] = p; }
+  return pos;
+}
+function tsBar(g){
+  let bar = $("#tsBar");
+  if (!bar){ bar = document.createElement("div"); bar.id = "tsBar"; bar.className = "mapbar"; bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "Teamspace on the map"); bar.dataset.nodachPart = "map.teamspace"; $("#v-map").prepend(bar); }
+  $("#filters").hidden = true;
+  const opened = S.tsFocus.open.size;
+  bar.innerHTML = `<span class="chip"><b>${esc(g.t.label)}</b>&nbsp;<span class="mono mute">${esc(g.ts)}</span></span>
+    <span class="chip mute" id="tsDepth">${g.depth} hop${g.depth === 1 ? "" : "s"}${opened ? ` · ${opened} opened` : ""} · up to ${TS_MAX_HOPS}${g.hidden ? ` · ${g.hidden} not shared with you` : ""}</span>
+    <button id="tsBarList" title="The same teamspace as a page: members, money and nodes, for keyboard and screen readers">List view</button>
+    ${opened ? `<button id="tsBarCollapse">Back to 1 hop</button>` : ""}<button id="tsBarAll" title="Leave the teamspace: the whole graph">Whole graph</button>`;
+  $("#tsBarList").onclick = () => { const ts = S.tsFocus.ts; store.set("ts.view", "list"); tsUnfocus(); openSpace(ts, "list"); };
+  const c = $("#tsBarCollapse"); if (c) c.onclick = () => { S.tsFocus.open.clear(); renderMap(false); };
+  $("#tsBarAll").onclick = () => { tsUnfocus(); show("map"); renderMap(true); };
+}
+function renderTsFocus(relayout){
+  const f = S.tsFocus, g = tsGraph(f.ts);
+  if (!g){ tsUnfocus(); return renderMap(relayout); }   // the teamspace went away or isn't readable any more
+  const el = $("#canvas"); el.hidden = false; $("#cy").hidden = true; tsBar(g);
+  const pos = tsPositions(f.ts, g);
+  const nodes = g.nodes.map(n => ({id:n.id, type:"item", position:pos[n.id], selected:n.id === f.sel,
+    data:{type:n.type, label:n.label + (n.more ? ` · +${n.more}` : ""), title:n.title, n:n.kind === "teamspace" ? 1 : 0, open:!!n.invited, closed:false, priv:false, dim:false}}));
+  const edges = g.edges.map(e => ({id:e.id, source:e.source, target:e.target, label:e.label, markerEnd:{type:"arrowclosed"},
+    style:{stroke:e.role ? "var(--accent)" : "var(--mute)", strokeWidth:e.role ? 1.5 : 1, strokeDasharray:e.dashed ? "6 3" : undefined},
+    labelStyle:{fontSize:10, fill:"var(--ink)"}, labelBgStyle:{fill:"var(--surface)"}}));
+  if (relayout) canvasFitKey++;
+  const none = () => {};
+  window.NodachCanvas.render(el, {nodes, edges, sel:f.sel, can:true, focus:"Click a node to see its controls and open one more hop · drag to arrange",
+    dark:document.documentElement.dataset.theme === "dark", fit:!!relayout, fitKey:canvasFitKey, onSelect:tsSelect, onMove:moves => tsMove(f.ts, moves),
+    onConnect:none, onFrame:none, isStep:() => false, onWire:none, onMixed:none, onStep:none, onAddStep:none, onTemplate:none, onStepMove:none});
+}
+function tsSelect(id){
+  const f = S.tsFocus; if (!f) return;
+  if (!id){ f.sel = null; renderMap(false); return; }   // a click on empty canvas keeps the panel as it is
+  const g = tsGraph(f.ts), n = g?.nodes.find(x => x.id === id); if (!n) return;
+  f.sel = id;
+  if (n.more && n.kind !== "teamspace") f.open.add(id);   // 96a: a click opens one more hop, inside the ceilings
+  $("#inspector").classList.remove("closed");
+  if (n.kind === "node"){ S.tsPanel = null; select(n.item); return; }   // the node's own history, links and answers
+  S.sel = null; S.selStep = null; S.tsPanel = {ts:f.ts, id}; renderInspector(); renderMap(false);
+}
+async function tsMove(ts, moves){
+  const auto = S.tsAuto[ts] || (S.tsAuto[ts] = {});
+  for (const [id, xy] of Object.entries(moves)) auto[id] = {x:xy[0], y:xy[1]};   // stays where it was put on this screen either way
+  const T = TEAMS || foldTeams(S.events), r = T.roleOf(myLogin(), ts);
+  if (!(r === "owner" || r === "member") || !writable()){
+    if (!S.tsMoveSaid){ S.tsMoveSaid = true; toast("Only owners and members save positions on this teamspace's map; yours stay on this screen."); }
+    return null; }
+  return write("canvas.layout", null, {board:"ts:" + ts, moves});
+}
+function renderTsPanel(){
+  const {ts, id} = S.tsPanel, T = TEAMS || foldTeams(S.events), t = T.spaces.get(ts), box = $("#insp");
+  $("#inspEmpty").hidden = true; box.hidden = false;
+  if (!t){ box.innerHTML = `<p class="mute">This teamspace isn't readable any more.</p>`; return; }
+  const me = myLogin(), role = T.roleOf(me, ts), owner = role === "owner", can = tsHere() && writable(), support = !role && T.supportOpen(me, ts);
+  const opt = (vals, cur) => vals.map(v => `<option value="${v}"${v === cur ? " selected" : ""}>${v}</option>`).join("");
+  const head = (eyebrow, title) => `<div class="row"><span class="mono mute">${eyebrow}</span><span class="spacer"></span><button id="tscClose" aria-label="Close">✕</button></div>
+    <h3 id="tscTitle" tabindex="-1" style="margin:4px 0 6px">${title}</h3>`;
+  const you = role ? `You are ${esc(role)} here.` : support ? `Support access until ${esc(tsTime(support))}, read only.` : "";
+  let html;
+  if (id === ts){
+    const members = [...t.members.keys()];
+    html = head(`TEAMSPACE · ${esc(ts)}`, esc(t.label)) +
+      `<p class="mute" style="margin:0 0 8px">${you} ${t.members.size} member${t.members.size === 1 ? "" : "s"}${t.invites.size ? `, ${t.invites.size} invited` : ""}.</p>` +
+      (owner && can ? `<h4 style="margin:10px 0 4px">Invite</h4>
+        <div class="row"><label for="tscInvProf">Profile</label><input id="tscInvProf" class="mono" placeholder="P-their-login" style="width:150px">
+          <label for="tscInvRole">as</label><select id="tscInvRole">${opt(["member","guest","owner"], "member")}</select><button id="tscInvite">Invite</button></div>
+        <h4 style="margin:10px 0 4px">Change role</h4>
+        <div class="row"><label for="tscRoleWho">Member</label><select id="tscRoleWho">${members.map(p => `<option value="${esc(p)}">${esc(p)} (${esc(t.members.get(p))})</option>`).join("")}</select>
+          <label for="tscRoleTo">to</label><select id="tscRoleTo">${opt(ROLE_OPTS, "member")}</select><button id="tscRole">Change role</button></div>`
+        : `<p class="mute">Only owners invite people and change roles.</p>`) +
+      (owner ? `<div class="row" style="margin-top:10px"><button class="primary" id="tscExport" title="Everything members created here, with full history; files as references; nodes shared in as links">Export teamspace</button></div>` + supportLog(T, t) : "");
+  } else if (id.startsWith("prof:")){
+    const pid = id.slice(5), r = t.members.get(pid), inv = t.invites.get(pid), mine = T.acctOf(pid) === me;
+    const made = [...T.itemSpace].filter(([n, s]) => s === ts && T.itemAuthor.get(n) === T.acctOf(pid) && F.items.has(n)).length;
+    html = head(`PROFILE · ${esc(pid)}`, `${esc(pid)}${mine ? ` <span class="mute">(you)</span>` : ""}`) +
+      `<p style="margin:0 0 8px">Role in ${esc(t.label)}: <b id="tscMemRoleNow">${r ? esc(r) : `invited as ${esc(inv || "")}, not joined yet`}</b> · created ${made} node${made === 1 ? "" : "s"} you can read here.</p>` +
+      (owner && can ? (r ? `<div class="row"><label for="tscMemRole">Role</label><select id="tscMemRole">${opt(ROLE_OPTS, r)}</select><button id="tscMemRoleGo">Change role</button></div>` : "") +
+          (!mine || !r ? `<div class="row" style="margin-top:6px"><button id="tscMemRemove">${r ? "Remove from teamspace" : "Cancel invite"}</button></div>` : "")
+        : `<p class="mute">Only owners change roles.</p>`);
+  } else {
+    const m = F.items.get(id);
+    html = head(`MONEY · ${esc(codeOf(id) || id)}`, esc(m?.title || id)) +
+      `<p class="mute" style="margin:0 0 8px">This teamspace's money rules live in this node, as versions.</p>
+       <div class="row"><button class="primary" id="tscOpenMoney">Open Money</button><button id="tscMoneyNode">Its history</button></div>`;
+  }
+  box.innerHTML = `<div class="stack" data-nodach-part="item.teamspace">${html}
+    <div class="row" style="margin-top:12px"><button id="tscList" title="The same teamspace as a page, for keyboard and screen readers">List view</button></div>
+    <span class="mute" id="tscNote" role="status"></span></div>`;
+  const note = msg => { const n = $("#tscNote"); if (n) n.textContent = msg; };
+  const after = async (eid, msg) => { if (!eid) return; toast(msg); refresh(); renderTsPanel(); };
+  $("#tscClose").onclick = () => { $("#inspector").classList.add("closed"); S.tsPanel = null; S.tsFocus && (S.tsFocus.sel = null); renderMap(false); };
+  $("#tscList").onclick = () => $("#tsBarList")?.click();
+  const inv = $("#tscInvite"); if (inv) inv.onclick = async () => {
+    const pid = $("#tscInvProf").value.trim(), r = $("#tscInvRole").value;
+    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(pid)){ note("Name the profile to invite, e.g. P-nassar."); return; }
+    after(await write("member.invite", ts, {teamspace:ts, profile:pid, role:r}), `${pid} invited as ${r}.`); };
+  const rl = $("#tscRole"); if (rl) rl.onclick = async () => {
+    const pid = $("#tscRoleWho").value, r = $("#tscRoleTo").value;
+    after(await write("member.role", ts, {teamspace:ts, profile:pid, role:r}), `${pid} is now ${r}.`); };
+  const ex = $("#tscExport"); if (ex) ex.onclick = () => downloadTeamspace(ts);
+  const mr = $("#tscMemRoleGo"); if (mr) mr.onclick = async () => {
+    const pid = id.slice(5), r = $("#tscMemRole").value;
+    after(await write("member.role", ts, {teamspace:ts, profile:pid, role:r}), `${pid} is now ${r}.`); };
+  const rm = $("#tscMemRemove"); if (rm) rm.onclick = async () => {
+    const pid = id.slice(5); if (await write("member.remove", ts, {teamspace:ts, profile:pid})){ toast(`${pid} removed. Their history stays.`); S.tsPanel = {ts, id:ts}; refresh(); renderTsPanel(); } };
+  const om = $("#tscOpenMoney"); if (om) om.onclick = () => { S.monTs = ts; show("money"); };
+  const mn = $("#tscMoneyNode"); if (mn) mn.onclick = () => { S.tsPanel = null; select(id); };
 }
 
 /* ---------------------------------------------------------------- account (served by the hub only)
@@ -3438,18 +3650,18 @@ function Inner(p) {
     h(ReactFlow, { nodes, edges: p.edges, nodeTypes, onNodesChange, onNodeDragStop, onConnect,
         onNodeClick: (_, n) => { if (n.type === "item") p.onSelect(n.id); if (n.type === "step") p.onStep(n.id); },
         onPaneClick: () => p.onSelect(null),
-        nodesDraggable: true, nodesConnectable: p.can, elementsSelectable: true, selectionOnDrag: false, panOnScroll: false,
+        nodesDraggable: true, nodesConnectable: p.can && !p.focus, elementsSelectable: true, selectionOnDrag: false, panOnScroll: false,
         minZoom: .1, maxZoom: 2.5, fitView: true, proOptions: { hideAttribution: false }, colorMode: p.dark ? "dark" : "light" },
       h(Background, { gap: 24, size: 1 }),
       h(MiniMap, { pannable: true, zoomable: true, nodeColor: n => n.type === "frame" ? "transparent" : getComputedStyle(document.documentElement).getPropertyValue("--t-" + n.data.type).trim(), nodeStrokeWidth: 2 }),
       h(Controls, { showInteractive: false })),
     h("div", { className: "nd-tools" },
-      p.can ? h("button", { onClick: addGroup, title: "Draw a frame to group items" }, "+ Group") : null,
-      p.can ? h("button", { onClick: () => setMenu(!menu), title: "Add a step that runs", "aria-expanded": menu }, "+ Step") : null,
+      p.can && !p.focus ? h("button", { onClick: addGroup, title: "Draw a frame to group items" }, "+ Group") : null,
+      p.can && !p.focus ? h("button", { onClick: () => setMenu(!menu), title: "Add a step that runs", "aria-expanded": menu }, "+ Step") : null,
       menu ? h("span", { className: "nd-menu" }, ...["fetch", "filter", "calc", "ai", "post"].map(k =>
         h("button", { key: k, onClick: () => { setMenu(false); const c = rf.screenToFlowPosition({ x: innerWidth / 2 - 120, y: innerHeight / 2 }); p.onAddStep(k, Math.round(c.x), Math.round(c.y)); } }, (STEP_ICON[k] || "") + " " + k)),
         h("button", { onClick: () => { setMenu(false); const c = rf.screenToFlowPosition({ x: innerWidth / 2 - 500, y: innerHeight / 2 }); p.onTemplate(Math.round(c.x), Math.round(c.y)); } }, "Shift Scout (5 steps)")) : null,
-      h("span", { className: "mute" }, p.can ? "Drag to arrange · drag from a dot to link" : "View only")),
+      h("span", { className: "mute" }, p.focus ? p.focus : p.can ? "Drag to arrange · drag from a dot to link" : "View only")),
     pending ? h("div", { className: "nd-pick", role: "dialog", "aria-label": "Link type" },
       h("div", null, h("b", null, pending.source), " → ", h("b", null, pending.target)),
       h("div", { className: "row" }, ...Object.entries(RELS).map(([k, v]) =>

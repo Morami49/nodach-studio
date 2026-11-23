@@ -1869,7 +1869,8 @@ def team_directory(H, login):
     def until(ts):
         u = [at + 24 * 3600 * 1000 for t, w, at in support if t == ts and at <= now < at + 24 * 3600 * 1000]
         return datetime_iso(max(u)) if u else None
-    return {"teamspaces": [], "others": [{"id": t, "label": labels[t], "support_until": until(t)} for t in spaces if login not in spaces[t]]}
+    # 117b a: ids only; the name comes with an open support access (hub_core::teamspaces::directory_for)
+    return {"teamspaces": [], "others": [{"id": t, "label": labels[t] if until(t) else None, "support_until": until(t)} for t in spaces if login not in spaces[t]]}
 
 
 def datetime_iso(ms):
@@ -2068,7 +2069,7 @@ async def s69_support_access(b):
     await n.fill("#tsNodeTitle", "Margins"); await n.click("#tsAddNode"); await n.wait_for_timeout(350)
     o = await open_teams_hub(b, H, "Morami49", True)
     await to_spaces(o); await o.wait_for_timeout(300)
-    listed = ts in await o.inner_text("#tsOthers") and "Insydr internal" in await o.inner_text("#tsOthers")
+    listed = ts in await o.inner_text("#tsOthers") and "Insydr internal" not in await o.inner_text("#tsOthers")   # 117b a: id only
     hidden_before = await o.evaluate("![...F.items.values()].some(i => i.title === 'Margins')")
     await o.click(f"[data-tssupport='{ts}']"); await o.click(f"[data-tssupgo='{ts}']"); await o.wait_for_timeout(200)
     asked_reason = "Say why" in await o.inner_text("#tsOtherNote")
@@ -2083,7 +2084,7 @@ async def s69_support_access(b):
     ok = (listed and hidden_before and asked_reason and len(sup) == 1 and sup[0]["body"] == {"teamspace": ts, "reason": "Nassar asked for help with an import"}
           and "support access until" in title and "Margins" in nodes and read_only
           and "morami49" in log and "Nassar asked for help with an import" in log and "open now" in log and not (n.errors + o.errors + n2.errors))
-    return ok, (f"listed by name={listed}, node hidden before={hidden_before}, reason required={asked_reason}, events={[e['body'] for e in sup]}, "
+    return ok, (f"listed by id only={listed}, node hidden before={hidden_before}, reason required={asked_reason}, events={[e['body'] for e in sup]}, "
                 f"title={title[:70]!r}, node readable={'Margins' in nodes}, read only={read_only}, owner's log={log.strip()[:90]!r}, errors={(n.errors + o.errors + n2.errors)[:1]}")
 
 # ---------------------------------------------------------------- BQ-1 step 3: usage meter and free limits
@@ -2232,6 +2233,179 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s64_teamspace_create, s65_teamspace_invite, s66_guest_cant_see_unshared, s67_teamspace_export,
              s68_owner_opens_created_teamspace, s69_support_access,
              s70_usage_bars, s71_usage_notice_in_queue, s72_limits_change_is_a_proposal, s73_run_refused_at_limit]
+
+# ---------------------------------------------------------------- B-teamspace-graph: Open teamspace → its area of the graph
+async def open_teams_canvas(b, H, login, owner):
+    """open_teams_hub with the canvas bundle served (/studio/vendor/...), as the real hub serves it."""
+    p = await open_teams_hub(b, H, login, owner)
+
+    async def vendor(route):
+        f = VENDOR / route.request.url.split("?")[0].rsplit("/", 1)[-1]
+        if f.exists():
+            return await route.fulfill(body=f.read_bytes(), content_type="text/javascript" if f.suffix == ".js" else "text/css")
+        return await route.fulfill(status=404, body="")
+    await p.ctx.route("http://hub.test/studio/vendor/**", vendor)
+    await p.reload(); await p.wait_for_timeout(1200)
+    await p.wait_for_function("!!window.NodachCanvas", timeout=20000)
+    return p
+
+
+async def open_on_map(p, ts):
+    """Teamspaces → Open: the ActionMap focused on that teamspace."""
+    await to_spaces(p); await p.click(f"#tsList [data-tsopen='{ts}']")
+    await p.wait_for_selector(f'.react-flow__node[data-id="{ts}"]', timeout=8000); await p.wait_for_timeout(500)
+
+
+async def canvas_ids(p):
+    return await p.evaluate("[...document.querySelectorAll('#canvas .react-flow__node')].map(n => n.dataset.id)")
+
+
+async def click_node(p, cid):
+    await p.locator(f'.react-flow__node[data-id="{cid}"]').click(); await p.wait_for_timeout(450)
+
+
+async def s78_open_teamspace_canvas_focused(b):
+    """B-teamspace-graph: Nowed clicks Open on his teamspace. The ActionMap opens focused on it, not a form: the
+    teamspace in the middle, his and Nassar's profiles linked to it by their roles (owner, guest), its nodes (Plan,
+    Quote) and its Money rules node, and nothing else from the graph. He drags Plan; the position is saved for this
+    teamspace only (board ts:<id>), and when he opens it again in a new window Plan is where he put it."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await open_on_map(o, ts)
+    state = await o.evaluate("({view: S.view, focus: S.tsFocus && S.tsFocus.ts, bar: (document.querySelector('#tsBar') || {}).innerText || '', canvas: !document.querySelector('#canvas').hidden})")
+    on = await canvas_ids(o)
+    money = await o.evaluate(f"[...F.items.values()].find(i => i.meta?.money_rules && TEAMS.itemSpace.get(i.id) === {json.dumps(ts)})?.id")
+    want = {ts, "prof:P-morami49", "prof:P-nassar", ids["Plan"], ids["Quote"], money}
+    labels = await o.locator("#canvas .react-flow__edge-text").all_text_contents()
+    focused = state["view"] == "map" and state["focus"] == ts and state["canvas"] and "Insydr pilot" in state["bar"] and "1 hop" in state["bar"]
+    plan = o.locator(f'.react-flow__node[data-id="{ids["Plan"]}"]')
+    bb = await plan.bounding_box()
+    await o.mouse.move(bb["x"] + 30, bb["y"] + 12); await o.mouse.down(); await o.mouse.move(bb["x"] + 130, bb["y"] + 132, steps=10); await o.mouse.up()
+    await o.wait_for_timeout(700)
+    lay = [x["event"] for x in H["posts"] if x["event"]["kind"] == "canvas.layout"]
+    saved = lay[-1]["body"] if lay else {}
+    o2 = await open_teams_canvas(b, H, "Morami49", True)
+    await open_on_map(o2, ts)
+    style = await o2.locator(f'.react-flow__node[data-id="{ids["Plan"]}"]').get_attribute("style") or ""
+    xy = saved.get("moves", {}).get(ids["Plan"])
+    kept = bool(xy) and f"translate({xy[0]}px, {xy[1]}px)" in style
+    main_clean = await o2.evaluate(f"!(ids => Object.keys(canvasLayout().pos).some(k => ids.includes(k)))({json.dumps(list(ids.values()))})")
+    ok = (focused and set(on) == want and "owner" in labels and "guest" in labels and "money rules" in labels and "D-001" not in on
+          and saved.get("board") == f"ts:{ts}" and lay[-1]["item"] is None and kept and main_clean and not (p.errors + n.errors + o.errors + o2.errors))
+    return ok, (f"focused={focused} ({state['bar'][:60]!r}), on canvas={sorted(on)}, edge labels={sorted(set(labels))}, saved={saved.get('board')}, "
+                f"kept after reopening={kept}, main board untouched={main_clean}, errors={(p.errors + n.errors + o.errors + o2.errors)[:1]}")
+
+
+async def s79_member_role_controls(b):
+    """B-teamspace-graph: on the teamspace's map Nowed clicks Nassar's profile node. The detail panel shows that
+    profile's role with Change role; he makes Nassar a member and the role edge says member. Clicking the teamspace node
+    shows Invite, Change role, Export teamspace and the Support access log. Nassar, a guest, clicking his own profile
+    sees his role and no controls."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await open_on_map(o, ts)
+    await click_node(o, "prof:P-nassar")
+    panel = await o.inner_text("#insp")
+    controls = await o.locator("#tscMemRole").count() == 1 and await o.locator("#tscMemRoleGo").count() == 1
+    await o.select_option("#tscMemRole", "member"); await o.click("#tscMemRoleGo"); await o.wait_for_timeout(600)
+    role_ev = [x["event"]["body"] for x in H["posts"] if x["event"]["kind"] == "member.role"]
+    now = await o.evaluate(f"TEAMS.roleOf('nassar', {json.dumps(ts)})")
+    labels = await o.locator("#canvas .react-flow__edge-text").all_text_contents()
+    await click_node(o, ts)
+    ts_panel = {k: await o.locator(sel).count() for k, sel in
+                {"invite": "#tscInvite", "change_role": "#tscRole", "export": "#tscExport", "support_log": "#tsSupportLog"}.items()}
+    g = await open_teams_canvas(b, H, "nassar", False)
+    await open_on_map(g, ts)
+    await click_node(g, "prof:P-nassar")
+    guest_panel = await g.inner_text("#insp")
+    guest_none = await g.locator("#tscMemRole, #tscMemRoleGo, #tscMemRemove").count() == 0 and "Only owners change roles" in guest_panel
+    ok = ("PROFILE" in panel and "guest" in panel and controls and role_ev == [{"teamspace": ts, "profile": "P-nassar", "role": "member"}]
+          and now == "member" and "member" in labels and all(v == 1 for v in ts_panel.values()) and guest_none
+          and not (p.errors + n.errors + o.errors + g.errors))
+    return ok, (f"panel={panel.strip()[:70]!r}, role controls={controls}, change={role_ev} -> {now}, edge labels={sorted(set(labels))}, "
+                f"teamspace controls={ts_panel}, guest sees none={guest_none}, errors={(p.errors + n.errors + o.errors + g.errors)[:1]}")
+
+
+async def s80_expand_one_hop(b):
+    """B-teamspace-graph (96a): the map opens at 1 hop. Plan links to D-001, outside the teamspace; D-001 isn't on the
+    map until Nowed clicks Plan, then it is, one hop further out, and nothing already placed moved (88c). Back to 1 hop
+    folds it away. Nassar (guest) clicks Quote, which links to Plan: Plan isn't shared with him, so it stays off his map
+    (the permission ceiling), and a private node linked to Plan never comes onto Nowed's (the lens ceiling)."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    plan, quote = ids["Plan"], ids["Quote"]
+    await p.evaluate(f"write('link', {json.dumps(plan)}, {{refs: ['D-001']}})"); await p.wait_for_timeout(250)
+    await p.evaluate(f"write('link', {json.dumps(quote)}, {{refs: [{json.dumps(plan)}]}})"); await p.wait_for_timeout(250)
+    await p.evaluate(f"write('item.create', null, {{id: 'PV-1', type: 'idea', title: 'My private note', private: true, refs: [{json.dumps(plan)}]}}, {{private: true}})")
+    await p.wait_for_timeout(250)
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await open_on_map(o, ts)
+    before = await canvas_ids(o)
+    pos = lambda: o.evaluate("Object.fromEntries([...document.querySelectorAll('#canvas .react-flow__node')].map(n => [n.dataset.id, n.style.transform]))")
+    p0 = await pos()
+    plan_label = await o.locator(f'.react-flow__node[data-id="{plan}"]').inner_text()
+    await click_node(o, plan)
+    after = await canvas_ids(o); p1 = await pos()
+    hops = await o.inner_text("#tsDepth")
+    unmoved = all(p1.get(k) == v for k, v in p0.items())
+    inspector = await o.inner_text("#insp")
+    await o.click("#tsBarCollapse"); await o.wait_for_timeout(400)
+    folded = await canvas_ids(o)
+    g = await open_teams_canvas(b, H, "nassar", False)
+    await open_on_map(g, ts)
+    await click_node(g, quote)
+    guest = await canvas_ids(g)
+    ok = ("D-001" not in before and "+" in plan_label and "D-001" in after and "PV-1" not in after and unmoved and "2 hops" in hops
+          and "Plan" in inspector and "D-001" not in folded and plan not in guest and quote in guest
+          and not (p.errors + n.errors + o.errors + g.errors))
+    return ok, (f"before={len(before)} nodes (D-001 on={'D-001' in before}), plan label={plan_label.strip()[:40]!r}, after click D-001 on={'D-001' in after}, "
+                f"private kept off={'PV-1' not in after}, nothing moved={unmoved}, depth={hops!r}, folded back={'D-001' not in folded}, "
+                f"guest sees Plan={plan in guest}, errors={(p.errors + n.errors + o.errors + g.errors)[:1]}")
+
+
+async def s81_list_view_still_works(b):
+    """B-teamspace-graph: on the teamspace's map Nowed (keyboard, screen reader) clicks List view: the teamspace's page
+    opens with its title focused, its members and its nodes; Open now keeps him in List view. Open on the map takes him
+    back to the canvas, and Private → ActionMap is the whole graph again, not the teamspace."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await open_on_map(o, ts)
+    await o.click("#tsBarList"); await o.wait_for_timeout(400)
+    lst = await o.evaluate("({view: S.view, focus: S.tsFocus, title: (document.querySelector('#tsTitle') || {}).innerText || '', focused: document.activeElement && document.activeElement.id})")
+    members = await o.inner_text("#tsMembers") if await o.locator("#tsMembers").count() else ""
+    nodes = await o.inner_text("#tsNodes") if await o.locator("#tsNodes").count() else ""
+    await o.click("#tsBack"); await o.wait_for_timeout(250)
+    await o.click(f"#tsList [data-tsopen='{ts}']"); await o.wait_for_timeout(400)
+    sticky = await o.evaluate("S.view === 'spaces' && !S.tsFocus") and await o.locator("#tsTitle").count() == 1
+    await o.click("#tsMapView"); await o.wait_for_selector(f'.react-flow__node[data-id="{ts}"]', timeout=8000); await o.wait_for_timeout(300)
+    back_on_map = await o.evaluate(f"S.view === 'map' && S.tsFocus && S.tsFocus.ts === {json.dumps(ts)}")
+    await nav_open(o); await o.click("#sections [data-s=private]"); await o.wait_for_timeout(150)
+    await o.click("#subnav [data-sv=map]"); await o.wait_for_timeout(600)
+    whole = await o.evaluate("!S.tsFocus && !document.querySelector('#tsBar') && document.querySelectorAll('#canvas .react-flow__node-item').length > 50")
+    ok = (lst["view"] == "spaces" and lst["focus"] is None and "Insydr pilot" in lst["title"] and lst["focused"] == "tsTitle"
+          and "P-nassar" in members and "Plan" in nodes and "Quote" in nodes and sticky and back_on_map and whole and not (p.errors + n.errors + o.errors))
+    return ok, (f"list view={lst['view']} title={lst['title'][:40]!r} focused={lst['focused']}, members listed={'P-nassar' in members}, nodes listed={'Plan' in nodes}, "
+                f"Open stays in list={sticky}, back on the map={back_on_map}, Private ActionMap whole graph={whole}, errors={(p.errors + n.errors + o.errors)[:1]}")
+
+
+async def s82_ids_only_for_others(b):
+    """117b a: Nassar has a teamspace Nowed, the hub owner, isn't in. Under Other teamspaces on this hub Nowed sees its
+    id and not its name, and the name is nowhere on his page; once he opens support access, its name shows."""
+    H = team_hub(); H["filter"] = True
+    n = await open_teams_hub(b, H, "nassar", False)
+    ts = await make_space(n, "Insydr internal")
+    o = await open_teams_hub(b, H, "Morami49", True)
+    await to_spaces(o); await o.wait_for_timeout(300)
+    others = await o.inner_text("#tsOthers")
+    nowhere = await o.evaluate("!document.body.innerText.includes('Insydr internal') && !JSON.stringify(S.tsDir).includes('Insydr internal') && !JSON.stringify(S.events).includes('Insydr internal')")
+    says_ids = "only their ids" in others
+    await o.click(f"[data-tssupport='{ts}']"); await o.fill(f"[data-tssupwhy='{ts}']", "Nassar asked for help"); await o.click(f"[data-tssupgo='{ts}']"); await o.wait_for_timeout(900)
+    await o.click("#tsBack"); await o.wait_for_timeout(300)
+    named = "Insydr internal" in await o.inner_text("#tsOthers")
+    ok = ts in others and "Insydr internal" not in others and nowhere and says_ids and named and not (n.errors + o.errors)
+    return ok, (f"listed={others.strip()[:80]!r}, name nowhere on his page={nowhere}, says ids only={says_ids}, named after support access={named}, errors={(n.errors + o.errors)[:1]}")
+
+
+SCENARIOS += [s78_open_teamspace_canvas_focused, s79_member_role_controls, s80_expand_one_hop, s81_list_view_still_works, s82_ids_only_for_others]
 
 
 async def main():
