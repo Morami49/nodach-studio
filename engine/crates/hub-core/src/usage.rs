@@ -17,10 +17,10 @@
 //!   - otherwise the node's home profile: its latest `profile.assign` link, else the profile its `item.create` was
 //!     written as, else its author's Personal profile.
 //!
-//! Limits are a node, `PLAN-limits` (type setting, `value` = {ai_calls, runs, storage_bytes, placeholder}), so a
-//! change is an ordinary versioned edit (in Studio a Developer-mode proposal first, NVS-4). Only a hub owner's edits
-//! count; anyone else's are kept, ignored and reported as findings. With no node yet the placeholder defaults apply
-//! (500 AI calls, 2,000 runs, 1 GB): placeholders for Nowed to set.
+//! Limits are a node, `PLAN-limits` (type setting, `value` = {ai_calls, runs, storage_bytes}), so a change is an
+//! ordinary versioned edit (in Studio a Developer-mode proposal first, NVS-4). Only a hub owner's edits count; anyone
+//! else's are kept, ignored and reported as findings. With no node yet the defaults apply: 500 AI calls, 2,000 runs
+//! and 1 GB stored a month (Nowed's decision, 23 Nov 2026). Storage is counted as the total bytes held.
 //!
 //! At 80% of a limit an urgent notice item goes to the scope owners' queue (once per scope, meter and month); at
 //! 100% another one, and AI calls and runs are refused with `REFUSAL` (logged as "refused: limit"). Storage is
@@ -41,7 +41,7 @@ pub const WARN_PCT: u64 = 80;
 pub const RUNNER_ID: &str = "flow:runner";
 pub const RESPONDER_ID: &str = "agent:live-responder";
 pub const NOTICE_PREFIX: &str = "USE-";
-/// PLACEHOLDER defaults (FUN-1 v2): Nowed sets the real numbers in the PLAN-limits node.
+/// The free monthly limits (FUN-1 v2; Nowed decided these numbers, 23 Nov 2026). The PLAN-limits node can change them.
 pub const DEFAULT_AI_CALLS: u64 = 500;
 pub const DEFAULT_RUNS: u64 = 2_000;
 pub const DEFAULT_STORAGE_BYTES: u64 = 1_000_000_000;
@@ -67,8 +67,6 @@ pub struct Limits {
     pub ai_calls: u64,
     pub runs: u64,
     pub storage_bytes: u64,
-    /// true while the numbers are the placeholder defaults (or the node still says so)
-    pub placeholder: bool,
     /// the limits node's id, once it exists on the record
     pub node: Option<String>,
     /// how many accepted versions of the limits there have been (0: defaults)
@@ -79,7 +77,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { ai_calls: DEFAULT_AI_CALLS, runs: DEFAULT_RUNS, storage_bytes: DEFAULT_STORAGE_BYTES, placeholder: true,
+        Limits { ai_calls: DEFAULT_AI_CALLS, runs: DEFAULT_RUNS, storage_bytes: DEFAULT_STORAGE_BYTES,
                  node: None, version: 0, updated: None, doc_id: None }
     }
 }
@@ -88,9 +86,9 @@ impl Limits {
     pub fn of(&self, m: Meter) -> u64 {
         match m { Meter::AiCalls => self.ai_calls, Meter::Runs => self.runs, Meter::StorageBytes => self.storage_bytes }
     }
-    /// The value a new limits node starts with (the placeholders, marked as such).
+    /// The value a new limits node starts with (the defaults).
     pub fn default_value() -> Value {
-        json!({"ai_calls": DEFAULT_AI_CALLS, "runs": DEFAULT_RUNS, "storage_bytes": DEFAULT_STORAGE_BYTES, "placeholder": true})
+        json!({"ai_calls": DEFAULT_AI_CALLS, "runs": DEFAULT_RUNS, "storage_bytes": DEFAULT_STORAGE_BYTES})
     }
 }
 
@@ -184,7 +182,6 @@ fn parse_limits(v: &Value, prev: &Limits) -> Result<Limits, String> {
         ai_calls: num("ai_calls", prev.ai_calls)?,
         runs: num("runs", prev.runs)?,
         storage_bytes: num("storage_bytes", prev.storage_bytes)?,
-        placeholder: obj.get("placeholder").and_then(Value::as_bool).unwrap_or(false),
         ..prev.clone()
     })
 }
@@ -380,8 +377,8 @@ impl State {
             (true, false) => format!("At 100%, {} are refused until the month ends: \"{REFUSAL}\".", m.label()),
             (false, _) => "Storage is warn-only: nothing is refused.".to_string(),
         };
-        let body = format!("{used} of {limit} {} used in {} (UTC). {then} The limits are the node {LIMITS_ID}{}.",
-            m.label(), self.month, if self.limits.placeholder { " (placeholder numbers for Nowed to set)" } else { "" });
+        let body = format!("{used} of {limit} {} used in {} (UTC). {then} The limits are the node {LIMITS_ID}.",
+            m.label(), self.month);
         let mut v = json!({"id": id, "type": "notice", "title": title, "body": body, "status": "open", "refs": ["FUN-1", LIMITS_ID],
             "meta": {"queue": self.owners_of(scope), "urgent": true, "lane": "owner",
                      "usage": {"scope": scope, "meter": m.key(), "threshold": t, "used": used, "limit": limit, "month": self.month}}});
@@ -493,17 +490,18 @@ mod tests {
     }
 
     #[test]
-    fn limits_are_a_versioned_node_with_placeholder_defaults() {
+    fn limits_are_a_versioned_node_with_the_decided_defaults() {
         let st = fold_with(vec![], &[]);
         assert_eq!((st.limits.ai_calls, st.limits.runs, st.limits.storage_bytes), (500, 2_000, 1_000_000_000));
-        assert!(st.limits.placeholder && st.limits.node.is_none() && st.limits.version == 0);
+        assert!(st.limits.node.is_none() && st.limits.version == 0);
+        assert!(!Limits::default_value().to_string().contains("placeholder"), "the defaults are the real limits");
         let create = ev("Morami49", "item.create", None, json!({"id": LIMITS_ID, "type": "setting", "title": "Free limits", "value": Limits::default_value().to_string()}), NOV);
         let edit = ev("Morami49", "item.edit", Some(LIMITS_ID), json!({"value": "{\"ai_calls\":800,\"runs\":3000,\"storage_bytes\":2000000000}"}), NOV);
         let forged = ev("nassar", "item.edit", Some(LIMITS_ID), json!({"value": "{\"ai_calls\":999999}"}), NOV);
         let st = fold_with(vec![create.clone()], &[]);
-        assert_eq!((st.limits.node.as_deref(), st.limits.version, st.limits.placeholder), (Some(LIMITS_ID), 1, true));
+        assert_eq!((st.limits.node.as_deref(), st.limits.version, st.limits.ai_calls), (Some(LIMITS_ID), 1, 500));
         let st = fold_with(vec![create, edit, forged], &[]);
-        assert_eq!((st.limits.ai_calls, st.limits.runs, st.limits.storage_bytes, st.limits.version, st.limits.placeholder), (800, 3000, 2_000_000_000, 2, false));
+        assert_eq!((st.limits.ai_calls, st.limits.runs, st.limits.storage_bytes, st.limits.version), (800, 3000, 2_000_000_000, 2));
         assert_eq!(st.findings.len(), 1, "a non-owner's edit is kept, ignored and reported");
         assert!(st.findings[0].reason.contains("only a hub owner"));
     }
@@ -605,7 +603,8 @@ mod tests {
         let scopes: Vec<&str> = v["meters"].as_array().unwrap().iter().map(|r| r["scope"].as_str().unwrap()).collect();
         assert_eq!(scopes, vec!["P-nassar", "TS-a"]);
         assert_eq!(v["meters"][1]["meters"]["ai_calls"]["used"], json!(1));
-        assert_eq!(v["limits"]["placeholder"], json!(true));
+        assert_eq!(v["limits"]["ai_calls"], json!(500));
+        assert!(v["limits"].get("placeholder").is_none());
         let v = st.view_for("Morami49", Some("P-dev"));
         assert_eq!(v["meters"][0]["scope"], json!("P-dev"));
         assert_eq!(v["meters"][0]["exempt"], json!(true));

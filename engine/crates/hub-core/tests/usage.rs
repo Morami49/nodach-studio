@@ -22,7 +22,7 @@ fn runs_are_counted_and_notices_reach_the_account_they_are_for() {
     let mut h = Hub::new();
     h.set_owners(vec!["Morami49".into()]);
     let docs = vec![
-        ev("Morami49", "item.create", None, json!({"id": usage::LIMITS_ID, "type": "setting", "title": "Free limits", "value": "{\"ai_calls\":10,\"runs\":5,\"placeholder\":true}"}), 1),
+        ev("Morami49", "item.create", None, json!({"id": usage::LIMITS_ID, "type": "setting", "title": "Free limits", "value": "{\"ai_calls\":10,\"runs\":5}"}), 1),
         ev("nassar", "item.create", None, json!({"id": "B-nassar", "type": "idea", "title": "his board"}), 2),
     ];
     let docs: Vec<(String, Value)> = docs.into_iter().enumerate().map(|(i, e)| (format!("d{i}"), e)).collect();
@@ -41,7 +41,7 @@ fn runs_are_counted_and_notices_reach_the_account_they_are_for() {
     for n in due { h.write(&k, "usage meter", runner("item.create", n, 9), 3).unwrap(); }
     assert!(h.usage("2026-11", &BTreeMap::new()).due_notices().is_empty(), "raised once");
     let seen = |login: &str| -> Vec<String> {
-        let (docs, _, _, _) = h.studio_events_for(login, 0, usize::MAX);
+        let (docs, _, _, _) = h.studio_events_for(login, 0, usize::MAX, 0);
         docs.iter().filter_map(|d| d.pointer("/event/body/id")?.as_str().map(str::to_string)).filter(|i| i.starts_with(usage::NOTICE_PREFIX)).collect()
     };
     assert_eq!(seen("nassar"), vec!["USE-2026-11-ai_calls-80-P-nassar", "USE-2026-11-runs-80-P-nassar"]);

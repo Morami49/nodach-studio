@@ -36,8 +36,11 @@
 //!                            x-nodach-profile: <id> (B-profile-windows) names the window's profile; one that isn't an
 //!                            active profile of the signed-in account is refused 403 {profile_mismatch: true} on every
 //!                            POST /studio/api/* route and logged as outcome "profile mismatch".
-//! GET  /studio/api/teamspaces → {teamspaces:[{id,label,role,invited,members,invites}]}: the ones you're in or invited to
-//!                            (BQ-1 step 2). Writes that break a teamspace rule (hub_core::teamspaces) are refused 403
+//! GET  /studio/api/teamspaces → {teamspaces:[{id,label,role,invited,members,invites,support_log?}], others:[{id,label,
+//!                            support_until}]}: the ones you're in or invited to (BQ-1 step 2); owners of a teamspace get
+//!                            its support access log; a hub owner gets the other teamspaces by id and name only (114b a).
+//!                            The hub owner reads inside those only through support.access {teamspace, reason}: logged,
+//!                            shown to that teamspace's owners, open for 24 hours. Writes that break a teamspace rule (hub_core::teamspaces) are refused 403
 //!                            {teamspace_refused: true} with the rule in words and logged as outcome "refused: teamspace".
 //! GET  /studio/api/usage → this month's meters for your profiles (the window's first) and teamspaces, the free limits
 //!                            and the limits node (BQ-1 step 3, hub_core::usage). At 100% of a limit AI calls and flow runs
@@ -1146,8 +1149,9 @@ impl Record {
                         json_status(&v, 200)?
                     }
                     (Method::Get, "/studio/api/teamspaces", Some(l)) => {
-                        // BQ-1 step 2: the teamspaces you're in (with your role) or invited to; never anyone else's
-                        let v = self.hub.borrow().as_ref().unwrap().teamspaces().view_for(&l);
+                        // BQ-1 step 2: the teamspaces you're in (with your role) or invited to; never anyone else's.
+                        // 114b a: owners get their support access log; a hub owner gets the others by id and name only.
+                        let v = self.hub.borrow().as_ref().unwrap().teamspaces_at(now).view_for(&l);
                         json_status(&v, 200)?
                     }
                     (Method::Get, "/studio/api/profiles", Some(l)) => {
@@ -1187,7 +1191,7 @@ impl Record {
                     }
                     (Method::Get, "/studio/api/events", Some(l)) => {
                         let q = |k: &str| url.query_pairs().find(|(a, _)| a == k).and_then(|(_, v)| v.parse::<usize>().ok());
-                        let (events, next, total, _) = self.hub.borrow().as_ref().unwrap().studio_events_for(&l, q("after").unwrap_or(0), q("limit").unwrap_or(500).clamp(1, 2000));
+                        let (events, next, total, _) = self.hub.borrow().as_ref().unwrap().studio_events_for(&l, q("after").unwrap_or(0), q("limit").unwrap_or(500).clamp(1, 2000), now);
                         json_status(&serde_json::json!({"events": events, "next": next, "total": total}), 200)?
                     }
                     (Method::Post, "/studio/api/run", Some(l)) => {

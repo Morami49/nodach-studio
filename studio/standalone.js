@@ -70,6 +70,12 @@
     return pulling;
   }
 
+  // 114b a: a support access opens events that sit before the cursor; read the whole record again (seen dedups)
+  async function resync() {
+    if (pulling) await pulling.catch(() => {});   // a pull in flight would move the cursor back to the end
+    cursor = 0; return pull();
+  }
+
   let timer = null;
   function startPolling() {
     if (timer || !POLL_MS) return;
@@ -288,7 +294,7 @@
     document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
   }
 
-  window.__nodach = { pull, shared, standalone: true, checkVersion, env: ENV, build: BUILD, uploadPrivate };
+  window.__nodach = { pull, resync, shared, standalone: true, checkVersion, env: ENV, build: BUILD, uploadPrivate };
   window.claude = {
     use: async n => {
       if (n === "db") { try { await me(); return db; } catch { return null; } }
