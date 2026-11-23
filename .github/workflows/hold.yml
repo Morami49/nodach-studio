@@ -1,0 +1,27 @@
+name: hold
+# 116b a (23 Nov): a pull request labelled "hold" (Nowed: "N, try it first") fails this check, so it can't be merged
+# by hand by mistake either. It runs again when a label is added or removed, so taking "hold" off turns it green.
+# automerge already skips held PRs (scripts/should_automerge.py); this makes the hold visible on the PR itself.
+# The check is advisory until it is required: Settings -> Rules -> Rulesets (https://github.com/Morami49/nodach-studio/settings/rules)
+# -> New ruleset -> New branch ruleset, target the default branch, "Require status checks to pass", add "no-hold-label".
+# Not in should_automerge REQUIRED on purpose: the staging train still carries held PRs so Nowed can try them there.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+permissions: {}
+concurrency:
+  group: hold-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  no-hold-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail while the pull request is labelled hold
+        run: |
+          labels=$(jq -r '[.pull_request.labels[].name] | join(", ")' "$GITHUB_EVENT_PATH")
+          echo "labels now: ${labels:-none}"
+          if jq -e '[.pull_request.labels[].name | ascii_downcase] | index("hold")' "$GITHUB_EVENT_PATH" > /dev/null; then
+            echo "::error::Held: this pull request has the label \"hold\" (Nowed tries it first). Remove the label when it may merge; this check then re-runs and passes."
+            exit 1
+          fi
+          echo "Not held: no \"hold\" label."
