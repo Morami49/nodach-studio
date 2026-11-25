@@ -815,12 +815,14 @@ function buildFilters(){
     cy.nodes().forEach(n => n.style("opacity", !q || (n.data("label")+" "+n.id()).toLowerCase().includes(q) ? 1 : .15)); };
 }
 function renderMap(relayout){
-  // B-teamspace-graph: a teamspace opened on the map stays focused while you are in Teamspaces; Private's ActionMap is the whole graph
+  // B-teamspace-graph: a teamspace opened on the map stays focused while you are in Teamspaces
   if (S.tsFocus && ((S.section !== "teams" && !S.tsKeep) || !tsCanvasOk())) tsUnfocus();
   if (S.tsFocus && tsCanvasOk()) return renderTsFocus(relayout);
   if (S.world && !tsCanvasOk()) S.world = null, $("#worldBar")?.remove(), $("#filters").hidden = false;   // the galaxy needs the canvas
-  // W0 (PLAN-world-ui): the map opens on the Galaxy; Whole graph is a toggle, remembered on this device
-  if (!S.world && !S.tsFocus && tsCanvasOk() && store.get("map.lens") !== "graph") S.world = parseWorld(location.hash) || {sys:null, planet:null, node:null};
+  /* W0 (PLAN-world-ui): the map is always the Galaxy. Whole graph is gone from the interface (R-261125-201: every node
+     open at once is a desktop with every file open). The old renderer below only serves the scenarios written for it,
+     behind a test-only switch no person sets, until the W steps move them; a saved "map.lens" from before is ignored. */
+  if (!S.world && !S.tsFocus && tsCanvasOk() && store.get("test.wholeGraph") !== "1") S.world = parseWorld(location.hash) || {sys:null, planet:null, node:null};
   if (S.world) return renderWorld(relayout);
   if (window.NodachCanvas && !S.classicMap) return renderCanvas(relayout);
   $("#canvas").hidden = true; $("#cy").hidden = false;
@@ -2638,10 +2640,10 @@ function tsBar(g){
   bar.innerHTML = `<span class="chip"><b>${esc(g.t.label)}</b>&nbsp;<span class="mono mute">${esc(g.ts)}</span></span>
     <span class="chip mute" id="tsDepth">${g.depth} hop${g.depth === 1 ? "" : "s"}${opened ? ` · ${opened} opened` : ""} · up to ${TS_MAX_HOPS}${g.hidden ? ` · ${g.hidden} not shared with you` : ""}</span>
     <button id="tsBarList" title="The same teamspace as a page: members, money and nodes, for keyboard and screen readers">List view</button>
-    ${opened ? `<button id="tsBarCollapse">Back to 1 hop</button>` : ""}<button id="tsBarAll" title="Leave the teamspace: the whole graph">Whole graph</button>`;
+    ${opened ? `<button id="tsBarCollapse">Back to 1 hop</button>` : ""}<button id="tsBarAll" title="Leave the teamspace: back to the Galaxy">Galaxy</button>`;
   $("#tsBarList").onclick = () => { const ts = S.tsFocus.ts; store.set("ts.view", "list"); tsUnfocus(); openSpace(ts, "list"); };
   const c = $("#tsBarCollapse"); if (c) c.onclick = () => { S.tsFocus.open.clear(); renderMap(false); };
-  $("#tsBarAll").onclick = () => { store.set("map.lens", "graph"); tsUnfocus(); show("map"); renderMap(true); };
+  $("#tsBarAll").onclick = enterWorld;
 }
 function renderTsFocus(relayout){
   const f = S.tsFocus, g = tsGraph(f.ts);
@@ -2714,8 +2716,7 @@ function worldPlanets(s){
   return pl;
 }
 const worldNodes = s => s.items.length + s.shared.length;
-function enterWorld(){ store.set("map.lens", "galaxy"); tsUnfocus(); S.world = {sys:null, planet:null, node:null}; S.sel = null; S.worldFly = false; if (S.view !== "map") show("map"); renderMap(true); }
-function leaveWorld(){ store.set("map.lens", "graph"); S.world = null; $("#worldBar")?.remove(); $("#filters").hidden = false; worldHash(); renderMap(true); }
+function enterWorld(){ tsUnfocus(); S.world = {sys:null, planet:null, node:null}; S.sel = null; S.worldFly = false; if (S.view !== "map") show("map"); renderMap(true); }
 function worldGo(sys, planet){ S.world = {sys, planet:planet || null, node:null}; S.sel = null; S.worldFly = true; renderMap(true); }
 /* W0: every place has an address, #/<system>/<planet>/<node> (#/ alone is the Galaxy), so Back, reload and pasted links
    land on the same place. Item addresses (#D-001) keep working: they fly to the node's place. */
@@ -2737,7 +2738,7 @@ function worldHash(){
 }
 function worldFromHash(){
   const w = parseWorld(location.hash); if (!w || !tsCanvasOk()) return false;
-  S.worldFromHistory = true; tsUnfocus(); S.world = w; S.worldFly = true; store.set("map.lens", "galaxy"); S.sel = null;
+  S.worldFromHistory = true; tsUnfocus(); S.world = w; S.worldFly = true; S.sel = null;
   if (S.view !== "map") show("map"); else renderMap(true);
   if (w.node && !w.node.startsWith("prof:") && F.items.has(w.node)) select(w.node);
   return true;
@@ -2765,10 +2766,8 @@ function worldBar(s, pl){
   const sys = worldModel();
   const where = !s ? `${sys.length} system${sys.length === 1 ? "" : "s"}` : !pl ? `${worldPlanets(s).length} planets · ${worldNodes(s)} nodes${s.kind === "teamspace" ? " · you: " + esc(s.role) : ""}` : `${pl.count} here`;
   bar.innerHTML = `<span class="chip" id="worldCrumbs">${crumbs.join(" › ")}</span><span class="chip mute" id="worldWhere">${where}</span>` +
-    (s?.kind === "teamspace" ? `<button id="worldTs" title="This teamspace's own map: members, roles, money rules and nodes, with controls">Teamspace controls</button>` : "") +
-    `<button id="worldLeave" title="Leave the galaxy: the whole graph as before">Whole graph</button>`;
+    (s?.kind === "teamspace" ? `<button id="worldTs" title="This teamspace's own map: members, roles, money rules and nodes, with controls">Teamspace controls</button>` : "");
   bar.querySelectorAll("[data-wgo]").forEach(b => b.onclick = () => worldGo(b.dataset.wgo || null, b.dataset.wpl));
-  $("#worldLeave").onclick = leaveWorld;
   const ts = $("#worldTs"); if (ts) ts.onclick = () => { const id = s.id; S.world = null; $("#worldBar")?.remove(); focusSpace(id); };
 }
 function renderWorld(relayout){
