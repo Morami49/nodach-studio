@@ -152,7 +152,7 @@ jobs:
         run: |
           now=$(curl -fsS "$HUB_URL/health" 2>/dev/null | awk '{print $2}')
           short=$(echo "$SHA" | cut -c1-7)
-          if [ "$STATUS" = success ]; then text="Deployed $short (replaced $PREV); health ok, connector smoke test passed. Open: https://studio.nodach.com"; outcome=success
+          if [ "$STATUS" = success ]; then text="Deployed $short (replaced $PREV); health ok, connector smoke test passed."; outcome=success
           else text="Deploy of $short $STATUS; the hub now answers ${now:-nothing} (was $PREV)."; outcome=failure; fi
           RUN_SHA="$SHA" python3 scripts/run_record.py hub-deploy --title "Hub deploys" --outcome "$outcome" --text "$text" \
             --policy "$POLICY" --undo "Roll back: Actions → hub-deploy → Run workflow with sha = $PREV" \
