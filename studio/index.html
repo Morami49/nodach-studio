@@ -181,6 +181,16 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 380px}
 .nd-item.nd-dim{opacity:.15!important}
 .nd-code{font:500 10px var(--mono,"IBM Plex Mono",monospace);opacity:.85}
 .nd-title{margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+/* W1b (205c c): controls are nodes. An action node (dashed) adds something; a node grown open changes it, in place. */
+.nd-ctl.open{width:300px;cursor:default}
+.nd-ctl-body{margin-top:8px;padding:8px;border-radius:6px;background:var(--raise);color:var(--ink);display:grid;gap:6px;font-size:12px;white-space:normal}
+.nd-ctl-body p{margin:0}
+.nd-ctl-body .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.nd-ctl-body input,.nd-ctl-body select{min-width:0;flex:1 1 120px;font-size:12px}
+.nd-ctl-body h4{margin:4px 0 0;font-size:12px}
+.nd-ctl-body .log{max-height:160px;overflow:auto}
+main.nopanel{grid-template-columns:minmax(0,1fr)}
+main.nopanel > aside{display:none}
 .nd-frame{width:100%;height:100%;border:1.5px dashed var(--mute);border-radius:12px;background:color-mix(in srgb,var(--accent) 6%,transparent)}
 .nd-frame.sel{border-color:var(--accent)}
 .nd-frame-title{position:absolute;top:-22px;left:4px;font:600 12px var(--sans,system-ui);color:var(--mute);cursor:text;white-space:nowrap}
@@ -1168,8 +1178,8 @@ function stepWords(st){
 function renderInspector(){
   const it = F.items.get(S.sel);
   $("#inspEmpty").hidden = !!it; $("#insp").hidden = !it;
-  if (!it && S.world && S.view === "map" && S.worldHere) renderWorldPanel();   // W1: what you can do where you stand, then the places here
-  else if (!it) $("#inspEmpty").textContent = "Select anything on the map or in the list to see its history, links and answers.";
+  document.querySelector("main").classList.toggle("nopanel", !it && !!S.world && S.view === "map" && !S.selStep);   // W1b: no side panel on the map; controls are nodes
+  if (!it) $("#inspEmpty").textContent = "Select anything on the map or in the list to see its history, links and answers.";
   if (!it) return;
   const back = [...F.items.values()].filter(x => (x.refs||[]).includes(it.id)).map(x=>x.id);
   const code = codeOf(it.id), isQ = it.type==="question";
@@ -1205,7 +1215,7 @@ function renderInspector(){
   $("#copyAddr").onclick = async () => { const a = `studio/${it.id}@${it.history.length-1}`;
     try { await navigator.clipboard.writeText(a); toast("Copied "+a); } catch { toast(a); } };
   if (S.line){ const el = document.getElementById("L-"+S.line); if (el){ el.classList.add("hit"); el.scrollIntoView({block:"center"}); } S.line = null; }
-  $("#closeInsp").onclick = () => { $("#inspector").classList.add("closed"); S.sel=null; };
+  $("#closeInsp").onclick = () => { $("#inspector").classList.add("closed"); S.sel=null; if (S.world && S.view === "map") renderInspector(); };
   $("#insp").querySelectorAll("[data-go]").forEach(b => b.onclick = () => select(b.dataset.go));
   $("#insp").querySelectorAll("[data-revert]").forEach(b => b.onclick = async () => { if (await revert(b.dataset.revert)) toast("Done. The original stays in history."); });
   $("#reply").oninput = e => store.set("reply."+it.id, e.target.value);
@@ -2393,7 +2403,7 @@ function openSpace(id){
 /* W1: Teamspaces opens the Galaxy (or flies to one teamspace's system) with Teamspaces lit in the bar */
 function teamsWorld(sys){
   S.ts = null; for (const k of ["#tsOne", "#tsInvites", "#v-spaces #tsOthers"]){ const el = $(k); if (el) el.innerHTML = ""; }
-  S.world = {sys:sys || null, planet:null, node:null}; S.sel = null; S.worldFly = true;
+  S.world = {sys:sys || null, planet:null, node:null}; S.worldOpen = null; S.sel = null; S.worldFly = true;
   if (S.view !== "map") show("map");
   navSection("teams", "spaces"); $("#subnav [data-sv=spaces]")?.setAttribute("aria-current", "true");
   renderMap(true);
@@ -2489,11 +2499,12 @@ function addMoneyNode(ts, label){
   return write("item.create", null, {id:"MR-" + Date.now().toString(36), type:"setting", title:`Money rules · ${label || ts}`, status:"open", teamspace:ts, meta:{money_rules:true},
     body:"This teamspace's own money rules, kept as versions. Placeholder: no payments are taken yet."});
 }
-function bindJoins(T){
-  document.querySelectorAll("[data-tsjoin]").forEach(b => b.onclick = async () => {
-    const ts = b.dataset.tsjoin; if (await write("member.join", ts, {teamspace:ts, profile:b.dataset.prof})){ toast(`You joined ${T.spaces.get(ts)?.label || ts}.`);
-      try { await window.__nodach?.resync?.(); } catch {}   // U1: nodes made before you joined sit before the read cursor; read them now, not after a reload
-      refresh(); openSpace(ts); } });
+function bindJoins(T){ document.querySelectorAll("[data-tsjoin]").forEach(b => b.onclick = () => joinSpace(b.dataset.tsjoin, b.dataset.prof, T)); }
+async function joinSpace(ts, prof, T){
+  if (!await write("member.join", ts, {teamspace:ts, profile:prof})) return null;
+  toast(`You joined ${T.spaces.get(ts)?.label || ts}.`);
+  try { await window.__nodach?.resync?.(); } catch {}   // U1: nodes made before you joined sit before the read cursor; read them now, not after a reload
+  refresh(); openSpace(ts); return ts;
 }
 async function createSpace(input, noteEl){
   const label = input.value.trim(); if (!label){ noteEl.textContent = "Give the teamspace a name."; return null; }
@@ -2505,71 +2516,132 @@ async function createSpace(input, noteEl){
 }
 $("#tsCreate").onclick = () => createSpace($("#tsLabel"), $("#tsNote"));
 
-/* W1: the side panel where you stand on the map, with nothing selected. Galaxy: New teamspace, your invitations and
-   (hub owner) the other teamspaces on this hub. A teamspace's system: its controls. A profile on its Members planet:
-   that person's role, with the owner's controls. Then the places here as buttons (154c b: the keyboard and
-   screen-reader route lives in the map itself). What you typed survives a redraw. */
-function renderWorldPanel(){
-  const box = $("#inspEmpty"), w = S.world, T = TEAMS || foldTeams(S.events), me = myLogin(), here = tsHere(), can = here && writable();
-  const s = w.sys ? worldModel().find(x => x.id === w.sys) || null : null;
-  const typed = {}; box.querySelectorAll("input[id], select[id]").forEach(x => typed[x.id] = x.value);
-  const focused = box.contains(document.activeElement) && document.activeElement.id;
-  const list = S.worldHere || [];
-  const places = `<p style="margin:0 0 8px" id="worldHereNote">Here: ${list.length} place${list.length === 1 ? "" : "s"}. Choose one to go there, or click it on the map.</p>
-    <ul id="worldHereList" style="list-style:none;margin:0;padding:0;display:grid;gap:4px">${list.map(x =>
-      `<li><button class="link" data-where="${esc(x.id)}" style="text-align:left">${esc(x.label)}</button> <span class="mute mono" style="font-size:11px">${esc(x.note)}</span></li>`).join("")}</ul>`;
-  let html = places, bind = () => {};
-  if (!s){
-    const invites = [...T.spaces.values()].map(t => ({t, inv:T.invitedAs(me, t.id)})).filter(x => x.inv && !T.roleOf(me, x.t.id));
-    html = (invites.length ? `<div class="card" style="margin-bottom:10px"><h3 style="margin:0 0 6px">Invitations</h3><ul class="log" id="tsInvList">${invites.map(({t, inv}, i) =>
-        `<li><span class="n">${i + 1}</span><span><b>${esc(t.label)}</b> <span class="mute">as ${esc(inv.role)} (${esc(inv.profile)})</span> <button data-tsjoin="${esc(t.id)}" data-prof="${esc(inv.profile)}" ${can ? "" : "disabled"}>Join</button></span></li>`).join("")}</ul>
-        <p class="mute" style="margin:4px 0 0;font-size:12px">Joining adds its system to your Galaxy.</p></div>` : "") + places +
-      `<div class="card" id="wsCreateCard" style="margin-top:12px" data-nodach-part="map.world.create"><h3 style="margin:0 0 6px">New teamspace</h3>
-        <p class="mute" style="margin:0 0 6px;font-size:12px">A new system on this map, shared only with the people you invite. You are its owner.</p>
-        <div class="row"><label for="wsLabel">Name</label><input id="wsLabel" maxlength="80" placeholder="e.g. Insydr pilot" style="flex:1;min-width:140px" ${can ? "" : "disabled"}>
-          <button class="primary" id="wsCreate" ${can ? "" : "disabled"}>Create</button></div>
-        <span class="mute" id="wsNote" role="status">${here ? "" : "Teamspaces are shared through the hub: open Studio at staging.nodach.com/studio to create or join one."}</span></div>
-      <div id="wsOthers" style="margin-top:12px"></div>`;
-    bind = () => {
-      $("#wsCreate").onclick = () => createSpace($("#wsLabel"), $("#wsNote"));
-      $("#wsLabel").onkeydown = e => { if (e.key === "Enter") $("#wsCreate").click(); };
-      bindJoins(T); renderOthers(T, me, can, $("#wsOthers")); };
-  } else if (s.kind === "teamspace" && w.node?.startsWith("prof:")){
-    const pid = w.node.slice(5);
-    html = profilePanel(T, s.t, pid, me, can) + `<div style="margin-top:12px">${places}</div>`;
-    bind = () => bindProfilePanel(s.t, pid);
-  } else if (s.kind === "teamspace" && !w.planet){
-    html = renderOneSpace(T, s.t, me, can, true) + `<div style="margin-top:12px">${places}</div>`;
-    bind = () => bindOneSpace(s.id, T, me, () => worldGo(null));
-  } else if (s.kind === "teamspace"){
-    html = places + `<p class="mute" style="margin:12px 0 0;font-size:12px">${esc(s.label)}'s controls (members, roles, money, sharing) are at its system. <button id="wsToSys">Go to ${esc(s.label)}</button></p>`;
-    bind = () => { $("#wsToSys").onclick = () => worldGo(s.id, null); };
-  }
-  box.innerHTML = `<div class="stack" data-nodach-part="map.world.panel" style="gap:0">${html}</div>`;
-  box.querySelectorAll("[data-where]").forEach(b => b.onclick = () => worldSelect(b.dataset.where));
-  for (const [id, v] of Object.entries(typed)){ const x = box.querySelector("#" + CSS.escape(id)); if (x && v && x.tagName === "INPUT") x.value = v; }
-  bind();
-  if (focused){ const x = box.querySelector("#" + CSS.escape(focused)); if (x) x.focus({preventScroll:true}); }
+/* W1b (205c c): teamspace controls are nodes on the map, with no side panel. Adding something is a dashed action
+   node beside what it acts on: + New teamspace, an invitation (Join), a teamspace you reach only through support
+   access, + Invite, + Add node, + Share, + Money rules. Changing something opens the node itself: the star (Export,
+   Leave, support log) or a person on Members (their role). Enter opens the focused node, Esc closes it, and what you
+   type survives a redraw. The teamspace page (#v-spaces) stays only where the map can't draw. */
+S.worldOpen = null; S.worldOpenKey = 0; S.ctlTyped = {}; S.ctlNote = {};
+function worldOpen(id){
+  S.worldOpen = id; S.worldOpenKey++;
+  const w = S.world; if (w && w.planet === "members") w.node = id && id.startsWith("prof:") ? id : null;
+  renderMap(false);
+  if (id) setTimeout(() => document.querySelector(`[data-ctl="${CSS.escape(id)}"] .nd-ctl-body`)
+    ?.querySelector("input:not([disabled]),select:not([disabled]),button:not([disabled])")?.focus({preventScroll:true}), 150);
 }
-function profilePanel(T, t, pid, me, can){
+const ctlTyped = (id, dflt) => S.ctlTyped[id] ?? dflt ?? "";
+const ctlIn = (id, ph, o = {}) => `<input id="${esc(id)}" aria-label="${esc(o.label || ph)}" placeholder="${esc(ph)}" maxlength="${o.max || 200}" value="${esc(ctlTyped(id))}"${o.dis ? " disabled" : ""}${o.mono ? ' class="mono"' : ""}>`;
+const ctlSel = (id, vals, dflt, label) => `<select id="${esc(id)}" aria-label="${esc(label)}">${vals.map(v => { const [k, l] = Array.isArray(v) ? v : [v, v];
+  return `<option value="${esc(k)}"${k === ctlTyped(id, dflt) ? " selected" : ""}>${esc(l)}</option>`; }).join("")}</select>`;
+const ctlNoteHtml = id => `<span class="mute" role="status" data-note>${esc(S.ctlNote[id] || "")}</span>`;
+function worldGalaxyControls(ctl, x0){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), here = tsHere(), can = here && writable();
+  ctl("ctl:new", x0, 24, "idea", "+ NEW TEAMSPACE", "A new system, shared with the people you invite", {action:true, body:() =>
+    `<p class="mute">A new system on this map, shared only with the people you invite. You are its owner.</p>
+     <div class="row">${ctlIn("wcLabel", "Name, e.g. Insydr pilot", {max:80, dis:!can, label:"Teamspace name"})}<button class="primary" data-act="create" ${can ? "" : "disabled"}>Create</button></div>
+     ${here ? "" : `<p class="mute">Teamspaces are shared through the hub: open Studio at staging.nodach.com/studio to create or join one.</p>`}${ctlNoteHtml("ctl:new")}`});
+  const invites = [...T.spaces.values()].map(t => ({t, inv:T.invitedAs(me, t.id)})).filter(x => x.inv && !T.roleOf(me, x.t.id));
+  invites.forEach(({t, inv}, i) => { const id = "ctl:inv:" + t.id;
+    ctl(id, x0, 124 + i * 100, "question", "INVITATION · as " + inv.role, t.label, {action:true, body:() =>
+      `<p><b>${esc(t.label)}</b> invites you as <b>${esc(inv.role)}</b> (${esc(inv.profile)}). Joining adds its system to your Galaxy.</p>
+       <div class="row"><button class="primary" data-act="join" data-ts="${esc(t.id)}" data-prof="${esc(inv.profile)}" ${can ? "" : "disabled"}>Join</button></div>${ctlNoteHtml(id)}`}); });
+  // 114b a, 117b a: the hub owner sees the other teamspaces on this hub by id only; support access opens one, read only, logged, for 24 hours
+  if (!S.owner || !here) return;
+  if (!S.tsDir) loadTsDir().then(() => { if (S.tsDir && S.view === "map" && S.world) renderMap(false); });
+  (S.tsDir?.others || []).filter(o => !T.roleOf(me, o.id) && !T.supportOpen(me, o.id)).forEach((o, i) => { const id = "ctl:other:" + o.id;
+    ctl(id, x0 + 260, 24 + i * 100, "setting", "SYSTEM · " + o.id, "Not yours · support access only", {action:true, dim:true, body:() =>
+      `<p class="mute">As the hub owner you see only its id (117b a). Support access is logged, shown to its owners, read only, and closes by itself after 24 hours.</p>
+       ${ctlIn("wcWhy-" + o.id, "Why, e.g. Nassar asked for help with an import", {max:500, label:"Reason for support access"})}
+       <div class="row"><button class="primary" data-act="support" data-ts="${esc(o.id)}" ${can ? "" : "disabled"}>Open with support access</button></div>${ctlNoteHtml(id)}`}); });
+}
+function worldSystemControls(ctl, s, x, y, only){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), can = tsHere() && writable(), t = s.t;
+  const role = T.roleOf(me, t.id), owner = role === "owner", member = owner || role === "member", want = k => !only || only.includes(k);
+  const inTs = [...T.itemSpace].filter(([, sp]) => sp === t.id).map(([n]) => n).filter(n => F.items.has(n));
+  const money = inTs.some(n => F.items.get(n).meta?.money_rules), shareable = inTs.filter(n => owner || T.itemAuthor.get(n) === me);
+  const acts = [];
+  if (want("invite") && owner && can) acts.push(["ctl:invite", "story", "+ INVITE", "Someone to " + t.label, () =>
+    `<div class="row">${ctlIn("wcInvProf", "P-their-login", {max:80, mono:true, label:"Profile to invite"})}${ctlSel("wcInvRole", ["member","guest","owner"], "member", "Role")}</div>
+     <div class="row"><button class="primary" data-act="invite">Invite</button></div>
+     <p class="mute">Everyone has a Personal profile named P- and their GitHub login (P-nassar). They see the invitation on their Galaxy and click Join. Someone new signs in first through Invite on the Hub page.</p>${ctlNoteHtml("ctl:invite")}`]);
+  if (want("add") && member && can) acts.push(["ctl:add", "idea", "+ ADD NODE", "A new idea in " + t.label, () =>
+    `<div class="row">${ctlIn("wcNodeTitle", "Title", {label:"New node title"})}<button class="primary" data-act="addnode">Add</button></div>${ctlNoteHtml("ctl:add")}`]);
+  if (want("share") && can && role && shareable.length) acts.push(["ctl:share", "asset", "+ SHARE", "A node with someone, or everyone here", () =>
+    `${ctlSel("wcShareNode", shareable.map(n => [n, F.items.get(n)?.title || n]), shareable[0], "Node to share")}
+     ${ctlIn("wcShareTo", "P-their-login (blank: everyone here)", {max:80, mono:true, label:"Share with"})}
+     <div class="row">${ctlSel("wcShareLevel", [...LEVEL_OPTS, "none"], "viewer", "Level")}<button class="primary" data-act="share">Share</button></div>${ctlNoteHtml("ctl:share")}`]);
+  if (want("money") && owner && can && !money) acts.push(["ctl:money", "setting", "+ MONEY RULES", "This teamspace's money rules node", () =>
+    `<p class="mute">A placeholder node where this teamspace's own money rules live, as versions. No payments are taken yet.</p>
+     <div class="row"><button class="primary" data-act="money">Add the Money rules node</button></div>${ctlNoteHtml("ctl:money")}`]);
+  acts.forEach(([id, type, label, title, body], i) => ctl(id, x, y + i * 100, type, label, title, {action:true, body}));
+}
+function starBody(s){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), t = s.t, role = T.roleOf(me, t.id), owner = role === "owner", can = tsHere() && writable();
+  const support = !role && T.supportOpen(me, t.id);
+  return `<p>${role ? `You are <b>${esc(role)}</b> here.` : `Support access until ${esc(tsTime(support))}, read only.`} ${t.members.size} member${t.members.size === 1 ? "" : "s"}${t.invites.size ? `, ${t.invites.size} invited` : ""}.</p>
+    ${support ? `<p class="mute" id="tsSupportNote">You are reading this teamspace through a logged support access. Its owners see it in their Support access log. It closes by itself after 24 hours; you can't change anything here.</p>` : ""}
+    <div class="row">${owner ? `<button class="primary" data-act="export" title="Everything members created here, with full history; files as references; nodes shared in as links">Export teamspace</button>` : ""}
+      ${can && role ? `<button data-act="leave">Leave teamspace</button>` : ""}</div>
+    ${owner ? supportLog(T, t) : ""}${ctlNoteHtml("sys:" + t.id)}`;
+}
+function profileBody(s, pid){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), t = s.t, can = tsHere() && writable();
   const r = t.members.get(pid), inv = t.invites.get(pid), mine = T.acctOf(pid) === me, owner = T.roleOf(me, t.id) === "owner";
   const made = [...T.itemSpace].filter(([n, sp]) => sp === t.id && T.itemAuthor.get(n) === T.acctOf(pid) && F.items.has(n)).length;
-  const opt = (vals, cur) => vals.map(v => `<option value="${v}"${v === cur ? " selected" : ""}>${v}</option>`).join("");
-  return `<div class="card" data-nodach-part="map.world.profile"><span class="mono mute">PROFILE · ${esc(pid)}</span>
-    <h3 id="wpTitle" style="margin:4px 0 6px">${esc(pid)}${mine ? ` <span class="mute">(you)</span>` : ""}</h3>
-    <p style="margin:0 0 8px">Role in ${esc(t.label)}: <b id="wpRoleNow">${r ? esc(r) : `invited as ${esc(inv || "")}, not joined yet`}</b> · created ${made} node${made === 1 ? "" : "s"} you can read here.</p>
-    ${owner && can ? (r ? `<div class="row"><label for="wpRole">Role</label><select id="wpRole">${opt(ROLE_OPTS, r)}</select><button id="wpRoleGo">Change role</button></div>` : "") +
-        (!mine || !r ? `<div class="row" style="margin-top:6px"><button id="wpRemove">${r ? "Remove from teamspace" : "Cancel invite"}</button></div>` : "")
-      : `<p class="mute" style="margin:0">Only owners change roles.</p>`}
-    <span class="mute" id="wpNote" role="status"></span></div>`;
+  return `<p>Role in ${esc(t.label)}: <b id="wpRoleNow">${r ? esc(r) : `invited as ${esc(inv || "")}, not joined yet`}</b>${mine ? " (you)" : ""} · created ${made} node${made === 1 ? "" : "s"} you can read here.</p>
+    ${owner && can ? (r ? `<div class="row">${ctlSel("wcRole", ROLE_OPTS, r, "Role")}<button class="primary" data-act="role" data-pid="${esc(pid)}">Change role</button></div>` : "") +
+        (!mine || !r ? `<div class="row"><button data-act="remove" data-pid="${esc(pid)}">${r ? "Remove from teamspace" : "Cancel invite"}</button></div>` : "")
+      : `<p class="mute">Only owners change roles.</p>`}${ctlNoteHtml("prof:" + pid)}`;
 }
-function bindProfilePanel(t, pid){
-  const ts = t.id;
-  const go = $("#wpRoleGo"); if (go) go.onclick = async () => { const r = $("#wpRole").value;
-    if (await write("member.role", ts, {teamspace:ts, profile:pid, role:r})){ toast(`${pid} is now ${r}.`); refresh(); } };
-  const rm = $("#wpRemove"); if (rm) rm.onclick = async () => {
-    if (await write("member.remove", ts, {teamspace:ts, profile:pid})){ toast(`${pid} removed. Their history stays.`); refresh(); worldGo(ts, "members"); } };
+async function worldAct(act, card, b){
+  const id = card.dataset.ctl, ts = b.dataset.ts || S.world?.sys, T = TEAMS || foldTeams(S.events), me = myLogin();
+  const val = k => (card.querySelector("#" + CSS.escape(k))?.value || "").trim();
+  const note = m => { S.ctlNote[id] = m; const n = card.querySelector("[data-note]"); if (n) n.textContent = m; return null; };
+  const done = (keys, msg) => { for (const k of keys) delete S.ctlTyped[k]; delete S.ctlNote[id]; toast(msg); S.worldOpen = null; refresh(); };
+  const PROF = /^[A-Za-z0-9_.:-]{1,80}$/;
+  b.disabled = true;
+  try {
+    if (act === "create"){ if (!val("wcLabel")) return note("Give the teamspace a name.");
+      if (await createSpace(card.querySelector("#wcLabel"), card.querySelector("[data-note]"))){ delete S.ctlTyped.wcLabel; delete S.ctlNote[id]; } return; }
+    if (act === "join") return joinSpace(b.dataset.ts, b.dataset.prof, T);
+    if (act === "support"){ const why = val("wcWhy-" + ts);
+      if (why.length < 3) return note("Say why you need support access: the teamspace's owners will read it.");
+      if (await requestSupport(ts, why)) delete S.ctlTyped["wcWhy-" + ts]; return; }
+    if (act === "invite"){ const pid = val("wcInvProf"), r = val("wcInvRole") || "member";
+      if (!PROF.test(pid)) return note("Name the profile to invite, e.g. P-nassar.");
+      if (await write("member.invite", ts, {teamspace:ts, profile:pid, role:r})) done(["wcInvProf", "wcInvRole"], `${pid} invited as ${r}.`); return; }
+    if (act === "addnode"){ const title = val("wcNodeTitle"); if (!title) return note("Give the node a title.");
+      if (await write("item.create", null, {id:"TN-" + Date.now().toString(36), type:"idea", title, body:"", status:"open", teamspace:ts})) done(["wcNodeTitle"], `Added ${title} to the teamspace.`); return; }
+    if (act === "share"){ const node = val("wcShareNode"), to = val("wcShareTo"), level = val("wcShareLevel") || "viewer";
+      if (to && !PROF.test(to)) return note("Share with a profile id like P-nassar, or leave it blank for everyone here.");
+      if (await write("node.share", node, to ? {node, profile:to, level} : {node, teamspace:ts, level})) done(["wcShareNode", "wcShareTo", "wcShareLevel"], level === "none" ? "Unshared." : `Shared as ${level}.`); return; }
+    if (act === "money"){ if (await addMoneyNode(ts, T.spaces.get(ts)?.label)) done([], "Money rules node added."); return; }
+    if (act === "export") return downloadTeamspace(ts);
+    if (act === "leave"){ const mine = [...T.spaces.get(ts).members.keys()].find(p => T.acctOf(p) === me);
+      if (T.roleOf(me, ts) === "owner") note("Export first if you want a copy: owners take everything members created with them.");
+      if (await write("member.remove", ts, {teamspace:ts, profile:mine})){ toast("You left the teamspace."); refresh(); worldGo(null); } return; }
+    if (act === "role"){ const pid = b.dataset.pid, r = val("wcRole");
+      if (await write("member.role", ts, {teamspace:ts, profile:pid, role:r})){ delete S.ctlTyped.wcRole; toast(`${pid} is now ${r}.`); refresh(); } return; }
+    if (act === "remove"){ const pid = b.dataset.pid;
+      if (await write("member.remove", ts, {teamspace:ts, profile:pid})){ toast(`${pid} removed. Their history stays.`); refresh(); worldOpen(null); } return; }
+  } finally { if (b.isConnected) b.disabled = false; }
 }
+(() => {
+  const cv = $("#canvas"), keep = e => { if (e.target.closest?.(".nd-ctl-body") && e.target.id) S.ctlTyped[e.target.id] = e.target.value; };
+  cv.addEventListener("click", e => { const b = e.target.closest?.("[data-act]"), card = b?.closest("[data-ctl]"); if (card && S.world) worldAct(b.dataset.act, card, b); });
+  cv.addEventListener("input", keep); cv.addEventListener("change", keep);
+  // Esc closes the open node from anywhere on the page (an action can redraw the card the focus was in)
+  document.addEventListener("keydown", e => { if (e.key !== "Escape" || !S.world || !S.worldOpen || S.view !== "map") return;
+    const id = S.worldOpen; e.preventDefault(); worldOpen(null);
+    setTimeout(() => document.querySelector(`.react-flow__node[data-id="${CSS.escape(id)}"]`)?.focus(), 150); });
+  cv.addEventListener("keydown", e => {
+    if (!S.world) return;
+    const node = e.target.closest?.(".react-flow__node");
+    if (e.key === "Enter" && node && e.target === node){ e.preventDefault(); worldSelect(node.dataset.id); return; }
+    if (e.key === "Enter" && e.target.matches?.(".nd-ctl-body input")){ e.preventDefault(); e.target.closest(".nd-ctl-body").querySelector("button.primary")?.click(); }
+  });
+})();
+
 
 /* Export on leaving: everything members created in the teamspace, with full history (every event, retracted ones
    included), files as references (never their bytes), and nodes shared in by others as links only. Codes and
@@ -2653,7 +2725,7 @@ function worldPlanets(s){
 }
 const worldNodes = s => s.items.length + s.shared.length;
 function enterWorld(){ S.world = {sys:null, planet:null, node:null}; S.sel = null; S.worldFly = false; if (S.view !== "map") show("map"); renderMap(true); }
-function worldGo(sys, planet){ S.world = {sys, planet:planet || null, node:null}; S.sel = null; S.worldFly = true; renderMap(true); }
+function worldGo(sys, planet){ S.world = {sys, planet:planet || null, node:null}; S.worldOpen = null; S.sel = null; S.worldFly = true; renderMap(true); }
 /* W0: every place has an address, #/<system>/<planet>/<node> (#/ alone is the Galaxy), so Back, reload and pasted links
    land on the same place. Item addresses (#D-001) keep working: they fly to the node's place. */
 const planetSlug = key => key.replace(/^t:/, ""), planetKey = slug => ["members","money","shared"].includes(slug) ? slug : "t:" + slug;
@@ -2674,7 +2746,7 @@ function worldHash(){
 }
 function worldFromHash(){
   const w = parseWorld(location.hash); if (!w || !tsCanvasOk()) return false;
-  S.worldFromHistory = true; S.world = w; S.worldFly = true; S.sel = null;
+  S.worldFromHistory = true; S.world = w; S.worldOpen = w.node && w.node.startsWith("prof:") ? w.node : null; S.worldFly = true; S.sel = null;
   if (S.view !== "map") show("map"); else renderMap(true);
   if (w.node && !w.node.startsWith("prof:") && F.items.has(w.node)) select(w.node);
   return true;
@@ -2718,6 +2790,10 @@ function renderWorld(relayout){
     data:{type, label, title, n:filled ? 1 : 0, open:false, closed:false, priv:false, dim:false, ...(extra || {})}});
   const edge = (a, b, label) => edges.push({id:a + ">" + b, source:a, target:b, label, style:{stroke:"var(--mute)", strokeWidth:1, strokeDasharray:"2 4"},
     labelStyle:{fontSize:10, fill:"var(--ink)"}, labelBgStyle:{fill:"var(--surface)"}});
+  // W1b: a control node; open (S.worldOpen), it grows into its controls
+  const ctl = (id, x, y, type, label, title, o) => { const open = S.worldOpen === id;
+    nodes.push({id, type:"control", position:{x, y}, zIndex:open ? 20 : 1, selected:open,
+      data:{type, label, title, filled:!!o.filled, action:!!o.action, dim:!!o.dim, open, html:open ? o.body() : ""}}); };
   let hint;
   if (!s){
     hint = sys.length ? "Click a system to fly in · a planet to land on it" : "Nothing to show yet: no nodes you can read";
@@ -2732,17 +2808,25 @@ function renderWorld(relayout){
         edge("sys:" + sy.id, id); });
       x0 += W + 120;
     }
+    worldGalaxyControls(ctl, x0);
   } else if (!pl){
     hint = "Click a planet to land · Galaxy in the bar to fly out";
-    mk("sys:" + s.id, 0, 0, "lead", "SYSTEM · " + (s.kind === "home" ? "home" : s.id), `${s.label} · ${worldNodes(s)} nodes`, true);
+    if (s.kind === "teamspace"){ hint = "Click the star for this teamspace's controls · a dashed node adds something · a planet to land";
+      ctl("sys:" + s.id, 0, 0, "lead", "SYSTEM · " + s.id, `${s.label} · ${worldNodes(s)} nodes · you: ${s.role}`, {filled:true, body:() => starBody(s)}); }
+    else mk("sys:" + s.id, 0, 0, "lead", "SYSTEM · home", `${s.label} · ${worldNodes(s)} nodes`, true);
     const R = Math.max(300, planets.length * 60);
+    if (s.kind === "teamspace") worldSystemControls(ctl, s, -Math.round(R * 1.4) - 420, -R);
     planets.forEach((p, i) => { const a = -Math.PI / 2 + i * 2 * Math.PI / planets.length, id = "pl:" + s.id + ":" + p.key;
       mk(id, Math.round(R * 1.4 * Math.cos(a)), Math.round(R * Math.sin(a)), p.type, "PLANET · " + p.label, `${p.count} ${p.profiles ? "profile" : "node"}${p.count === 1 ? "" : "s"}`, false);
       edge("sys:" + s.id, id); });
   } else {
     hint = pl.count ? "Click a node to open it · the bar takes you back up" : "Nothing on this planet yet";
     const ROWS = 8;
-    if (pl.profiles) pl.profiles.forEach((p, i) => mk("prof:" + p.pid, Math.floor(i / ROWS) * 260, (i % ROWS) * 84, "story", "PROFILE · " + p.pid, p.role, false));
+    if (pl.profiles){
+      hint = "Click a person to see or change their role · + Invite adds someone";
+      pl.profiles.forEach((p, i) => ctl("prof:" + p.pid, Math.floor(i / ROWS) * 330, (i % ROWS) * 84, "story", "PROFILE · " + p.pid, p.role, {body:() => profileBody(s, p.pid)}));
+      worldSystemControls(ctl, s, -420, 0, ["invite"]);
+    }
     else {
       const ids = new Set(pl.items.map(i => i.id));
       pl.items.forEach((it, i) => { const d = tsItemData(it);
@@ -2758,18 +2842,21 @@ function renderWorld(relayout){
     : pl.profiles ? pl.profiles.map(p => ({id:"prof:" + p.pid, label:p.pid, note:p.role})) : pl.items.map(i => ({id:i.id, label:i.title || i.id, note:i.id}));
   if (!S.sel && S.view === "map") renderInspector();
   const none = () => {}, fly = S.worldFly; S.worldFly = false;
-  window.NodachCanvas.render(el, {nodes, edges, sel:w.node, can:false, focus:hint, dark:document.documentElement.dataset.theme === "dark",
-    fit:!!relayout, fitKey:canvasFitKey, flyMs:fly ? 600 : 0, onSelect:worldSelect, onMove:none, onConnect:none, onFrame:none, isStep:() => false,
+  if (S.worldOpen && !nodes.some(n => n.id === S.worldOpen)) S.worldOpen = null;   // its node isn't here any more
+  window.NodachCanvas.render(el, {nodes, edges, sel:S.worldOpen || w.node, can:false, focus:hint, dark:document.documentElement.dataset.theme === "dark",
+    fit:!!relayout, fitKey:canvasFitKey, flyMs:fly ? 600 : 0, onSelect:worldSelect, focusNode:S.worldOpen, focusKey:S.worldOpenKey, onMove:none, onConnect:none, onFrame:none, isStep:() => false,
     onWire:none, onMixed:none, onStep:none, onAddStep:none, onTemplate:none, onStepMove:none});
 }
 function worldSelect(id){
-  const w = S.world; if (!w || !id) return;
-  if (id.startsWith("sys:")) return worldGo(id.slice(4), null);
+  const w = S.world; if (!w) return;
+  if (!id){ if (S.worldOpen) worldOpen(null); return; }   // a click on empty space closes an open control
+  if (id.startsWith("sys:") && !(w.sys === id.slice(4) && !w.planet)) return worldGo(id.slice(4), null);
   if (id.startsWith("pl:")){ const rest = id.slice(3), cut = rest.indexOf(":"); return worldGo(rest.slice(0, cut), rest.slice(cut + 1)); }
+  if (id.startsWith("sys:") || id.startsWith("ctl:") || id.startsWith("prof:")) return worldOpen(S.worldOpen === id ? null : id);
   w.node = id;
-  if (id.startsWith("prof:")){ S.sel = null; renderMap(false); return; }   // a profile: the panel shows its role here, with the owner's controls
   select(id);   // the node's own history, links and answers
 }
+
 /* ---------------------------------------------------------------- account (served by the hub only)
    Who is signed in (login · owner/member, never an email address) and a way out: the hub's /studio/logout clears
    the session cookie, then the sign-in page opens, where another account (GitHub or a linked email) can sign in. */
@@ -3665,7 +3752,20 @@ function StepNode({ data, selected }) {
     r ? h("div", { className: "nd-run " + (r.ok ? "ok" : r.skipped ? "" : "bad") }, r.skipped ? "skipped" : r.ok ? `${r.count} item(s)` : "failed") : null,
     h(Handle, { type: "source", position: Position.Right }));
 }
-const nodeTypes = { item: ItemNode, frame: FrameNode, step: StepNode };
+/* W1b: a control node. Closed it reads like any node; open (data.open) it shows its controls, as HTML the page
+   builds. Buttons carry data-act; the page handles them from one listener on the canvas, so this never writes. */
+function ControlNode({ id, data, selected }) {
+  const col = `var(--t-${data.type})`, hot = selected || data.open;
+  return h("div", { className: "nd-item nd-ctl" + (data.open ? " open nodrag nopan nowheel" : "") + (data.action ? " nd-action" : ""), "data-ctl": id, title: data.title,
+      style: { borderColor: hot ? "var(--accent)" : col, borderWidth: data.open ? 3 : 2, borderStyle: data.action ? "dashed" : "solid",
+               background: data.filled ? col : "var(--raise)", color: data.filled ? "var(--surface)" : "var(--ink)", opacity: data.dim ? .6 : 1 } },
+    h(Handle, { type: "target", position: Position.Left }),
+    h("div", { className: "nd-code" }, data.label),
+    h("div", { className: "nd-title" }, data.title),
+    data.open ? h("div", { className: "nd-ctl-body", dangerouslySetInnerHTML: { __html: data.html || "" } }) : null,
+    h(Handle, { type: "source", position: Position.Right }));
+}
+const nodeTypes = { item: ItemNode, frame: FrameNode, step: StepNode, control: ControlNode };
 
 function Inner(p) {
   const [nodes, setNodes] = useState(p.nodes);
@@ -3676,6 +3776,7 @@ function Inner(p) {
       const sel = new Set(prev.filter(n => n.selected).map(n => n.id));
       return p.nodes.map(n => ({ ...n, selected: n.selected || n.id === p.sel || sel.has(n.id) })); }); }, [p.nodes, p.sel]);
   useEffect(() => { if (p.fit) setTimeout(() => rf.fitView({ padding: .15, duration: p.flyMs || 0 }), 30); }, [p.fitKey]);   // flyMs: the galaxy's fly-in
+  useEffect(() => { if (p.focusNode) setTimeout(() => rf.fitView({ nodes: [{ id: p.focusNode }], padding: .5, maxZoom: 1.1, duration: 300 }), 140); }, [p.focusKey]);   // W1b: a control grown open comes into view
   const onNodesChange = useCallback(ch => setNodes(ns => applyNodeChanges(ch, ns)), []);
   const onNodeDragStop = useCallback((_, __, dragged) => {
     if (!p.can) return;
@@ -3697,7 +3798,8 @@ function Inner(p) {
     p.onFrame({ id: "FR-" + Date.now().toString(36), title: "Group", x: Math.round(c.x), y: Math.round(c.y), w: 320, h: 200, created: true }); };
   return h("div", { style: { position: "absolute", inset: 0 } },
     h(ReactFlow, { nodes, edges: p.edges, nodeTypes, onNodesChange, onNodeDragStop, onConnect,
-        onNodeClick: (_, n) => { if (n.type === "item") p.onSelect(n.id); if (n.type === "step") p.onStep(n.id); },
+        onNodeClick: (e, n) => { if (n.type === "item") p.onSelect(n.id); if (n.type === "step") p.onStep(n.id);
+          if (n.type === "control" && !e.target.closest(".nd-ctl-body")) p.onSelect(n.id); },
         onPaneClick: () => p.onSelect(null),
         nodesDraggable: true, nodesConnectable: p.can && !p.focus, elementsSelectable: true, selectionOnDrag: false, panOnScroll: false,
         minZoom: .1, maxZoom: 2.5, fitView: true, proOptions: { hideAttribution: false }, colorMode: p.dark ? "dark" : "light" },
