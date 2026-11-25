@@ -2307,7 +2307,18 @@ async def shot(p, name):
 
 
 async def world_ids(p):
-    return sorted(i for i in await canvas_ids(p) if not i.startswith("cl:"))
+    """Places on the map: systems, planets and nodes (not cluster frames, not W1b control nodes)."""
+    return sorted(i for i in await canvas_ids(p) if not i.startswith("cl:") and not i.startswith("ctl:"))
+
+
+async def open_ctl(p, cid):
+    """W1b: click a control node so it grows open; returns its text."""
+    await click_node(p, cid); await p.wait_for_timeout(400)
+    return await p.inner_text(f'[data-ctl="{cid}"]')
+
+
+async def act(p, cid, name, wait=700):
+    await p.click(f'[data-ctl="{cid}"] [data-act="{name}"]'); await p.wait_for_timeout(wait)
 
 
 async def s90_galaxy_travel_as_owner(b):
@@ -2361,7 +2372,7 @@ async def s91_insydr_member_sees_only_insydr(b):
     n = await open_teams_hub(b, H, "nassar", False)
     other = await make_space(n, "Other venture")
     m = await open_teams_canvas(b, H, "insydr-tester", False)
-    await to_spaces(m); await m.click("#tsInvList [data-tsjoin]"); await m.wait_for_timeout(500)   # W1: Teamspaces is the Galaxy; joining flies in
+    await to_spaces(m); await open_ctl(m, f"ctl:inv:{ts}"); await act(m, f"ctl:inv:{ts}", "join", 900)   # W1b: the invitation is a node on the Galaxy; joining flies in
     await m.locator('#worldCrumbs [data-wgo=""]').click(); await m.wait_for_selector(f'.react-flow__node[data-id="sys:{ts}"]', timeout=8000); await m.wait_for_timeout(400)
     seen = sorted(i for i in await world_ids(m) if i.startswith("sys:"))
     await shot(m, "s91-1-member-galaxy")
@@ -2387,7 +2398,7 @@ async def s92_galaxy_is_home_and_places_have_links(b):
     """W0: with no choice saved, the map opens on the Galaxy. Each place Nowed flies to gets an address (#/system,
     #/system/planet, #/system/planet/node); Back goes to where he was, reload keeps him there, and a pasted link to a
     node opens at that node with its panel. An item address (#id) flies to where the node lives. With nothing selected
-    the side panel lists the places here, as buttons, so the keyboard reaches everything. There is no Whole graph
+    Tab reaches each node on the map and Enter goes there (W1b: no side panel). There is no Whole graph
     (R-261125-201): Galaxy in the bar goes back out, and a Whole graph choice saved before is ignored."""
     H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
     o = await open_teams_canvas(b, H, "Morami49", True)
@@ -2395,9 +2406,9 @@ async def s92_galaxy_is_home_and_places_have_links(b):
     await o.reload(); await o.wait_for_function("!!window.NodachCanvas", timeout=20000)
     await o.wait_for_selector('.react-flow__node[data-id="sys:home"]', timeout=10000); await o.wait_for_timeout(500)
     first = await o.evaluate("({hash: location.hash, bar: !!document.querySelector('#worldBar')})")
-    here = await o.locator("#worldHereList [data-where]").all_text_contents()
+    here = await o.locator(f'.react-flow__node[data-id="sys:{ts}"]').all_text_contents()
     await shot(o, "s92-1-opens-on-galaxy")
-    await o.locator(f'#worldHereList [data-where="sys:{ts}"]').focus(); await o.keyboard.press("Enter"); await o.wait_for_timeout(700)
+    await o.locator(f'.react-flow__node[data-id="sys:{ts}"]').focus(); await o.keyboard.press("Enter"); await o.wait_for_timeout(700)
     by_keys = await o.evaluate("location.hash")
     await shot(o, "s92-2-keyboard-flies-to-system")
     await click_node(o, f"pl:{ts}:t:idea"); await o.wait_for_timeout(600)
@@ -2435,133 +2446,149 @@ async def s92_galaxy_is_home_and_places_have_links(b):
 SCENARIOS += [s92_galaxy_is_home_and_places_have_links]
 
 
-# ---------------------------------------------------------------- PLAN-world-ui W1: teamspaces are systems on the Galaxy
+# ---------------------------------------------------------------- PLAN-world-ui W1 + W1b: teamspaces are systems, controls are nodes
 async def to_teams_galaxy(p):
     """Teamspaces in the bar: with the map loaded, that is the Galaxy (W1)."""
     await nav_open(p); await p.click("#sections [data-s=teams]"); await p.wait_for_timeout(150)
-    await p.click("#subnav [data-sv=spaces]"); await p.wait_for_timeout(700)
+    await p.click("#subnav [data-sv=spaces]"); await p.wait_for_timeout(800)
 
 
 async def fly_to_system(p, ts):
     await to_teams_galaxy(p)
-    await p.locator(f'#worldHereList [data-where="sys:{ts}"]').click(); await p.wait_for_timeout(800)
+    await click_node(p, f"sys:{ts}"); await p.wait_for_timeout(800)
+
+
+async def no_panel(p):
+    return await p.evaluate("document.querySelector('main').classList.contains('nopanel') && getComputedStyle(document.querySelector('#inspector')).display === 'none'")
 
 
 async def s93_teamspaces_is_the_galaxy(b):
-    """W1: Nowed clicks Teamspaces. The Galaxy opens (Teamspaces stays lit in the bar), not a page of forms; the side
-    panel says New teamspace. He types Insydr pilot and clicks Create: the teamspace and its Money rules node are
-    written as before, a new system appears and he flies straight to it (#/<id>). Its planets are around the star and
-    the side panel holds the teamspace's controls: its name, that he is owner, Members and roles, Invite, Money rules,
-    Export. Galaxy in the bar shows the new system next to Home."""
+    """W1 + W1b (205c c): Nowed clicks Teamspaces. The Galaxy opens with Teamspaces lit in the bar, and there is no
+    side panel. A dashed + New teamspace node sits beside the systems; he clicks it, it grows open, he types Insydr
+    pilot and clicks Create. The teamspace and its Money rules node are written as before and he flies to the new
+    system (#/<id>). Dashed + Invite, + Add node and + Share nodes sit beside it. He clicks the star: it grows open
+    with that he is owner, Export teamspace and the support log. Galaxy in the bar shows it next to Home."""
     H = team_hub(); o = await open_teams_canvas(b, H, "Morami49", True)
     await to_teams_galaxy(o)
     first = await o.evaluate("({view: S.view, sys: S.world && S.world.sys, lit: document.querySelector('#subnav [data-sv=spaces]').getAttribute('aria-current'),"
                              " section: S.section, page: !document.querySelector('#v-spaces').hidden, hash: location.hash})")
-    has_form = await o.locator("#inspEmpty #wsCreate").count() == 1
+    panel_gone = await no_panel(o)
     await shot(o, "s93-1-teamspaces-opens-galaxy")
-    await o.fill("#wsLabel", "Insydr pilot"); await o.click("#wsCreate"); await o.wait_for_timeout(1200)
+    card = await open_ctl(o, "ctl:new")
+    await shot(o, "s93-2-new-teamspace-node-open")
+    await o.fill("#wcLabel", "Insydr pilot"); await act(o, "ctl:new", "create", 1300)
     kinds = [x["event"]["kind"] for x in H["posts"]]
     ts = next((x["event"]["item"] for x in H["posts"] if x["event"]["kind"] == "teamspace.create"), None)
     at = await o.evaluate("({sys: S.world && S.world.sys, planet: S.world && S.world.planet, hash: location.hash})")
-    on_map = await world_ids(o)
-    panel = await o.inner_text("#inspEmpty")
-    controls = {k: await o.locator("#inspEmpty " + sel).count() for k, sel in
-                {"members": "#tsMembers", "invite": "#tsInvite", "money": "#tsMoney", "export": "#tsExport", "add": "#tsAddNode"}.items()}
-    await shot(o, "s93-2-created-system-with-controls")
+    ids = await canvas_ids(o)
+    star = await open_ctl(o, f"sys:{ts}")
+    star_ok = "You are owner here" in star and await o.locator(f'[data-ctl="sys:{ts}"] [data-act="export"]').count() == 1 and "Support access log" in star
+    still_no_panel = await no_panel(o)
+    await shot(o, "s93-3-star-open-with-controls")
     await o.locator('#worldCrumbs [data-wgo=""]').click(); await o.wait_for_timeout(700)
     systems = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
-    await shot(o, "s93-3-galaxy-with-new-system")
-    ok = (first == {"view": "map", "sys": None, "lit": "true", "section": "teams", "page": False, "hash": "#/"} and has_form
+    ok = (first == {"view": "map", "sys": None, "lit": "true", "section": "teams", "page": False, "hash": "#/"} and panel_gone and "Create" in card
           and kinds == ["teamspace.create", "item.create"] and at == {"sys": ts, "planet": None, "hash": f"#/{ts}"}
-          and {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:money"} <= set(on_map)
-          and "Insydr pilot" in panel and "you are owner" in panel and all(v == 1 for v in controls.values())
-          and systems == sorted(["sys:home", f"sys:{ts}"]) and not o.errors)
-    return ok, (f"first={first}, create form in panel={has_form}, writes={kinds}, landed at={at}, on map={on_map}, controls={controls}, "
-                f"galaxy={systems}, errors={o.errors[:1]}")
+          and {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:money", "ctl:invite", "ctl:add", "ctl:share"} <= set(ids) and "ctl:money" not in ids
+          and star_ok and still_no_panel and systems == sorted(["sys:home", f"sys:{ts}"]) and not o.errors)
+    return ok, (f"first={first}, no side panel={panel_gone}, new node card={card.strip()[:40]!r}, writes={kinds}, landed at={at}, on map={sorted(ids)}, "
+                f"star controls={star_ok}, still no panel={still_no_panel}, galaxy={systems}, errors={o.errors[:1]}")
 
 
-async def s94_member_roles_in_the_panel(b):
-    """W1: in Insydr pilot's system Nowed lands on Members and clicks Nassar. The side panel shows Nassar's role there
-    (guest) with Change role; he makes him a member. What he had half typed in the panel survives the map redrawing.
-    Nassar, a guest, clicking his own profile sees his role and no controls."""
+async def s94_member_roles_on_the_node(b):
+    """W1b: in Insydr pilot Nowed opens + Invite and half types a name; the map redraws and what he typed is still
+    there. He lands on Members and clicks Nassar: the node grows open with Nassar's role (guest) and Change role, and
+    the address names it. He makes him a member; the node now says member. Nassar, a guest, opening his own node
+    sees his role and no controls. Esc closes an open node."""
     H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
     o = await open_teams_canvas(b, H, "Morami49", True)
     await fly_to_system(o, ts)
-    await o.fill("#tsInvProf", "P-half-typed"); await o.evaluate("refreshView()"); await o.wait_for_timeout(300)
-    kept = await o.input_value("#tsInvProf")
-    await click_node(o, f"pl:{ts}:members"); await o.wait_for_timeout(500)
-    await click_node(o, "prof:P-nassar"); await o.wait_for_timeout(500)
-    panel = await o.inner_text("#inspEmpty")
+    await open_ctl(o, "ctl:invite")
+    await o.fill("#wcInvProf", "P-half-typed"); await o.evaluate("refreshView()"); await o.wait_for_timeout(400)
+    kept = await o.input_value("#wcInvProf")
+    await click_node(o, f"pl:{ts}:members"); await o.wait_for_timeout(600)
+    card = await open_ctl(o, "prof:P-nassar")
     hash_ = await o.evaluate("location.hash")
-    await shot(o, "s94-1-profile-role-in-panel")
-    await o.select_option("#wpRole", "member"); await o.click("#wpRoleGo"); await o.wait_for_timeout(700)
+    await shot(o, "s94-1-person-node-open")
+    await o.select_option("#wcRole", "member"); await act(o, "prof:P-nassar", "role", 800)
     role_ev = [x["event"]["body"] for x in H["posts"] if x["event"]["kind"] == "member.role"]
     now = await o.evaluate(f"TEAMS.roleOf('nassar', {json.dumps(ts)})")
     shown = await o.inner_text("#wpRoleNow")
+    await o.keyboard.press("Escape"); await o.wait_for_timeout(400)
+    closed = await o.evaluate("S.worldOpen === null") and await o.locator("#wpRoleNow").count() == 0
     g = await open_teams_canvas(b, H, "nassar", False)
     await fly_to_system(g, ts)
-    await click_node(g, f"pl:{ts}:members"); await g.wait_for_timeout(500)
-    await click_node(g, "prof:P-nassar"); await g.wait_for_timeout(500)
-    guest_panel = await g.inner_text("#inspEmpty")
-    guest_none = await g.locator("#wpRole, #wpRoleGo, #wpRemove").count() == 0 and "Only owners change roles" in guest_panel
-    ok = (kept == "P-half-typed" and "PROFILE" in panel and "guest" in panel and hash_ == f"#/{ts}/members/prof%3AP-nassar"
-          and role_ev == [{"teamspace": ts, "profile": "P-nassar", "role": "member"}] and now == "member" and shown == "member"
+    await click_node(g, f"pl:{ts}:members"); await g.wait_for_timeout(600)
+    guest = await open_ctl(g, "prof:P-nassar")
+    guest_none = await g.locator("#wcRole, [data-act=role], [data-act=remove]").count() == 0 and "Only owners change roles" in guest
+    ok = (kept == "P-half-typed" and "PROFILE" in card and "guest" in card and hash_ == f"#/{ts}/members/prof%3AP-nassar"
+          and role_ev == [{"teamspace": ts, "profile": "P-nassar", "role": "member"}] and now == "member" and shown == "member" and closed
           and guest_none and not (p.errors + n.errors + o.errors + g.errors))
-    return ok, (f"typed kept={kept!r}, panel={panel.strip()[:60]!r}, address={hash_}, change={role_ev} -> {now} (shown {shown!r}), "
+    return ok, (f"typed kept={kept!r}, card={card.strip()[:60]!r}, address={hash_}, change={role_ev} -> {now} (shown {shown!r}), Esc closed={closed}, "
                 f"guest sees none={guest_none}, errors={(p.errors + n.errors + o.errors + g.errors)[:1]}")
 
 
 async def s95_invite_join_leave_on_the_galaxy(b):
-    """W1: Nowed invites Nassar from Insydr pilot's panel. Nassar clicks Teamspaces: his Galaxy's panel shows the
-    invitation with Join. He joins and flies to the system, which is now on his Galaxy with the nodes made before he
-    joined. Later he clicks Leave teamspace in its panel: he is back on the Galaxy and the system is gone from it."""
+    """W1b: Nowed creates Insydr pilot, adds Plan with + Add node and invites Nassar with + Invite. Nassar clicks
+    Teamspaces: an invitation node is on his Galaxy. He opens it and clicks Join, and flies to the system, which has
+    Plan (made before he joined). Later he opens the star and clicks Leave teamspace: he is back on the Galaxy and
+    the system is gone from it."""
     H = team_hub(); o = await open_teams_canvas(b, H, "Morami49", True)
-    await to_teams_galaxy(o); await o.fill("#wsLabel", "Insydr pilot"); await o.click("#wsCreate"); await o.wait_for_timeout(1200)
+    await to_teams_galaxy(o); await open_ctl(o, "ctl:new"); await o.fill("#wcLabel", "Insydr pilot"); await act(o, "ctl:new", "create", 1300)
     ts = await o.evaluate("S.world.sys")
-    await o.fill("#tsNodeTitle", "Plan"); await o.click("#tsAddNode"); await o.wait_for_timeout(500)
-    await o.fill("#tsInvProf", "P-nassar"); await o.select_option("#tsInvRole", "member"); await o.click("#tsInvite"); await o.wait_for_timeout(500)
+    await open_ctl(o, "ctl:add"); await o.fill("#wcNodeTitle", "Plan"); await act(o, "ctl:add", "addnode")
+    await open_ctl(o, "ctl:invite"); await o.fill("#wcInvProf", "P-nassar"); await o.select_option("#wcInvRole", "member"); await act(o, "ctl:invite", "invite")
     n = await open_teams_canvas(b, H, "nassar", False)
     await to_teams_galaxy(n)
     before = sorted(i for i in await world_ids(n) if i.startswith("sys:"))
-    inv = await n.inner_text("#tsInvList") if await n.locator("#tsInvList").count() else ""
-    await shot(n, "s95-1-invitation-on-galaxy")
-    await n.click("#tsInvList [data-tsjoin]"); await n.wait_for_timeout(1200)
+    inv = await open_ctl(n, f"ctl:inv:{ts}")
+    await shot(n, "s95-1-invitation-node-on-galaxy")
+    await act(n, f"ctl:inv:{ts}", "join", 1300)
     joined = await n.evaluate("({sys: S.world && S.world.sys, hash: location.hash, role: TEAMS.roleOf('nassar', S.world && S.world.sys)})")
     plan_seen = await n.evaluate("[...F.items.values()].some(i => i.title === 'Plan')")
     await shot(n, "s95-2-joined-system")
-    await n.click("#tsLeave"); await n.wait_for_timeout(1000)
+    await open_ctl(n, f"sys:{ts}"); await act(n, f"sys:{ts}", "leave", 1100)
     left = await n.evaluate("({sys: S.world && S.world.sys, hash: location.hash})")
     after = sorted(i for i in await world_ids(n) if i.startswith("sys:"))
+    writes = [x["event"]["kind"] for x in H["posts"]]
     ok = (f"sys:{ts}" not in before and "Insydr pilot" in inv and joined == {"sys": ts, "hash": f"#/{ts}", "role": "member"} and plan_seen
-          and left == {"sys": None, "hash": "#/"} and f"sys:{ts}" not in after and not (o.errors + n.errors))
-    return ok, (f"before={before}, invitation={inv.strip()[:50]!r}, joined={joined}, Plan seen={plan_seen}, left={left}, after={after}, errors={(o.errors + n.errors)[:1]}")
+          and left == {"sys": None, "hash": "#/"} and f"sys:{ts}" not in after
+          and writes == ["teamspace.create", "item.create", "item.create", "member.invite", "member.join", "member.remove"] and not (o.errors + n.errors))
+    return ok, (f"before={before}, invitation={inv.strip()[:50]!r}, joined={joined}, Plan seen={plan_seen}, left={left}, after={after}, writes={writes}, "
+                f"errors={(o.errors + n.errors)[:1]}")
 
 
 async def s96_support_access_from_the_galaxy(b):
-    """W1 + 114b a: Nassar has a teamspace Nowed, the hub owner, isn't in. On Nowed's Galaxy the panel lists it under
-    Other teamspaces by id only. He asks for support access with a reason and flies to its system, read only: its
-    panel says it's a support access, and offers no Invite, Add node, Export or Leave."""
+    """W1b + 114b a: Nassar has a teamspace Nowed, the hub owner, isn't in. On Nowed's Galaxy it is a dim node named by
+    its id only. He opens it, gives a reason and clicks Open with support access, and flies to its system, read only:
+    the star says support access until when, and there are no + Invite, + Add node or + Share nodes, no Export and no
+    Leave."""
     H = team_hub(); H["filter"] = True
     n = await open_teams_hub(b, H, "nassar", False)
     ts = await make_space(n, "Insydr internal")
     await n.fill("#tsNodeTitle", "Margins"); await n.click("#tsAddNode"); await n.wait_for_timeout(350)
     o = await open_teams_canvas(b, H, "Morami49", True)
-    await to_teams_galaxy(o); await o.wait_for_timeout(500)
-    others = await o.inner_text("#wsOthers")
-    listed = ts in others and "Insydr internal" not in others
-    await o.click(f"[data-tssupport='{ts}']"); await o.fill(f"[data-tssupwhy='{ts}']", "Nassar asked for help with an import")
-    await o.click(f"[data-tssupgo='{ts}']"); await o.wait_for_timeout(1500)
+    await to_teams_galaxy(o); await o.wait_for_timeout(600)
+    card = await open_ctl(o, f"ctl:other:{ts}")
+    listed = ts in card and "Insydr internal" not in await o.evaluate("document.body.innerText")
+    await act(o, f"ctl:other:{ts}", "support", 300)
+    asked = "Say why" in await o.inner_text(f'[data-ctl="ctl:other:{ts}"]')
+    await o.fill(f"#wcWhy-{ts}", "Nassar asked for help with an import"); await act(o, f"ctl:other:{ts}", "support", 1600)
     sup = [x["event"]["body"] for x in H["posts"] if x["event"]["kind"] == "support.access"]
     at = await o.evaluate("location.hash")
-    panel = await o.inner_text("#inspEmpty")
-    read_only = await o.locator("#inspEmpty #tsSupportNote").count() == 1 and await o.locator("#tsAddNode, #tsLeave, #tsInvite, #tsExport").count() == 0
-    await shot(o, "s96-1-support-access-system")
-    ok = (listed and sup == [{"teamspace": ts, "reason": "Nassar asked for help with an import"}] and at == f"#/{ts}"
-          and "support access until" in panel and "Margins" in panel and read_only and not (n.errors + o.errors))
-    return ok, (f"listed by id={listed}, events={sup}, at={at}, panel={panel.strip()[:70]!r}, read only={read_only}, errors={(n.errors + o.errors)[:1]}")
+    star = await open_ctl(o, f"sys:{ts}")
+    ids = await canvas_ids(o)
+    read_only = (not {"ctl:invite", "ctl:add", "ctl:share", "ctl:money"} & set(ids) and await o.locator("[data-act=export], [data-act=leave]").count() == 0
+                 and await o.locator("#tsSupportNote").count() == 1)
+    margins = await o.evaluate("[...F.items.values()].some(i => i.title === 'Margins')")
+    await shot(o, "s96-1-support-access-star")
+    ok = (listed and asked and sup == [{"teamspace": ts, "reason": "Nassar asked for help with an import"}] and at == f"#/{ts}"
+          and "Support access until" in star and read_only and margins and not (n.errors + o.errors))
+    return ok, (f"listed by id={listed}, reason asked={asked}, events={sup}, at={at}, star={star.strip()[:70]!r}, read only={read_only}, "
+                f"Margins readable={margins}, errors={(n.errors + o.errors)[:1]}")
 
 
-SCENARIOS += [s93_teamspaces_is_the_galaxy, s94_member_roles_in_the_panel, s95_invite_join_leave_on_the_galaxy, s96_support_access_from_the_galaxy]
+SCENARIOS += [s93_teamspaces_is_the_galaxy, s94_member_roles_on_the_node, s95_invite_join_leave_on_the_galaxy, s96_support_access_from_the_galaxy]
 
 
 async def main():
