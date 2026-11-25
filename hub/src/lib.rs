@@ -50,6 +50,8 @@
 //!                            whether Stripe test mode is set up (BQ-1 step 4, hub_core::money). Members and owners only.
 //! POST /studio/api/money/checkout {invoice} → {url}: a Stripe Checkout link (TEST MODE ONLY, NODE_SECRET_STRIPE_TEST)
 //!                            as a destination charge with Nodach's fee as application fee. Logged as "money".
+//! POST /studio/api/money/check {invoice} → {outcome, paid}: asks Stripe (test mode) about the invoice's Checkout Session
+//!                            and records a paid one exactly as the webhook would (bug 122). Members and owners.
 //! POST /studio/api/money/record {invoice, amount, method: recorded_bank_transfer | own_provider, ref}: a teamspace
 //!                            owner records a payment that didn't go through Stripe; the hub writes it and its fee line.
 //! POST /stripe/webhook       Stripe → hub (no sign-in): the Stripe-Signature header is checked against
@@ -737,6 +739,26 @@ impl Record {
         events.into_iter().map(|(kind, item, body)| self.runner_write(&kind, Some(&item), body, why, now)).collect()
     }
 
+    /// Record what a verified Stripe event (webhook) or a session the hub fetched itself (money/check) says, once:
+    /// both paths use the payment intent as the reference, so whichever arrives second adds nothing. The outcome line
+    /// starts with "ok", "refused" or "failed".
+    async fn record_stripe(&self, w: &hub_core::money::Webhook, why: &str, now: i64) -> String {
+        // Stripe's own fee for a payment, from its balance transaction (estimated and marked if it can't be read)
+        let cost = match w {
+            hub_core::money::Webhook::Paid { payment_intent, .. } if !payment_intent.is_empty() => {
+                let p = format!("/v1/payment_intents/{}?expand[]=latest_charge.balance_transaction", hub_core::oauth::enc(payment_intent));
+                self.stripe(&p, None).await.ok().as_ref().and_then(hub_core::money::stripe_fee)
+            }
+            _ => None,
+        };
+        let plan = self.hub.borrow().as_ref().unwrap().money().plan(w, cost);
+        match plan {
+            Ok(evs) if evs.is_empty() => "ok: nothing new".to_string(),
+            Ok(evs) => match self.money_write(evs, why, now) { Ok(ids) => format!("ok: {} written", ids.len()), Err(e) => format!("failed: {}", e.chars().take(80).collect::<String>()) },
+            Err(e) => format!("refused: {}", e.chars().take(80).collect::<String>()),
+        }
+    }
+
     /// POST /stripe/webhook: verify the signature first, then record what's new. 400 for anything unverified.
     async fn stripe_webhook(&self, req: &mut Request, now: i64) -> Result<Response> {
         let sig = req.headers().get("stripe-signature").ok().flatten().unwrap_or_default();
@@ -749,20 +771,7 @@ impl Record {
             Ok(w) => w,
             Err(e) => { self.log(now, "/stripe/webhook", "webhook", &format!("refused: {}", e.chars().take(80).collect::<String>()), "stripe"); return Response::error("refused", 400); }
         };
-        // Stripe's own fee for a payment, from its balance transaction (estimated and marked if it can't be read)
-        let cost = match &w {
-            hub_core::money::Webhook::Paid { payment_intent, .. } if !payment_intent.is_empty() => {
-                let p = format!("/v1/payment_intents/{}?expand[]=latest_charge.balance_transaction", hub_core::oauth::enc(payment_intent));
-                self.stripe(&p, None).await.ok().as_ref().and_then(hub_core::money::stripe_fee)
-            }
-            _ => None,
-        };
-        let plan = self.hub.borrow().as_ref().unwrap().money().plan(&w, cost);
-        let outcome = match plan {
-            Ok(evs) if evs.is_empty() => "ok: nothing new".to_string(),
-            Ok(evs) => match self.money_write(evs, "stripe webhook", now) { Ok(ids) => format!("ok: {} written", ids.len()), Err(e) => format!("failed: {}", e.chars().take(80).collect::<String>()) },
-            Err(e) => format!("refused: {}", e.chars().take(80).collect::<String>()),
-        };
+        let outcome = self.record_stripe(&w, "stripe webhook", now).await;
         self.log(now, "/stripe/webhook", "webhook", &outcome, "stripe");
         // 200 for anything verified, so Stripe doesn't retry what can never be recorded (it's in the log)
         if outcome.starts_with("failed") { Response::error("try again", 500) } else { Response::ok("ok") }
@@ -1238,6 +1247,40 @@ impl Record {
                                 json_status(&v, 200)?
                             }
                             None => json_status(&serde_json::json!({"error": "that teamspace's money isn't shared with you"}), 403)?,
+                        }
+                    }
+                    (Method::Post, "/studio/api/money/check", Some(l)) => {
+                        // bug 122: a test payment reached Stripe but its webhook never reached the ledger. A member asks
+                        // the hub to look the invoice's Checkout Session up at Stripe; the hub records it like the webhook.
+                        if req.headers().get(session::CSRF_HEADER).ok().flatten().as_deref() != Some("1") {
+                            json_status(&serde_json::json!({"error": "missing x-nodach-studio header"}), 403)?
+                        } else {
+                            let body: serde_json::Value = req.json().await.unwrap_or(serde_json::Value::Null);
+                            let invoice = body.get("invoice").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let (ts, sid) = { let b = self.hub.borrow(); let m = b.as_ref().unwrap().money();
+                                (m.invoices.get(&invoice).map(|i| i.teamspace.clone()).unwrap_or_default(), m.session_to_check(&invoice)) };
+                            let role = self.hub.borrow().as_ref().unwrap().teamspaces().role_of(&l, &ts);
+                            use hub_core::teamspaces::Role;
+                            let (status, v) = if ts.is_empty() {
+                                (404, serde_json::json!({"error": format!("invoice {invoice} isn't on the record")}))
+                            } else if !matches!(role, Some(Role::Owner | Role::Member)) {
+                                (403, serde_json::json!({"error": format!("only members and owners of {ts} check its payments")}))
+                            } else if let Some(sid) = sid {
+                                match self.stripe(&format!("/v1/checkout/sessions/{}", hub_core::oauth::enc(&sid)), None).await {
+                                    Err(e) => (if e == hub_core::money::NO_KEY || e == hub_core::money::NOT_TEST { 503 } else { 502 }, serde_json::json!({"error": e})),
+                                    Ok(sess) => match hub_core::money::paid_session(&sess) {
+                                        Err(e) => (400, serde_json::json!({"error": e})),
+                                        Ok(hub_core::money::Webhook::Paid { invoice: ref got, .. }) if *got != invoice =>
+                                            (400, serde_json::json!({"error": format!("Stripe's session is for {got}, not {invoice}")})),
+                                        Ok(w) => { let o = self.record_stripe(&w, &format!("payment check ({l})"), now).await;
+                                            (if o.starts_with("failed") { 500 } else { 200 }, serde_json::json!({"outcome": o, "paid": matches!(w, hub_core::money::Webhook::Paid { .. })})) }
+                                    },
+                                }
+                            } else {
+                                (200, serde_json::json!({"outcome": "ok: nothing to check (no card link, or nothing due)", "paid": false}))
+                            };
+                            self.log(now, p, "money", &v.get("outcome").and_then(|o| o.as_str()).map(|o| o.chars().take(40).collect::<String>()).unwrap_or_else(|| "refused".into()), &l);
+                            json_status(&v, status)?
                         }
                     }
                     (Method::Post, "/studio/api/money/checkout" | "/studio/api/money/record", Some(l)) => {
