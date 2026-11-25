@@ -316,6 +316,7 @@ fn guard_replays_the_17_nov_double_answer() {
     let sa = a["session"].as_str().unwrap().to_string();
     assert_eq!(a["claimed"], json!(["A-spec-identity"]));
     assert!(a.get("duplicate_of").is_none());
+    assert!(a.get("resume").is_none() && a["resume_omitted"].is_string(), "short mode: no digest unless asked (BQ-hub-short-mode)");
     // a second chat, a minute later, same message with different spacing
     let b = call(&mut hub, "begin_answer", json!({"message": "D. on point 3,  i cannot afford a solicitor's check yet", "role": "builder", "items": ["A-spec-identity", "R-2"]}), T0 + 60_000)["structuredContent"].clone();
     let sb = b["session"].as_str().unwrap().to_string();
@@ -334,6 +335,8 @@ fn guard_replays_the_17_nov_double_answer() {
     assert_eq!(call(&mut hub, "write_event", json!({"kind": "item.edit", "item": "A-spec-identity", "body": {"title": "y"}}), T0 + 66_000)["isError"], false);
     let c = call(&mut hub, "begin_answer", json!({"message": msg, "role": "auditor"}), T0 + 67_000)["structuredContent"].clone();
     assert_eq!(c["duplicate_of"]["reply"], "R-261117-7");
+    let first = call(&mut hub, "begin_answer", json!({"message": "a new chat's first message", "role": "builder", "resume": true}), T0 + 67_500)["structuredContent"].clone();
+    assert!(first["resume"]["rules"].is_array() && first.get("resume_omitted").is_none(), "resume:true still returns the full digest");
     let sc = c["session"].as_str().unwrap();
     assert_eq!(call(&mut hub, "write_event", json!({"kind": "status", "item": "D-1", "session": sc, "body": {"status": "done"}}), T0 + 68_000)["isError"], true, "auditors don't change status");
     // an explorer writes to its own branch, created on first use
