@@ -98,13 +98,14 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {}},
          "annotations": {"readOnlyHint": true}},
         {"name": "begin_answer", "title": "Begin answering a message",
-         "description": "Call before writing anything for a message from Nowed. Pass the message text (only its fingerprint is stored), your role (builder, interviewer, auditor, explorer) and the item ids you expect to change. Returns a session id to pass to write_event, any earlier session that already answered the same message (read its reply and add only what's missing), and any items other sessions have claimed (comment on those, don't edit them). An explorer must name a branch; its writes go there, not to main.",
+         "description": "Call before writing anything for a message from Nowed. Pass the message text (only its fingerprint is stored), your role (builder, interviewer, auditor, explorer) and the item ids you expect to change. Returns a session id to pass to write_event (plus the resume digest only when resume is true), any earlier session that already answered the same message (read its reply and add only what's missing), and any items other sessions have claimed (comment on those, don't edit them). An explorer must name a branch; its writes go there, not to main.",
          "inputSchema": {"type": "object", "required": ["message", "role"], "properties": {
              "message": {"type": "string", "description": "the message being answered; hashed, never stored"},
              "role": {"type": "string", "enum": ["builder", "interviewer", "auditor", "explorer"]},
              "items": {"type": "array", "maxItems": 50, "items": {"type": "string"}},
              "minutes": {"type": "integer", "minimum": 1, "maximum": 60, "description": "how long the claim lasts (default 15)"},
-             "branch": {"type": "string", "description": "explorer only: the Studio branch to write to"}}},
+             "branch": {"type": "string", "description": "explorer only: the Studio branch to write to"},
+             "resume": {"type": "boolean", "description": "true also returns the resume digest (rules, open questions, latest replies); a chat that hasn't called resume yet passes true. Default false keeps the reply short."}}},
          "annotations": {"readOnlyHint": false, "destructiveHint": false}},
         {"name": "end_answer", "title": "Finish answering",
          "description": "Release your session's claims once your reply item (R-...) is written, so other sessions can edit those items.",
@@ -112,7 +113,7 @@ fn tools() -> Value {
              "session": {"type": "string"}, "reply": {"type": "string", "description": "the R- item you wrote"}}},
          "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}},
         {"name": "resume", "title": "Resume context (read first)",
-         "description": "What every new chat or tool reads before answering Nowed: the active rules (G-, RULE-), open questions (Q-, Q-PACK-) with their last answer code, the latest replies (R-) from every chat, and open findings. Keeps context across compressed and parallel chats. begin_answer returns the same digest.",
+         "description": "What every new chat or tool reads before answering Nowed: the active rules (G-, RULE-), open questions (Q-, Q-PACK-) with their last answer code, the latest replies (R-) from every chat, and open findings. Keeps context across compressed and parallel chats. begin_answer returns the same digest when called with resume:true.",
          "inputSchema": {"type": "object", "properties": {}},
          "annotations": {"readOnlyHint": true}},
         {"name": "read_claims", "title": "Who is working on what",
@@ -355,8 +356,13 @@ fn begin_answer(hub: &mut Hub, login: &str, key: &KeyPair, args: &Value, now: i6
     if let Err(e) = write_studio(hub, login, key, "session.claim", Value::Null, body, "main", Some(&format!("{session}/claim")), now) {
         return text_result(json!({"error": e}), true);
     }
-    let mut r = json!({"session": session, "role": role, "branch": branch, "claimed": mine, "until": iso(now + minutes * 60_000), "locked_by_others": locked,
-                       "resume": hub.digest_for(login, now)});
+    // BQ-hub-short-mode (137b a): the digest is ~7k tokens, so it comes back only when asked for.
+    let mut r = json!({"session": session, "role": role, "branch": branch, "claimed": mine, "until": iso(now + minutes * 60_000), "locked_by_others": locked});
+    if args.get("resume").and_then(Value::as_bool).unwrap_or(false) {
+        r["resume"] = hub.digest_for(login, now);
+    } else {
+        r["resume_omitted"] = json!("call resume (or begin_answer with resume:true) if this chat hasn't read it yet");
+    }
     if let Some(d) = duplicate {
         r["duplicate_of"] = json!({"session": d.session, "role": d.role, "since": d.since, "reply": d.reply, "still_working": d.released.is_none() && now < d.until_ms});
         r["note"] = json!("Another session already took this message. Read its reply (or its recent writes) and add only what's missing.");
@@ -377,7 +383,7 @@ pub fn handle(hub: &mut Hub, login: &str, key: &KeyPair, msg: &Value, now: i64) 
             let v = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
             ok(json!({"protocolVersion": v, "capabilities": {"tools": {"listChanged": false}},
                       "serverInfo": {"name": "clanstack-hub", "title": "Clanstack hub", "version": format!("{}+{}", env!("CARGO_PKG_VERSION"), BUILD)},
-                      "instructions": "Clanstack's shared record. hub_status: counts, chain check and build. read_events: Studio events from a cursor. hub_log: the request log (time, tool, outcome, duration; never contents); use it whenever asked for the hub log. import_studio_events: used by Studio Web's sync. write_event: answers, comments, status changes and items (shared record only; never put private material there). read_private / write_private: the signed-in owner's Private tier, stored apart and encrypted (personal material goes there, never into write_event); Sealed items are never readable. Several chats and AI tools work on this record at once (D-nodach-parallel-guard): before writing anything for a message, call begin_answer with the message, your role and the items you expect to change, pass the returned session to every write_event, and call end_answer with your reply id when done. If begin_answer reports duplicate_of, another session already took the message: read its reply and add only what is missing. Items in locked_by_others take comments only. read_claims shows who is working on what; a new chat calls resume (or reads begin_answer's resume digest) before replying: it lists the rules every chat follows, the open questions and the latest replies from every chat."}))
+                      "instructions": "Clanstack's shared record. hub_status: counts, chain check and build. read_events: Studio events from a cursor. hub_log: the request log (time, tool, outcome, duration; never contents); use it whenever asked for the hub log. import_studio_events: used by Studio Web's sync. write_event: answers, comments, status changes and items (shared record only; never put private material there). read_private / write_private: the signed-in owner's Private tier, stored apart and encrypted (personal material goes there, never into write_event); Sealed items are never readable. Several chats and AI tools work on this record at once (D-nodach-parallel-guard): before writing anything for a message, call begin_answer with the message, your role and the items you expect to change, pass the returned session to every write_event, and call end_answer with your reply id when done. If begin_answer reports duplicate_of, another session already took the message: read its reply and add only what is missing. Items in locked_by_others take comments only. read_claims shows who is working on what; a new chat calls resume (or begin_answer with resume:true) before replying; later begin_answer calls leave the digest out: it lists the rules every chat follows, the open questions and the latest replies from every chat."}))
         }
         "ping" => ok(json!({})),
         "tools/list" => ok(json!({"tools": tools()})),
