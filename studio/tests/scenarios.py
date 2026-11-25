@@ -140,6 +140,9 @@ def nav_init(classic=True, env=None):
     makes the page behave as the staging hub serves it (NVS-4: only there do Developer-mode saves apply)."""
     # only on a context's first load, so a scenario can reload and see the choice kept
     act = 'localStorage.setItem("studio.classicTabs","1")' if classic else 'localStorage.removeItem("studio.classicTabs")'
+    # W0: the map is always the Galaxy (R-261125-201 took Whole graph out of the interface); scenarios written for the
+    # whole graph still reach it through a test-only switch until the W steps move them (s92+ clear it)
+    act += ';localStorage.setItem("studio.test.wholeGraph","1")'
     js = 'try{if(!sessionStorage.getItem("navInit")){sessionStorage.setItem("navInit","1");' + act + '}}catch(e){}'
     return js + (f'window.__nodachEnv={json.dumps(env)};' if env else '')
 
@@ -2464,15 +2467,14 @@ async def s90_galaxy_travel_as_owner(b):
     await o.evaluate("S.asof = '2000-01-01T00:00:00.000Z'; refresh();"); await o.wait_for_timeout(500)
     past = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
     await o.evaluate("S.asof = null; refresh();"); await o.wait_for_timeout(300)
-    await o.click("#worldLeave"); await o.wait_for_timeout(500)
-    whole = await o.evaluate("!S.world && !document.querySelector('#worldBar') && document.querySelectorAll('#canvas .react-flow__node-item').length > 50")
+    whole = await o.evaluate("!document.querySelector('#worldLeave') && !!document.querySelector('#worldBar')")   # no Whole graph (201)
     ok = (systems == sorted(["sys:home", f"sys:{ts}"]) and clusters == sorted(["cl:home", f"cl:{ts}"])
           and set(system) == {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:money", f"pl:{ts}:t:idea"}
           and set(planet) == {ids["Plan"], ids["Quote"]} and panel == ids["Plan"]
           and all(x in crumbs for x in ("Galaxy", "Insydr pilot", "Ideas", ids["Plan"])) and back == systems and past == ["sys:home"]
           and whole and len(H["posts"]) == posts0 and not (p.errors + n.errors + o.errors))
     return ok, (f"systems={systems}, clusters={clusters}, system={system}, planet={planet}, panel={panel}, crumbs={crumbs!r}, "
-                f"back out={back}, as of 2000={past}, whole graph after={whole}, writes={len(H['posts']) - posts0}, errors={(p.errors + n.errors + o.errors)[:1]}")
+                f"back out={back}, as of 2000={past}, no Whole graph button={whole}, writes={len(H['posts']) - posts0}, errors={(p.errors + n.errors + o.errors)[:1]}")
 
 
 async def s91_insydr_member_sees_only_insydr(b):
@@ -2509,6 +2511,61 @@ async def s91_insydr_member_sees_only_insydr(b):
 
 
 SCENARIOS += [s90_galaxy_travel_as_owner, s91_insydr_member_sees_only_insydr]
+
+# ---------------------------------------------------------------- PLAN-world-ui W0: the map is a place you're in
+async def s92_galaxy_is_home_and_places_have_links(b):
+    """W0: with no choice saved, the map opens on the Galaxy. Each place Nowed flies to gets an address (#/system,
+    #/system/planet, #/system/planet/node); Back goes to where he was, reload keeps him there, and a pasted link to a
+    node opens at that node with its panel. An item address (#id) flies to where the node lives. With nothing selected
+    the side panel lists the places here, as buttons, so the keyboard reaches everything. There is no Whole graph
+    (R-261125-201): leaving a teamspace's own map goes back to the Galaxy, and a Whole graph choice saved before is
+    ignored."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await o.evaluate("localStorage.removeItem('studio.test.wholeGraph'); localStorage.setItem('studio.view', 'map')")
+    await o.reload(); await o.wait_for_function("!!window.NodachCanvas", timeout=20000)
+    await o.wait_for_selector('.react-flow__node[data-id="sys:home"]', timeout=10000); await o.wait_for_timeout(500)
+    first = await o.evaluate("({hash: location.hash, bar: !!document.querySelector('#worldBar')})")
+    here = await o.locator("#worldHereList [data-where]").all_text_contents()
+    await shot(o, "s92-1-opens-on-galaxy")
+    await o.locator(f'#worldHereList [data-where="sys:{ts}"]').focus(); await o.keyboard.press("Enter"); await o.wait_for_timeout(700)
+    by_keys = await o.evaluate("location.hash")
+    await shot(o, "s92-2-keyboard-flies-to-system")
+    await click_node(o, f"pl:{ts}:t:idea"); await o.wait_for_timeout(600)
+    await click_node(o, ids["Plan"]); await o.wait_for_timeout(500)
+    deep = await o.evaluate("location.hash")
+    await shot(o, "s92-3-address-deepens-to-node")
+    await o.go_back(); await o.wait_for_timeout(700)
+    back1 = await o.evaluate("({hash: location.hash, node: S.world && S.world.node, sel: S.sel})")
+    await o.go_back(); await o.wait_for_timeout(700)
+    back2 = await o.evaluate("location.hash")
+    await shot(o, "s92-4-back-twice-to-system")
+    await o.reload(); await o.wait_for_timeout(2600)
+    kept = await o.evaluate("({hash: location.hash, sys: S.world && S.world.sys})")
+    await o.goto(f"http://hub.test/studio#/{ts}/idea/{ids['Plan']}"); await o.wait_for_timeout(2800)
+    pasted = await o.evaluate("({sel: S.sel, crumbs: (document.querySelector('#worldCrumbs') || {}).innerText || ''})")
+    await shot(o, "s92-5-pasted-link-opens-node")
+    await o.locator('#worldCrumbs [data-wgo=""]').click(); await o.wait_for_timeout(600)
+    await o.evaluate(f"location.hash = {json.dumps('#' + ids['Quote'])}"); await o.wait_for_timeout(900)
+    item = await o.evaluate("({sel: S.sel, sys: S.world && S.world.sys, planet: S.world && S.world.planet})")
+    await o.click("#worldTs"); await o.wait_for_timeout(700)
+    ts_bar = await o.inner_text("#tsBarAll")
+    await o.click("#tsBarAll"); await o.wait_for_timeout(700)
+    again = await o.evaluate("!!S.world && !S.world.sys && location.hash === '#/'")
+    await o.evaluate("localStorage.setItem('studio.map.lens', 'graph')"); await o.reload(); await o.wait_for_timeout(2600)
+    graph = await o.evaluate("!!S.world && !!document.querySelector('#worldBar') && !document.querySelector('#worldLeave')"
+                             " && ![...document.querySelectorAll('button')].some(x => /whole graph/i.test(x.textContent))")
+    await shot(o, "s92-6-no-whole-graph")
+    ok = (first == {"hash": "#/", "bar": True} and any("Insydr pilot" in x for x in here) and by_keys == f"#/{ts}"
+          and deep == f"#/{ts}/idea/{ids['Plan']}" and back1["hash"] == f"#/{ts}/idea" and not back1["node"] and not back1["sel"]
+          and back2 == f"#/{ts}" and kept == {"hash": f"#/{ts}", "sys": ts}
+          and pasted["sel"] == ids["Plan"] and "Ideas" in pasted["crumbs"]
+          and item == {"sel": ids["Quote"], "sys": ts, "planet": "t:idea"} and ts_bar == "Galaxy" and again and graph and not (p.errors + n.errors + o.errors))
+    return ok, (f"first={first}, here={here[:3]}, keyboard Enter -> {by_keys}, deep={deep}, back={back1}, back again={back2}, reload kept={kept}, "
+                f"pasted link={pasted}, #item={item}, teamspace bar button={ts_bar!r}, back to galaxy={again}, old Whole graph choice ignored={graph}, errors={(p.errors + n.errors + o.errors)[:1]}")
+
+
+SCENARIOS += [s92_galaxy_is_home_and_places_have_links]
 
 
 async def main():
