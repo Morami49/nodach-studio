@@ -806,9 +806,11 @@ const typeKey = t => t in TYPES ? t : "idea";
 function typeColor(t){ return css("--t-"+typeKey(t)); }
 function buildFilters(){
   $("#filters").innerHTML = Object.entries(TYPES).map(([k,v]) => `<span class="chip" role="button" tabindex="0" aria-pressed="${S.filters.has(k)}" data-f="${k}"><i class="dot" style="background:var(--t-${k})"></i>${PLURAL[k]||v+"s"} <span class="mono mute">${[...F.items.values()].filter(i=>typeKey(i.type)===k).length}</span></span>`).join("")
-    + `<input id="search" placeholder="Find…" style="padding:3px 10px;border-radius:999px;font-size:12px;width:130px" aria-label="Find on the map">`;
+    + `<input id="search" placeholder="Find…" style="padding:3px 10px;border-radius:999px;font-size:12px;width:130px" aria-label="Find on the map">`
+    + (tsCanvasOk() ? `<button id="worldGo" title="Every system you can reach on one map: Home and your teamspaces">Galaxy</button>` : "");
   $("#filters").querySelectorAll("[data-f]").forEach(c => c.onclick = c.onkeydown = ev => { if (ev.type==="keydown" && ev.key!=="Enter" && ev.key!==" ") return; ev.preventDefault?.();
     const f=c.dataset.f; S.filters.has(f)?S.filters.delete(f):S.filters.add(f); renderMap(true); buildFilters(); });
+  const wg = $("#worldGo"); if (wg) wg.onclick = enterWorld;
   $("#search").oninput = e => { const q=e.target.value.toLowerCase(); S.mapQ = q; if (window.NodachCanvas){ renderMap(false); return; } if (!cy) return;
     cy.nodes().forEach(n => n.style("opacity", !q || (n.data("label")+" "+n.id()).toLowerCase().includes(q) ? 1 : .15)); };
 }
@@ -816,6 +818,8 @@ function renderMap(relayout){
   // B-teamspace-graph: a teamspace opened on the map stays focused while you are in Teamspaces; Private's ActionMap is the whole graph
   if (S.tsFocus && ((S.section !== "teams" && !S.tsKeep) || !tsCanvasOk())) tsUnfocus();
   if (S.tsFocus && tsCanvasOk()) return renderTsFocus(relayout);
+  if (S.world && !tsCanvasOk()) S.world = null, $("#worldBar")?.remove(), $("#filters").hidden = false;   // the galaxy needs the canvas
+  if (S.world) return renderWorld(relayout);
   if (window.NodachCanvas && !S.classicMap) return renderCanvas(relayout);
   $("#canvas").hidden = true; $("#cy").hidden = false;
   if (!window.cytoscape){ $("#cy").innerHTML = '<p class="empty" style="padding:60px 16px">The map couldn\'t load. Use the List view; everything is there.</p>'; return; }
@@ -919,7 +923,7 @@ async function canvasConnect(src, dst, rel){
   if ((F.items.get(src)?.refs||[]).includes(dst) && canvasLayout().rels[src+">"+dst]===rel){ toast("That link is already there."); return; }
   const id = await write("link", src, {refs:[dst], rel}); if (id) toast(`Linked ${src} ${REL_LABEL[rel]} ${dst}.`);
 }
-addEventListener("nodach-canvas-ready", () => { if (S.view==="map") renderMap(true); });
+addEventListener("nodach-canvas-ready", () => { if (F.items.size) buildFilters(); if (S.view==="map") renderMap(true); });   // buildFilters: the Galaxy button needs the canvas
 /* ---------------------------------------------------------------- runnable steps (D-174 C2, Q30 A)
  * flow.node / flow.wire events describe the flow; the hub reads them from its record and runs them (hub_core::flows).
  * Filters and sums are written as plain lines and stored as data, never as code. */
@@ -2441,7 +2445,9 @@ function renderSpaces(){
   const onMap = $("#tsMapView"); if (onMap) onMap.onclick = () => { store.set("ts.view", "map"); openSpace(S.ts, "map"); };
   document.querySelectorAll("[data-tsgo]").forEach(b => b.onclick = () => { show("map"); select(b.dataset.tsgo); });
   document.querySelectorAll("[data-tsjoin]").forEach(b => b.onclick = async () => {
-    const ts = b.dataset.tsjoin; if (await write("member.join", ts, {teamspace:ts, profile:b.dataset.prof})){ toast(`You joined ${T.spaces.get(ts)?.label || ts}.`); refresh(); openSpace(ts); } });
+    const ts = b.dataset.tsjoin; if (await write("member.join", ts, {teamspace:ts, profile:b.dataset.prof})){ toast(`You joined ${T.spaces.get(ts)?.label || ts}.`);
+      try { await window.__nodach?.resync?.(); } catch {}   // U1: nodes made before you joined sit before the read cursor; read them now, not after a reload
+      refresh(); openSpace(ts); } });
   if (!S.ts) return;
   const ts = S.ts;
   document.querySelectorAll("[data-tsrole]").forEach(b => b.onclick = async () => {
@@ -2660,6 +2666,124 @@ async function tsMove(ts, moves){
     if (!S.tsMoveSaid){ S.tsMoveSaid = true; toast("Only owners and members save positions on this teamspace's map; yours stay on this screen."); }
     return null; }
   return write("canvas.layout", null, {board:"ts:" + ts, moves});
+}
+/* ---------------------------------------------------------------- one map you travel (BQ-slice-home-insydr U2, CON-world-model 176c a)
+   Galaxy > system > planet > node, drawn from what this page may read (the hub filters per person, U1; F and TEAMS
+   here). Systems: Home (every node you can read outside teamspaces) and each teamspace you are in or have support
+   access to. Planets: a teamspace's Members and Money (where the invoice-to-fee base lands, U3), then one planet per
+   node type, then nodes shared in. Clicking a system flies in; clicking a planet lands on its nodes; a node opens in
+   the detail panel. Nothing here writes. The as-of slider works as everywhere: F is folded as of that point and
+   systems created later aren't drawn yet. */
+S.world = null;   // {sys: system id or null (galaxy), planet: planet key or null, node: canvas id or null}
+const WORLD_ORDER = ["decision","question","finding","lead","story","term","asset","idea","setting","change"];
+function worldModel(){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), spaces = new Set(T.spaces.keys()), out = [];
+  const home = [...F.items.values()].filter(i => !T.itemSpace.has(i.id) && !spaces.has(i.id));
+  if (home.length) out.push({id:"home", label:"Home", kind:"home", items:home, shared:[]});
+  for (const t of T.spaces.values()){
+    if (S.asof && t.created > S.asof) continue;
+    const role = T.roleOf(me, t.id), support = !role && T.supportOpen(me, t.id);
+    if (!role && !support) continue;
+    const items = [...F.items.values()].filter(i => T.itemSpace.get(i.id) === t.id);
+    const shared = [...T.shares].filter(([n, m]) => m.has(t.id) && T.itemSpace.get(n) !== t.id && F.items.has(n)).map(([n]) => F.items.get(n));
+    out.push({id:t.id, label:t.label, kind:"teamspace", role:role || "support access", t, items, shared});
+  }
+  return out;
+}
+function worldPlanets(s){
+  const pl = [];
+  if (s.kind === "teamspace"){
+    pl.push({key:"members", label:"Members", type:"story", profiles:[...s.t.members].map(([p, r]) => ({pid:p, role:r})).concat([...s.t.invites].map(([p, r]) => ({pid:p, role:"invited as " + r})))});
+    pl.push({key:"money", label:"Money", type:"setting", items:s.items.filter(i => i.meta?.money_rules)});
+  }
+  const rest = s.items.filter(i => !i.meta?.money_rules);
+  for (const t of WORLD_ORDER){ const xs = rest.filter(i => typeKey(i.type) === t); if (xs.length) pl.push({key:"t:" + t, label:PLURAL[t] || TYPES[t] + "s", type:t, items:xs}); }
+  if (s.shared.length) pl.push({key:"shared", label:"Shared in", type:"asset", items:s.shared});
+  for (const p of pl) p.count = p.profiles ? p.profiles.length : p.items.length;
+  return pl;
+}
+const worldNodes = s => s.items.length + s.shared.length;
+function enterWorld(){ tsUnfocus(); S.world = {sys:null, planet:null, node:null}; S.sel = null; S.worldFly = false; if (S.view !== "map") show("map"); renderMap(true); }
+function leaveWorld(){ S.world = null; $("#worldBar")?.remove(); $("#filters").hidden = false; renderMap(true); }
+function worldGo(sys, planet){ S.world = {sys, planet:planet || null, node:null}; S.sel = null; S.worldFly = true; renderMap(true); }
+function worldBar(s, pl){
+  let bar = $("#worldBar");
+  if (!bar){ bar = document.createElement("div"); bar.id = "worldBar"; bar.className = "mapbar"; bar.setAttribute("role", "navigation");
+    bar.setAttribute("aria-label", "Where you are on the map"); bar.dataset.nodachPart = "map.world"; $("#v-map").prepend(bar); }
+  $("#filters").hidden = true;
+  const w = S.world, crumbs = [`<button data-wgo="" ${!s ? 'aria-current="location"' : ""}>Galaxy</button>`];
+  if (s) crumbs.push(`<button data-wgo="${esc(s.id)}" ${!pl ? 'aria-current="location"' : ""}>${esc(s.label)}</button>`);
+  if (pl) crumbs.push(`<button data-wgo="${esc(s.id)}" data-wpl="${esc(pl.key)}" ${!w.node ? 'aria-current="location"' : ""}>${esc(pl.label)}</button>`);
+  if (w.node) crumbs.push(`<span class="chip" aria-current="location"><span class="mono">${esc(w.node.replace(/^prof:/, ""))}</span></span>`);
+  const sys = worldModel();
+  const where = !s ? `${sys.length} system${sys.length === 1 ? "" : "s"}` : !pl ? `${worldPlanets(s).length} planets · ${worldNodes(s)} nodes${s.kind === "teamspace" ? " · you: " + esc(s.role) : ""}` : `${pl.count} here`;
+  bar.innerHTML = `<span class="chip" id="worldCrumbs">${crumbs.join(" › ")}</span><span class="chip mute" id="worldWhere">${where}</span>` +
+    (s?.kind === "teamspace" ? `<button id="worldTs" title="This teamspace's own map: members, roles, money rules and nodes, with controls">Teamspace controls</button>` : "") +
+    `<button id="worldLeave" title="Leave the galaxy: the whole graph as before">Whole graph</button>`;
+  bar.querySelectorAll("[data-wgo]").forEach(b => b.onclick = () => worldGo(b.dataset.wgo || null, b.dataset.wpl));
+  $("#worldLeave").onclick = leaveWorld;
+  const ts = $("#worldTs"); if (ts) ts.onclick = () => { const id = s.id; S.world = null; $("#worldBar")?.remove(); focusSpace(id); };
+}
+function renderWorld(relayout){
+  const w = S.world, sys = worldModel();
+  let s = w.sys ? sys.find(x => x.id === w.sys) : null;
+  if (w.sys && !s){ w.sys = w.planet = w.node = null; }   // not drawn at this as-of, or no longer readable
+  const planets = s ? worldPlanets(s) : [];
+  const pl = s && w.planet ? planets.find(p => p.key === w.planet) : null;
+  if (w.planet && !pl){ w.planet = w.node = null; }
+  const el = $("#canvas"); el.hidden = false; $("#cy").hidden = true;
+  worldBar(s, pl);
+  const nodes = [], edges = [];
+  const mk = (id, x, y, type, label, title, filled, extra) => nodes.push({id, type:"item", position:{x, y}, selected:id === w.node,
+    data:{type, label, title, n:filled ? 1 : 0, open:false, closed:false, priv:false, dim:false, ...(extra || {})}});
+  const edge = (a, b, label) => edges.push({id:a + ">" + b, source:a, target:b, label, style:{stroke:"var(--mute)", strokeWidth:1, strokeDasharray:"2 4"},
+    labelStyle:{fontSize:10, fill:"var(--ink)"}, labelBgStyle:{fill:"var(--surface)"}});
+  let hint;
+  if (!s){
+    hint = sys.length ? "Click a system to fly in · a planet to land on it" : "Nothing to show yet: no nodes you can read";
+    let x0 = 0;
+    for (const sy of sys){
+      const ps = worldPlanets(sy), cols = 2, rows = Math.max(1, Math.ceil(ps.length / cols)), W = cols * 240 + 40, H = 130 + rows * 84;
+      nodes.push({id:"cl:" + sy.id, type:"frame", position:{x:x0, y:0}, style:{width:W, height:H}, zIndex:-1, selectable:false, draggable:false,
+        data:{title:sy.kind === "home" ? "Home system" : "System · " + sy.id, can:false, onFrame:() => {}}});
+      mk("sys:" + sy.id, x0 + (W - 210) / 2, 24, "lead", "SYSTEM · " + (sy.kind === "home" ? "home" : sy.id), `${sy.label} · ${ps.length} planets · ${worldNodes(sy)} nodes`, true);
+      ps.forEach((p, i) => { const id = "pl:" + sy.id + ":" + p.key;
+        mk(id, x0 + 20 + (i % cols) * 240, 110 + Math.floor(i / cols) * 84, p.type, "PLANET · " + p.label, `${p.count} ${p.profiles ? "profile" : "node"}${p.count === 1 ? "" : "s"}`, false);
+        edge("sys:" + sy.id, id); });
+      x0 += W + 120;
+    }
+  } else if (!pl){
+    hint = "Click a planet to land · Galaxy in the bar to fly out";
+    mk("sys:" + s.id, 0, 0, "lead", "SYSTEM · " + (s.kind === "home" ? "home" : s.id), `${s.label} · ${worldNodes(s)} nodes`, true);
+    const R = Math.max(300, planets.length * 60);
+    planets.forEach((p, i) => { const a = -Math.PI / 2 + i * 2 * Math.PI / planets.length, id = "pl:" + s.id + ":" + p.key;
+      mk(id, Math.round(R * 1.4 * Math.cos(a)), Math.round(R * Math.sin(a)), p.type, "PLANET · " + p.label, `${p.count} ${p.profiles ? "profile" : "node"}${p.count === 1 ? "" : "s"}`, false);
+      edge("sys:" + s.id, id); });
+  } else {
+    hint = pl.count ? "Click a node to open it · the bar takes you back up" : "Nothing on this planet yet";
+    const ROWS = 8;
+    if (pl.profiles) pl.profiles.forEach((p, i) => mk("prof:" + p.pid, Math.floor(i / ROWS) * 260, (i % ROWS) * 84, "story", "PROFILE · " + p.pid, p.role, false));
+    else {
+      const ids = new Set(pl.items.map(i => i.id));
+      pl.items.forEach((it, i) => { const d = tsItemData(it);
+        mk(it.id, Math.floor(i / ROWS) * 260, (i % ROWS) * 84, d.type, (it.private ? "🔒 " : "") + d.label, d.title, it.answers.length + it.comments.length > 0,
+          {open:OPEN.has(it.status), closed:["withdrawn","closed"].includes(it.status)}); });
+      for (const it of pl.items) for (const r of it.refs || []) if (ids.has(r)) edges.push({id:it.id + ">" + r, source:it.id, target:r, markerEnd:{type:"arrowclosed"}, style:{stroke:"var(--mute)", strokeWidth:1}});
+    }
+  }
+  if (relayout) canvasFitKey++;
+  const none = () => {}, fly = S.worldFly; S.worldFly = false;
+  window.NodachCanvas.render(el, {nodes, edges, sel:w.node, can:false, focus:hint, dark:document.documentElement.dataset.theme === "dark",
+    fit:!!relayout, fitKey:canvasFitKey, flyMs:fly ? 600 : 0, onSelect:worldSelect, onMove:none, onConnect:none, onFrame:none, isStep:() => false,
+    onWire:none, onMixed:none, onStep:none, onAddStep:none, onTemplate:none, onStepMove:none});
+}
+function worldSelect(id){
+  const w = S.world; if (!w || !id) return;
+  if (id.startsWith("sys:")) return worldGo(id.slice(4), null);
+  if (id.startsWith("pl:")){ const rest = id.slice(3), cut = rest.indexOf(":"); return worldGo(rest.slice(0, cut), rest.slice(cut + 1)); }
+  w.node = id;
+  if (id.startsWith("prof:")){ renderMap(false); return; }   // a profile: its role is on the node; Teamspace controls change it
+  select(id);   // the node's own history, links and answers
 }
 function renderTsPanel(){
   const {ts, id} = S.tsPanel, T = TEAMS || foldTeams(S.events), t = T.spaces.get(ts), box = $("#insp");
@@ -3626,7 +3750,7 @@ function Inner(p) {
   useEffect(() => { setNodes(prev => {
       const sel = new Set(prev.filter(n => n.selected).map(n => n.id));
       return p.nodes.map(n => ({ ...n, selected: n.selected || n.id === p.sel || sel.has(n.id) })); }); }, [p.nodes, p.sel]);
-  useEffect(() => { if (p.fit) setTimeout(() => rf.fitView({ padding: .15 }), 30); }, [p.fitKey]);
+  useEffect(() => { if (p.fit) setTimeout(() => rf.fitView({ padding: .15, duration: p.flyMs || 0 }), 30); }, [p.fitKey]);   // flyMs: the galaxy's fly-in
   const onNodesChange = useCallback(ch => setNodes(ns => applyNodeChanges(ch, ns)), []);
   const onNodeDragStop = useCallback((_, __, dragged) => {
     if (!p.can) return;
