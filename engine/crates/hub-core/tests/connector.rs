@@ -175,6 +175,9 @@ fn mcp_initialize_list_and_tools() {
     let r = handle(&mut hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}), T0).unwrap();
     assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
     assert!(r["result"]["instructions"].as_str().unwrap().contains("call begin_answer"), "every chat is told to use the guard");
+    // BQ-domain-links: chats copy addresses from here, so they must be the nodach.com ones
+    let ins = r["result"]["instructions"].as_str().unwrap();
+    assert!(ins.contains("https://studio.nodach.com") && ins.contains("https://staging.nodach.com/studio"), "{ins}");
     assert!(handle(&mut hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), T0).is_none());
     let tools = handle(&mut hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), T0).unwrap();
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();

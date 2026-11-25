@@ -38,6 +38,14 @@ after the highest `R-` id in `resume`'s recent replies. Claim it in `begin_answe
 - interview first: state your assumptions, then ask;
 - keep it short (Q-reply-budget 137b a).
 
+## Addresses (BQ-domain-links)
+Always give people these, never the workers.dev ones:
+- Studio (production): https://studio.nodach.com
+- Staging: https://staging.nodach.com/studio
+
+The `*.ndab-utube.workers.dev` addresses are the Workers themselves. They're only for smoke tests, and a fallback
+when nodach.com is down.
+
 ## Hard limits
 - **Ask before moving or deleting files** outside your own branch or worktree.
 - **Never touch** `C:\Users\akabd\Desktop\Nodach\nodach_sec` (WSL: `/mnt/c/Users/akabd/Desktop/Nodach/nodach_sec`).
