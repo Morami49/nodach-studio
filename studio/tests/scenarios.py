@@ -2426,6 +2426,12 @@ SCENARIOS += [s78_open_teamspace_canvas_focused, s79_member_role_controls, s80_e
 
 
 # ---------------------------------------------------------------- BQ-slice-home-insydr U2: one map you travel
+async def shot(p, name):
+    """G-review-visible: STUDIO_SHOTS=1 saves a screenshot of this moment to <OUT>/shots/<name>.png for the PR."""
+    if os.environ.get("STUDIO_SHOTS"):
+        (OUT / "shots").mkdir(parents=True, exist_ok=True); await p.screenshot(path=str(OUT / "shots" / f"{name}.png"))
+
+
 async def world_ids(p):
     return sorted(i for i in await canvas_ids(p) if not i.startswith("cl:"))
 
@@ -2443,12 +2449,15 @@ async def s90_galaxy_travel_as_owner(b):
     galaxy = await world_ids(o)
     systems = sorted(i for i in galaxy if i.startswith("sys:"))
     clusters = sorted(i for i in await canvas_ids(o) if i.startswith("cl:"))
+    await shot(o, "s90-1-galaxy")
     await click_node(o, f"sys:{ts}"); await o.wait_for_timeout(700)
     system = await world_ids(o)
+    await shot(o, "s90-2-system")
     await click_node(o, f"pl:{ts}:t:idea"); await o.wait_for_timeout(700)
     planet = await world_ids(o)
     await click_node(o, ids["Plan"]); await o.wait_for_timeout(400)
     crumbs = await o.inner_text("#worldCrumbs")
+    await shot(o, "s90-3-planet-node")
     panel = await o.evaluate("S.sel")
     await o.click('#worldCrumbs [data-wgo=""]'); await o.wait_for_timeout(700)
     back = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
@@ -2483,13 +2492,16 @@ async def s91_insydr_member_sees_only_insydr(b):
     await nav_open(m); await m.click("#sections [data-s=private]"); await m.wait_for_timeout(300)
     await m.click("#worldGo"); await m.wait_for_selector(f'.react-flow__node[data-id="sys:{ts}"]', timeout=8000); await m.wait_for_timeout(400)
     seen = sorted(i for i in await world_ids(m) if i.startswith("sys:"))
+    await shot(m, "s91-1-member-galaxy")
     hidden = await m.evaluate("!document.body.innerText.includes('Other venture') && !JSON.stringify(S.events).includes('Other venture') && ![...F.items.keys()].some(k => k.startsWith('D-'))")
     await click_node(m, f"sys:{ts}"); await m.wait_for_timeout(600)
     planets = await world_ids(m)
+    await shot(m, "s91-2-member-system")
     o = await open_teams_canvas(b, H, "Morami49", True)
     await nav_open(o); await o.click("#sections [data-s=private]"); await o.wait_for_timeout(300)
     await o.click("#worldGo"); await o.wait_for_selector('.react-flow__node[data-id="sys:home"]', timeout=8000); await o.wait_for_timeout(400)
     nowed = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
+    await shot(o, "s91-3-owner-galaxy")
     ok = (seen == [f"sys:{ts}"] and hidden and f"pl:{ts}:t:idea" in planets and f"pl:{ts}:money" in planets
           and nowed == sorted(["sys:home", f"sys:{ts}"]) and f"sys:{other}" not in nowed and not (p.errors + n.errors + m.errors + o.errors))
     return ok, (f"member sees={seen}, home and other teamspace hidden={hidden}, member's planets={planets}, Nowed sees={nowed}, "
