@@ -276,3 +276,33 @@ fn the_hub_owner_still_sees_shares_of_nodes_outside_every_teamspace() {
     let (docs, _, _, _) = h.studio_events_for("Morami49", 0, usize::MAX, at(NOW));
     assert!(docs.iter().any(|d| d["event"]["kind"] == "node.share" && d["event"]["item"] == "INSYDR-brief"));
 }
+
+/// BQ-slice-home-insydr U1 (MAP-stakeholders S1, S2): the map's "systems" are exactly what the hub lets each person
+/// read. S1, Nowed (hub owner): his home system (everything outside teamspaces) and the Insydr system he is in.
+/// S2, an Insydr member: the Insydr system only. No home node, no other teamspace, not even its name.
+#[test]
+fn slice_u1_s1_owner_sees_both_systems_s2_insydr_member_sees_only_insydr() {
+    let mut h = hub();
+    let docs = vec![
+        ev("Morami49", "item.create", None, json!({"id": "D-home", "type": "decision", "title": "Home decision"}), 30),
+        ev("Morami49", "comment", Some("D-home"), json!({"text": "home only"}), 31),
+        ev("Morami49", "member.invite", Some("TS-pilot"), json!({"teamspace": "TS-pilot", "profile": "P-insydr-tester", "role": "member"}), 32),
+        ev("insydr-tester", "member.join", Some("TS-pilot"), json!({"teamspace": "TS-pilot"}), 33),
+    ];
+    let docs: Vec<(String, Value)> = docs.into_iter().enumerate().map(|(i, e)| (format!("s{i}"), e)).collect();
+    h.import(&KeyPair::from_seed([9; 32]), docs, 3).unwrap();
+    with_nassars_space(&mut h, vec![]);
+    // S1: home and Insydr (TS-pilot) both; Nassar's own teamspace stays out (114b a)
+    let nowed = items_seen(&h, "Morami49");
+    for id in ["D-home", "TS-pilot", "MR-pilot", "N-plan", "N-quote"] { assert!(nowed.contains(&id.to_string()), "S1 missing {id}: {nowed:?}"); }
+    assert!(!nowed.contains(&"TS-n".to_string()));
+    // S2: a member of Insydr reads the whole Insydr system (its nodes and money rules) and nothing of home
+    let member = items_seen(&h, "insydr-tester");
+    assert_eq!(member, vec!["MR-pilot", "N-plan", "N-quote", "TS-pilot"], "S2: only the Insydr system");
+    let v = h.teamspaces_at(at(NOW)).view_for("insydr-tester");
+    assert!(v["teamspaces"].as_array().unwrap().iter().any(|t| t["id"] == "TS-pilot"));
+    assert_eq!(v["others"], json!([]), "S2: no directory of other systems");
+    let (docs, _, _, _) = h.studio_events_for("insydr-tester", 0, usize::MAX, at(NOW));
+    let read = serde_json::to_string(&docs).unwrap();
+    assert!(!read.contains("Home decision") && !read.contains("Insydr internal"), "S2: no home node, no other teamspace's name");
+}

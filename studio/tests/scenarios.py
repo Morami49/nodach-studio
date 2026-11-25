@@ -1776,12 +1776,13 @@ async def open_teams_hub(browser, H, login, owner):
             return await js(me)
         if path == "/studio/api/profiles":
             return await js({"account": {"id": f"acct:github:{login.lower()}"}, "profiles": [{"id": f"P-{login.lower()}", "kind": "personal", "label": "Personal"}], "connections": []})
-        if path == "/studio/api/genesis":
-            return await js(GENESIS)
+        if path == "/studio/api/genesis":   # strict: like the real hub, only the hub owner gets the genesis items
+            return await js({"label": "genesis", "items": []} if H.get("strict") and not owner else GENESIS)
         if path == "/studio/api/events" and req.method == "GET":
             after, lim = int(q.get("after", ["0"])[0]), int(q.get("limit", ["500"])[0])
             page = H["docs"][after:after + lim]
-            shown = [d for d in page if team_visible(H, login, d["event"])] if H.get("filter") else page
+            shown = [d for d in page if member_visible(H, login, d["event"])] if H.get("strict") and not owner else \
+                [d for d in page if team_visible(H, login, d["event"])] if H.get("filter") else page
             return await js({"events": shown, "next": after + len(page), "total": len(H["docs"])})
         if path == "/studio/api/teamspaces":
             return await js(team_directory(H, login))
@@ -1858,6 +1859,22 @@ def team_visible(H, login, e):
     if login != H["owner"] or ts is None or ts not in spaces or login in spaces[ts]: return True
     now = time.time() * 1000
     return any(t == ts and w == login and at <= now < at + 24 * 3600 * 1000 for t, w, at in support)
+
+
+def member_visible(H, login, e):
+    """strict stand-in (U1, S2) for a login that isn't the hub owner, as hub_core::access::visible decides: their own
+    writes, everything in a teamspace they have joined, and nodes shared with their profile. Nothing else: no home."""
+    login = login.lower(); who = (e.get("author") or {}).get("id", "").replace("github:", "").lower()
+    if who == login: return True
+    spaces, _, _, item_space, _ = _team_fold(H)
+    ts = _space_of(e, item_space)
+    if ts in spaces and login in spaces[ts]: return True
+    invited = {(d["event"].get("body") or {}).get("teamspace") for d in H["docs"]
+               if d["event"].get("kind") == "member.invite" and (d["event"].get("body") or {}).get("profile") == f"P-{login}"}
+    if ts in invited and e.get("kind") in ("teamspace.create", "member.invite", "member.join", "member.role", "member.remove"): return True   # an invitee sees the invitation
+    node = (e.get("body") or {}).get("id") if e.get("kind") == "item.create" else e.get("item")
+    return any(d["event"].get("kind") == "node.share" and (d["event"].get("body") or {}).get("node") == node
+               and (d["event"].get("body") or {}).get("profile") == f"P-{login}" for d in H["docs"])
 
 
 def team_directory(H, login):
@@ -2406,6 +2423,92 @@ async def s82_ids_only_for_others(b):
 
 
 SCENARIOS += [s78_open_teamspace_canvas_focused, s79_member_role_controls, s80_expand_one_hop, s81_list_view_still_works, s82_ids_only_for_others]
+
+
+# ---------------------------------------------------------------- BQ-slice-home-insydr U2: one map you travel
+async def shot(p, name):
+    """G-review-visible: STUDIO_SHOTS=1 saves a screenshot of this moment to <OUT>/shots/<name>.png for the PR."""
+    if os.environ.get("STUDIO_SHOTS"):
+        (OUT / "shots").mkdir(parents=True, exist_ok=True); await p.screenshot(path=str(OUT / "shots" / f"{name}.png"))
+
+
+async def world_ids(p):
+    return sorted(i for i in await canvas_ids(p) if not i.startswith("cl:"))
+
+
+async def s90_galaxy_travel_as_owner(b):
+    """U2 (S1): Nowed opens the map and clicks Galaxy. He sees two systems, Home and his Insydr pilot, each drawn as a
+    cluster of planets. He clicks Insydr and flies in: Members, Money and Ideas around the star. He lands on Ideas,
+    opens Plan (its own panel), and the bar reads Galaxy > Insydr pilot > Ideas > the node. Galaxy in the bar takes
+    him back out. Set to a moment before the teamspace existed, the galaxy has only Home. Nothing is written."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await nav_open(o); await o.click("#sections [data-s=private]"); await o.wait_for_timeout(300)
+    posts0 = len(H["posts"])
+    await o.click("#worldGo"); await o.wait_for_selector('.react-flow__node[data-id="sys:home"]', timeout=8000); await o.wait_for_timeout(400)
+    galaxy = await world_ids(o)
+    systems = sorted(i for i in galaxy if i.startswith("sys:"))
+    clusters = sorted(i for i in await canvas_ids(o) if i.startswith("cl:"))
+    await shot(o, "s90-1-galaxy")
+    await click_node(o, f"sys:{ts}"); await o.wait_for_timeout(700)
+    system = await world_ids(o)
+    await shot(o, "s90-2-system")
+    await click_node(o, f"pl:{ts}:t:idea"); await o.wait_for_timeout(700)
+    planet = await world_ids(o)
+    await click_node(o, ids["Plan"]); await o.wait_for_timeout(400)
+    crumbs = await o.inner_text("#worldCrumbs")
+    await shot(o, "s90-3-planet-node")
+    panel = await o.evaluate("S.sel")
+    await o.click('#worldCrumbs [data-wgo=""]'); await o.wait_for_timeout(700)
+    back = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
+    await o.evaluate("S.asof = '2000-01-01T00:00:00.000Z'; refresh();"); await o.wait_for_timeout(500)
+    past = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
+    await o.evaluate("S.asof = null; refresh();"); await o.wait_for_timeout(300)
+    await o.click("#worldLeave"); await o.wait_for_timeout(500)
+    whole = await o.evaluate("!S.world && !document.querySelector('#worldBar') && document.querySelectorAll('#canvas .react-flow__node-item').length > 50")
+    ok = (systems == sorted(["sys:home", f"sys:{ts}"]) and clusters == sorted(["cl:home", f"cl:{ts}"])
+          and set(system) == {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:money", f"pl:{ts}:t:idea"}
+          and set(planet) == {ids["Plan"], ids["Quote"]} and panel == ids["Plan"]
+          and all(x in crumbs for x in ("Galaxy", "Insydr pilot", "Ideas", ids["Plan"])) and back == systems and past == ["sys:home"]
+          and whole and len(H["posts"]) == posts0 and not (p.errors + n.errors + o.errors))
+    return ok, (f"systems={systems}, clusters={clusters}, system={system}, planet={planet}, panel={panel}, crumbs={crumbs!r}, "
+                f"back out={back}, as of 2000={past}, whole graph after={whole}, writes={len(H['posts']) - posts0}, errors={(p.errors + n.errors + o.errors)[:1]}")
+
+
+async def s91_insydr_member_sees_only_insydr(b):
+    """U1 + U2 (S2): an Insydr member signs in to a hub that filters reads like the real one. Nowed's home and
+    Nassar's own teamspace exist on the same hub. In the galaxy the member sees one system, Insydr pilot, with its
+    nodes; there is no Home system and the other teamspace's name is nowhere on the page. Nowed, on the same hub, sees
+    Home and Insydr pilot, and not Nassar's teamspace (he isn't in it)."""
+    H = team_hub(); H["strict"] = True; H["filter"] = True
+    p = await open_teams_hub(b, H, "Morami49", True)
+    ts = await make_space(p, "Insydr pilot")
+    await p.fill("#tsNodeTitle", "Plan"); await p.click("#tsAddNode"); await p.wait_for_timeout(350)
+    await p.fill("#tsInvProf", "P-insydr-tester"); await p.select_option("#tsInvRole", "member"); await p.click("#tsInvite"); await p.wait_for_timeout(350)
+    n = await open_teams_hub(b, H, "nassar", False)
+    other = await make_space(n, "Other venture")
+    m = await open_teams_canvas(b, H, "insydr-tester", False)
+    await to_spaces(m); await m.click("#tsInvList [data-tsjoin]"); await m.wait_for_timeout(500)
+    await nav_open(m); await m.click("#sections [data-s=private]"); await m.wait_for_timeout(300)
+    await m.click("#worldGo"); await m.wait_for_selector(f'.react-flow__node[data-id="sys:{ts}"]', timeout=8000); await m.wait_for_timeout(400)
+    seen = sorted(i for i in await world_ids(m) if i.startswith("sys:"))
+    await shot(m, "s91-1-member-galaxy")
+    hidden = await m.evaluate("!document.body.innerText.includes('Other venture') && !JSON.stringify(S.events).includes('Other venture') && ![...F.items.keys()].some(k => k.startsWith('D-'))")
+    await click_node(m, f"sys:{ts}"); await m.wait_for_timeout(600)
+    planets = await world_ids(m)
+    await shot(m, "s91-2-member-system")
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await nav_open(o); await o.click("#sections [data-s=private]"); await o.wait_for_timeout(300)
+    await o.click("#worldGo"); await o.wait_for_selector('.react-flow__node[data-id="sys:home"]', timeout=8000); await o.wait_for_timeout(400)
+    nowed = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
+    await shot(o, "s91-3-owner-galaxy")
+    ok = (seen == [f"sys:{ts}"] and hidden and f"pl:{ts}:t:idea" in planets and f"pl:{ts}:money" in planets
+          and nowed == sorted(["sys:home", f"sys:{ts}"]) and f"sys:{other}" not in nowed and not (p.errors + n.errors + m.errors + o.errors))
+    return ok, (f"member sees={seen}, home and other teamspace hidden={hidden}, member's planets={planets}, Nowed sees={nowed}, "
+                f"errors={(p.errors + n.errors + m.errors + o.errors)[:1]}")
+
+
+SCENARIOS += [s90_galaxy_travel_as_owner, s91_insydr_member_sees_only_insydr]
 
 
 async def main():
