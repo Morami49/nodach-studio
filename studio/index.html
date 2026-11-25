@@ -819,6 +819,8 @@ function renderMap(relayout){
   if (S.tsFocus && ((S.section !== "teams" && !S.tsKeep) || !tsCanvasOk())) tsUnfocus();
   if (S.tsFocus && tsCanvasOk()) return renderTsFocus(relayout);
   if (S.world && !tsCanvasOk()) S.world = null, $("#worldBar")?.remove(), $("#filters").hidden = false;   // the galaxy needs the canvas
+  // W0 (PLAN-world-ui): the map opens on the Galaxy; Whole graph is a toggle, remembered on this device
+  if (!S.world && !S.tsFocus && tsCanvasOk() && store.get("map.lens") !== "graph") S.world = parseWorld(location.hash) || {sys:null, planet:null, node:null};
   if (S.world) return renderWorld(relayout);
   if (window.NodachCanvas && !S.classicMap) return renderCanvas(relayout);
   $("#canvas").hidden = true; $("#cy").hidden = false;
@@ -1075,6 +1077,8 @@ $("#listQ").oninput = renderList; $("#listT").onchange = renderList;
 
 /* ---------------------------------------------------------------- inspector */
 function select(id){
+  if (S.world && S.world.node !== id){ const at = worldPlaceOf(id);   // W0: a node opened from a list, search or link: fly to where it lives
+    if (at){ S.world = {sys:at.sys, planet:at.planet, node:id}; S.worldFly = true; } }
   S.sel = id; S.selStep = null; $("#inspector").classList.remove("closed"); renderInspector();
   if (cy){ cy.nodes().unselect(); const n=cy.getElementById(id); if (n.length) n.select(); }
   if (window.NodachCanvas && !S.classicMap && S.view==="map") renderMap(false);
@@ -1165,7 +1169,14 @@ function stepWords(st){
 function renderInspector(){
   if (!S.sel && S.tsPanel && S.tsFocus) return renderTsPanel();   // B-teamspace-graph: a teamspace, profile or money node
   const it = F.items.get(S.sel);
-  $("#inspEmpty").hidden = !!it; $("#insp").hidden = !it; if (!it) return;
+  $("#inspEmpty").hidden = !!it; $("#insp").hidden = !it;
+  if (!it && S.world && S.view === "map" && S.worldHere){   // 154c b: the keyboard and screen-reader route lives in the map itself
+    $("#inspEmpty").innerHTML = `<p style="margin:0 0 8px">Here: ${S.worldHere.length} place${S.worldHere.length === 1 ? "" : "s"}. Choose one to go there, or click it on the map.</p>
+      <ul id="worldHereList" style="list-style:none;margin:0;padding:0;display:grid;gap:4px">${S.worldHere.map(x =>
+        `<li><button class="link" data-where="${esc(x.id)}" style="text-align:left">${esc(x.label)}</button> <span class="mute mono" style="font-size:11px">${esc(x.note)}</span></li>`).join("")}</ul>`;
+    $("#inspEmpty").querySelectorAll("[data-where]").forEach(b => b.onclick = () => worldSelect(b.dataset.where));
+  } else if (!it) $("#inspEmpty").textContent = "Select anything on the map or in the list to see its history, links and answers.";
+  if (!it) return;
   const back = [...F.items.values()].filter(x => (x.refs||[]).includes(it.id)).map(x=>x.id);
   const code = codeOf(it.id), isQ = it.type==="question";
   const draft = store.get("reply."+it.id) || "";
@@ -2234,7 +2245,7 @@ $("#goForm").onsubmit = e => { e.preventDefault(); const raw = $("#goAddr").valu
   if (openAddress(raw)) $("#goAddr").value = ""; };
 $("#goAddr").addEventListener("focus", () => { if (!$("#hdr").classList.contains("classic")) navSection("search"); });
 $("#goAddr").addEventListener("blur", () => setTimeout(() => { if (S.section === "search" && SECTION_OF[S.view] !== "search") navSection(SECTION_OF[S.view]); }, 200));
-addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h && F.items.has(h)) select(h); });
+addEventListener("hashchange", () => { if (/^#\//.test(location.hash)) return worldFromHash(); const h = location.hash.slice(1); if (h && F.items.has(h)) select(h); });
 
 /* ---------------------------------------------------------------- money rules (D-078–D-084): same arithmetic as engine/crates/exchange-core */
 const SETTING_DEFAULTS = {"SET-cut-community":300,"SET-cut-small":500,"SET-cut-large":800,"SET-tier-threshold":5000000,
@@ -2630,7 +2641,7 @@ function tsBar(g){
     ${opened ? `<button id="tsBarCollapse">Back to 1 hop</button>` : ""}<button id="tsBarAll" title="Leave the teamspace: the whole graph">Whole graph</button>`;
   $("#tsBarList").onclick = () => { const ts = S.tsFocus.ts; store.set("ts.view", "list"); tsUnfocus(); openSpace(ts, "list"); };
   const c = $("#tsBarCollapse"); if (c) c.onclick = () => { S.tsFocus.open.clear(); renderMap(false); };
-  $("#tsBarAll").onclick = () => { tsUnfocus(); show("map"); renderMap(true); };
+  $("#tsBarAll").onclick = () => { store.set("map.lens", "graph"); tsUnfocus(); show("map"); renderMap(true); };
 }
 function renderTsFocus(relayout){
   const f = S.tsFocus, g = tsGraph(f.ts);
@@ -2703,9 +2714,45 @@ function worldPlanets(s){
   return pl;
 }
 const worldNodes = s => s.items.length + s.shared.length;
-function enterWorld(){ tsUnfocus(); S.world = {sys:null, planet:null, node:null}; S.sel = null; S.worldFly = false; if (S.view !== "map") show("map"); renderMap(true); }
-function leaveWorld(){ S.world = null; $("#worldBar")?.remove(); $("#filters").hidden = false; renderMap(true); }
+function enterWorld(){ store.set("map.lens", "galaxy"); tsUnfocus(); S.world = {sys:null, planet:null, node:null}; S.sel = null; S.worldFly = false; if (S.view !== "map") show("map"); renderMap(true); }
+function leaveWorld(){ store.set("map.lens", "graph"); S.world = null; $("#worldBar")?.remove(); $("#filters").hidden = false; worldHash(); renderMap(true); }
 function worldGo(sys, planet){ S.world = {sys, planet:planet || null, node:null}; S.sel = null; S.worldFly = true; renderMap(true); }
+/* W0: every place has an address, #/<system>/<planet>/<node> (#/ alone is the Galaxy), so Back, reload and pasted links
+   land on the same place. Item addresses (#D-001) keep working: they fly to the node's place. */
+const planetSlug = key => key.replace(/^t:/, ""), planetKey = slug => ["members","money","shared"].includes(slug) ? slug : "t:" + slug;
+function worldAddress(w){ return "#/" + [w.sys, w.sys && w.planet && planetSlug(w.planet), w.sys && w.planet && w.node].filter(Boolean).map(encodeURIComponent).join("/"); }
+function parseWorld(hash){
+  if (!/^#\//.test(hash || "")) return null;
+  const [sys, pl, node] = hash.slice(2).split("/").filter(Boolean).map(decodeURIComponent);
+  return {sys:sys || null, planet:sys && pl ? planetKey(pl) : null, node:sys && pl && node || null};
+}
+S.worldFromHistory = false;
+function worldHash(){
+  try {
+    const want = S.world && S.view === "map" ? worldAddress(S.world) : "";
+    if (!S.world && /^#\//.test(location.hash)) return history.replaceState(history.state, "", location.pathname + location.search);
+    if (!want || want === location.hash) return;
+    if (S.worldFromHistory || !/^#\//.test(location.hash)) history.replaceState(history.state, "", want); else history.pushState(history.state, "", want);
+  } catch {} finally { S.worldFromHistory = false; }
+}
+function worldFromHash(){
+  const w = parseWorld(location.hash); if (!w || !tsCanvasOk()) return false;
+  S.worldFromHistory = true; tsUnfocus(); S.world = w; S.worldFly = true; store.set("map.lens", "galaxy"); S.sel = null;
+  if (S.view !== "map") show("map"); else renderMap(true);
+  if (w.node && !w.node.startsWith("prof:") && F.items.has(w.node)) select(w.node);
+  return true;
+}
+addEventListener("popstate", () => { if (/^#\//.test(location.hash)) worldFromHash(); });
+// the place a node lives: its teamspace (or Home), then its planet
+function worldPlaceOf(id){
+  const it = F.items.get(id); if (!it) return null;
+  const T = TEAMS || foldTeams(S.events), ts = T.itemSpace.get(id);
+  const sys = worldModel().find(s => ts ? s.id === ts : s.kind === "home" && s.items.some(i => i.id === id))
+    || worldModel().find(s => s.shared.some(i => i.id === id));
+  if (!sys) return null;
+  const pl = worldPlanets(sys).find(p => (p.items || []).some(i => i.id === id));
+  return pl ? {sys:sys.id, planet:pl.key} : null;
+}
 function worldBar(s, pl){
   let bar = $("#worldBar");
   if (!bar){ bar = document.createElement("div"); bar.id = "worldBar"; bar.className = "mapbar"; bar.setAttribute("role", "navigation");
@@ -2726,11 +2773,11 @@ function worldBar(s, pl){
 }
 function renderWorld(relayout){
   const w = S.world, sys = worldModel();
-  let s = w.sys ? sys.find(x => x.id === w.sys) : null;
-  if (w.sys && !s){ w.sys = w.planet = w.node = null; }   // not drawn at this as-of, or no longer readable
+  // a place not here (not loaded yet, not at this as-of, or not readable) shows the level above; its address is kept
+  const s = w.sys ? sys.find(x => x.id === w.sys) || null : null;
   const planets = s ? worldPlanets(s) : [];
-  const pl = s && w.planet ? planets.find(p => p.key === w.planet) : null;
-  if (w.planet && !pl){ w.planet = w.node = null; }
+  const pl = s && w.planet ? planets.find(p => p.key === w.planet) || null : null;
+  const missing = (w.sys && !s) || (w.planet && !pl);
   const el = $("#canvas"); el.hidden = false; $("#cy").hidden = true;
   worldBar(s, pl);
   const nodes = [], edges = [];
@@ -2772,6 +2819,11 @@ function renderWorld(relayout){
     }
   }
   if (relayout) canvasFitKey++;
+  if (!missing) worldHash();
+  S.worldHere = !s ? sys.map(x => ({id:"sys:" + x.id, label:x.label, note:`${worldPlanets(x).length} planets · ${worldNodes(x)} nodes`}))
+    : !pl ? planets.map(p => ({id:"pl:" + s.id + ":" + p.key, label:p.label, note:`${p.count} ${p.profiles ? "profile" : "node"}${p.count === 1 ? "" : "s"}`}))
+    : pl.profiles ? pl.profiles.map(p => ({id:"prof:" + p.pid, label:p.pid, note:p.role})) : pl.items.map(i => ({id:i.id, label:i.title || i.id, note:i.id}));
+  if (!S.sel && S.view === "map") renderInspector();
   const none = () => {}, fly = S.worldFly; S.worldFly = false;
   window.NodachCanvas.render(el, {nodes, edges, sel:w.node, can:false, focus:hint, dark:document.documentElement.dataset.theme === "dark",
     fit:!!relayout, fitKey:canvasFitKey, flyMs:fly ? 600 : 0, onSelect:worldSelect, onMove:none, onConnect:none, onFrame:none, isStep:() => false,
@@ -2867,7 +2919,7 @@ async function signOut(){
 /* ---------------------------------------------------------------- boot */
 (async function boot(){
   show(store.get("view") || (innerWidth < 600 ? "capture" : "map"));
-  setTimeout(() => { const h = location.hash.slice(1); if (h && F.items.has(h)) select(h); }, 1500);
+  setTimeout(() => { if (worldFromHash()) return; const h = location.hash.slice(1); if (h && F.items.has(h)) select(h); }, 1500);
   refresh();
   const timer = setTimeout(() => { $("#conn").textContent = "can't reach the store yet"; }, 10000);
   if (!window.claude?.use){ clearTimeout(timer); $("#conn").textContent = "offline preview"; return; }
