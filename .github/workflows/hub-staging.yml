@@ -50,7 +50,8 @@ jobs:
       SHA: ${{ inputs.sha || github.event.workflow_run.head_sha || github.sha }}
       BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
       SINGLE: ${{ inputs.single && 'true' || 'false' }}
-      URL: https://clanstack-hub-staging.ndab-utube.workers.dev
+      URL: https://clanstack-hub-staging.ndab-utube.workers.dev   # the Worker itself: smoke tests and fallback only
+      STUDIO_URL: https://staging.nodach.com/studio                # BQ-domain-links: the address people and chats are given
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
@@ -170,7 +171,7 @@ jobs:
           STATUS: ${{ job.status }}
         run: |
           short=$(echo "${DEPLOY_SHA:-$SHA}" | cut -c1-7)
-          if [ "$STATUS" = success ]; then text="Staging now runs $short (triggered by $BRANCH; $TRAIN_NOTE); smoke test passed. Try it: $URL/studio"; outcome=success
+          if [ "$STATUS" = success ]; then text="Staging now runs $short (triggered by $BRANCH; $TRAIN_NOTE); smoke test passed. Try it: $STUDIO_URL (if nodach.com is down: $URL/studio)"; outcome=success
           else text="Staging deploy of $short (triggered by $BRANCH; ${TRAIN_NOTE:-train not built}) $STATUS; production is unaffected."; outcome=failure; fi
           RUN_SHA="${DEPLOY_SHA:-$SHA}" python3 scripts/run_record.py hub-staging --title "Staging deploys" --outcome "$outcome" --text "$text" \
             --policy auto --undo "Nothing to undo: staging has its own test record; production only changes from main." \
