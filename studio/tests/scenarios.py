@@ -1801,7 +1801,7 @@ async def open_teams_hub(browser, H, login, owner):
             return await js(H["usage"](login) if callable(H["usage"]) else H["usage"])
         if path == "/studio/api/money" and "money" in H:   # BQ-1 step 4: the hub's ledger view for one teamspace
             return await js(H["money"](H, login, q.get("teamspace", [""])[0]))
-        if path in ("/studio/api/money/checkout", "/studio/api/money/record") and req.method == "POST" and "money" in H:
+        if path in ("/studio/api/money/checkout", "/studio/api/money/record", "/studio/api/money/check") and req.method == "POST" and "money" in H:
             b = json.loads(req.post_data or "{}")
             H.setdefault("money_posts", []).append({"path": path, "body": b, "hdr": req.headers.get("x-nodach-studio")})
             return await js(*money_post(H, login, path, b))
@@ -2281,6 +2281,17 @@ def money_view(H, login, ts):
 
 
 def money_post(H, login, path, b):
+    if path.endswith("/check"):   # bug 122: the hub asks Stripe about the invoice's session; H["stripe_paid"] = what Stripe says was paid
+        paid = H.get("stripe_paid", {}).get(b["invoice"])
+        if not paid:
+            return {"outcome": "ok: nothing new", "paid": False}, 200
+        if any(d["event"]["kind"] == "payment.received" and d["event"]["body"].get("invoice") == b["invoice"] for d in H["docs"]):
+            return {"outcome": "ok: nothing new", "paid": True}, 200
+        n = len(H["docs"]); fee = (paid * 450 + 5000) // 10000
+        H["docs"].append(runner_doc("payment.received", b["invoice"], {"id": f"PAY-{n}", "invoice": b["invoice"], "teamspace": "TS-pilot", "amount": paid, "method": "card", "provider_ref": f"pi_test_{n}"}, n))
+        H["docs"].append(runner_doc("fee.charged", b["invoice"], {"payment": f"PAY-{n}", "invoice": b["invoice"], "teamspace": "TS-pilot", "line": "platform_fee", "rate_bps": 450, "amount": fee, "payer": "vendor", "basis": "through Nodach"}, n + 1))
+        H["docs"].append(runner_doc("fee.charged", b["invoice"], {"payment": f"PAY-{n}", "invoice": b["invoice"], "teamspace": "TS-pilot", "line": "provider_cost", "rate_bps": 0, "amount": 170, "payer": "nodach", "basis": "Stripe's processing fee"}, n + 2))
+        return {"outcome": "ok: 3 written", "paid": True}, 200
     if path.endswith("/checkout"):
         if not H.get("stripe_ready"):
             return {"error": NO_KEY, "stripe_ready": False}, 503
@@ -2377,6 +2388,32 @@ async def s76_money_card_link_test_mode(b):
     return ok, f"button on={on}, asked the hub={[(x['path'], x['body']) for x in posts]}, link={href[-30:]!r}, note={note.strip()[:60]!r}, errors={p.errors[:1]}"
 
 
+async def s78_money_lost_webhook_found(b):
+    """Bug 122 (BQ-thin-slice-insydr): Nowed paid £100 by test card on 23 Nov; Stripe took it but its webhook never
+    reached the hub, so the ledger showed the invoice and card link while every total stayed £0. Opening Money now asks
+    the hub to check the unpaid card link at Stripe once (POST /studio/api/money/check, the invoice id only); the hub
+    records the payment and both fee lines, and the totals and the teamspace's Money tile move from £0 to £4.50."""
+    H = money_hub(); H["stripe_ready"] = True
+    H["docs"].append({"doc_id": "d-ch", "event": tev("Morami49", "money.charging", "TS-pilot", {"teamspace": "TS-pilot", "on": True, "note": "first test passed"}, 9)})
+    H["docs"].append({"doc_id": "d-inv", "event": tev("Morami49", "invoice.create", "INV-122", {"id": "INV-122", "teamspace": "TS-pilot", "client": "Dummy", "currency": "GBP",
+                      "lines": [{"desc": "test", "qty": 1, "unit": 10000}], "total": 10000}, 10)})
+    H["docs"].append(runner_doc("invoice.checkout", "INV-122", {"invoice": "INV-122", "teamspace": "TS-pilot", "provider": "stripe", "mode": "test", "session": "cs_test_122",
+                      "url": "https://checkout.stripe.com/c/pay/cs_test_122"}, 11))
+    H["stripe_paid"] = {"INV-122": 10000}
+    p = await open_teams_hub(b, H, "Morami49", True)
+    await to_money(p); await p.wait_for_timeout(900)
+    checks = [x for x in H.get("money_posts", []) if x["path"].endswith("/check")]
+    fees = await p.inner_text('#monTotals [data-t="platform_fees"]'); rec = await p.inner_text('#monTotals [data-t="received"]')
+    status = await p.inner_text("[data-invoice=INV-122] [data-status]")
+    await to_money(p); await p.wait_for_timeout(700)
+    again = len([x for x in H.get("money_posts", []) if x["path"].endswith("/check")])
+    await to_spaces(p); await p.click("#tsList [data-tsopen='TS-pilot']"); await p.wait_for_timeout(700)
+    tile = await p.inner_text("#tsMoneyTotals")
+    ok = (len(checks) == 1 and checks[0]["body"] == {"invoice": "INV-122"} and checks[0]["hdr"] == "1" and again == 1 and rec == "£100.00" and fees == "£4.50"
+          and status == "paid" and "£4.50" in tile and "£100.00" in tile and not p.errors)
+    return ok, f"checks={[c['body'] for c in checks]} (after reopening: {again}), received={rec}, fees={fees}, invoice={status}, tile={tile.strip()[:70]!r}, errors={p.errors[:1]}"
+
+
 async def s77_money_charging_and_recorded_payment(b):
     """BQ-1 step 4: Nowed (the teamspace's owner) clicks First test passed: start charging, which writes one
     money.charging {on: true}; then records a £60.00 bank transfer on the invoice with Record a payment, which goes to
@@ -2419,7 +2456,8 @@ SCENARIOS = [s01_tired_misclick, s02_undo, s03_stable_codes, s04_past_view_lock,
              s64_teamspace_create, s65_teamspace_invite, s66_guest_cant_see_unshared, s67_teamspace_export,
              s68_owner_opens_created_teamspace, s69_support_access,
              s70_usage_bars, s71_usage_notice_in_queue, s72_limits_change_is_a_proposal, s73_run_refused_at_limit,
-             s74_money_create_invoice, s75_money_ledger_and_nodach_net, s76_money_card_link_test_mode, s77_money_charging_and_recorded_payment]
+             s74_money_create_invoice, s75_money_ledger_and_nodach_net, s76_money_card_link_test_mode, s77_money_charging_and_recorded_payment,
+             s78_money_lost_webhook_found]
 
 
 async def main():

@@ -132,3 +132,44 @@ fn checkout_is_a_destination_charge_with_the_fee_as_application_fee() {
     assert_eq!(get("line_items[1][price_data][unit_amount]"), Some("1100"));
     assert!(money::form(&f).contains("metadata%5Binvoice%5D=INV-9"));
 }
+
+#[test]
+fn bug_122_a_lost_webhook_is_found_by_asking_stripe_and_never_counted_twice() {
+    // 23 Nov on staging: £100 paid by test card, Stripe took it, its webhook never reached the hub, every total stayed £0.
+    // The hub now looks the invoice's Checkout Session up itself; a webhook arriving later adds nothing.
+    let mut h = Hub::new();
+    h.set_owners(vec!["Morami49".into()]);
+    let imp = KeyPair::from_seed([9; 32]);
+    let k = KeyPair::from_seed([7; 32]);
+    let docs = vec![
+        ev("Morami49", "teamspace.create", Some("TS-test"), json!({"id": "TS-test", "label": "Test space"}), 1),
+        ev("Morami49", "invoice.create", Some("INV-122"), json!({"id": "INV-122", "teamspace": "TS-test", "client": "Dummy", "currency": "GBP",
+            "lines": [{"desc": "test", "qty": 1, "unit": 10_000}], "total": 10_000}), 2),
+        ev("Morami49", "money.charging", Some("TS-test"), json!({"teamspace": "TS-test", "on": true, "note": "first test passed"}), 3),
+    ];
+    h.import(&imp, docs.into_iter().enumerate().map(|(i, e)| (format!("b{i}"), e)).collect(), 1).unwrap();
+    assert_eq!(h.money().session_to_check("INV-122"), None, "no card link yet: nothing to ask Stripe");
+    h.write(&k, "flow runner", runner("invoice.checkout", "INV-122", json!({"invoice": "INV-122", "teamspace": "TS-test", "provider": "stripe", "mode": "test",
+        "session": "cs_test_122", "url": "https://checkout.stripe.com/c/pay/cs_test_122", "application_fee": 0})), 2).unwrap();
+    assert_eq!(h.money().totals("TS-test").received, 0, "the ledger shows the card link, the totals don't move: bug 122");
+    assert_eq!(h.money().session_to_check("INV-122").as_deref(), Some("cs_test_122"));
+
+    // what GET /v1/checkout/sessions/cs_test_122 answers
+    let mut sess = json!({"id": "cs_test_122", "object": "checkout.session", "livemode": false, "payment_status": "unpaid", "currency": "gbp", "amount_total": 10_000,
+        "payment_intent": "pi_test_122", "metadata": {"invoice": "INV-122", "teamspace": "TS-test"}});
+    assert!(matches!(money::paid_session(&sess).unwrap(), Webhook::Ignored(_)), "not paid yet: nothing recorded");
+    sess["livemode"] = json!(true); sess["payment_status"] = json!("paid");
+    assert!(money::paid_session(&sess).is_err(), "live sessions are refused");
+    sess["livemode"] = json!(false);
+    let w = money::paid_session(&sess).unwrap();
+    for (kind, item, b) in h.money().plan(&w, None).unwrap() { h.write(&k, "flow runner", runner(&kind, &item, b), 3).unwrap(); }
+    let m = h.money();
+    let t = m.totals("TS-test");
+    assert_eq!((t.received, t.platform_fees, t.outstanding), (10_000, 450, 0), "the Money tile: £0 → £4.50");
+    assert_eq!(m.invoices["INV-122"].status, "paid");
+    assert_eq!(m.session_to_check("INV-122"), None, "paid: nothing left to check");
+
+    // the webhook turns up late: same payment intent, so nothing new
+    let late = json!({"id": "evt_late", "type": "checkout.session.completed", "livemode": false, "data": {"object": sess}});
+    assert!(h.money().plan(&money::parse_webhook(&late).unwrap(), Some(170)).unwrap().is_empty());
+}

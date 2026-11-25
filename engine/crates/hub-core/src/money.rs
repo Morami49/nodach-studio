@@ -260,6 +260,8 @@ pub struct Invoice {
     pub created: String,
     pub author: String,
     pub checkout_url: Option<String>,
+    /// The Stripe Checkout Session behind `checkout_url`, so the hub can ask Stripe whether it was paid (bug 122).
+    pub checkout_session: Option<String>,
     pub paid: i64,
     pub refunded: i64,
     pub status: String,
@@ -476,7 +478,7 @@ impl State {
                         Ok((lines, total)) => {
                             self.invoices.insert(id.clone(), Invoice { id, teamspace: ts_id.clone(), client: s(&b, "client").chars().take(200).collect(), lines, total,
                                 currency: CURRENCY.into(), co_vendor: b.get("co_vendor").and_then(Value::as_bool).unwrap_or(false), created: at.clone(),
-                                author: author_login(ev).unwrap_or_default(), checkout_url: None, paid: 0, refunded: 0, status: "open".into() });
+                                author: author_login(ev).unwrap_or_default(), checkout_url: None, checkout_session: None, paid: 0, refunded: 0, status: "open".into() });
                             true
                         }
                         Err(e) => { self.finding(doc_id, kind, e); false }
@@ -484,7 +486,11 @@ impl State {
                 }
             }
             "invoice.checkout" => match self.invoices.get_mut(s(&b, "invoice")) {
-                Some(inv) => { inv.checkout_url = Some(s(&b, "url").to_string()).filter(|u| !u.is_empty()); true }
+                Some(inv) => {
+                    inv.checkout_url = Some(s(&b, "url").to_string()).filter(|u| !u.is_empty());
+                    inv.checkout_session = Some(s(&b, "session").to_string()).filter(|u| !u.is_empty());
+                    true
+                }
                 None => false,
             },
             "payment.received" => {
@@ -540,6 +546,12 @@ impl State {
             let net = inv.paid - inv.refunded;
             inv.status = if inv.refunded > 0 && net <= 0 { "refunded" } else if net >= inv.total { "paid" } else if net > 0 { "part paid" } else { "open" }.into();
         }
+    }
+
+    /// The Checkout Session to ask Stripe about for an invoice that still has money due, if it has one.
+    pub fn session_to_check(&self, invoice: &str) -> Option<String> {
+        let inv = self.invoices.get(invoice)?;
+        (inv.total - (inv.paid - inv.refunded) > 0).then(|| inv.checkout_session.clone()).flatten()
     }
 
     pub fn charging_on(&self, teamspace: &str) -> bool { self.charging.get(teamspace).is_some_and(|c| c.on) }
@@ -692,18 +704,23 @@ pub fn parse_webhook(v: &Value) -> Result<Webhook, String> {
     if v.get("livemode").and_then(Value::as_bool) != Some(false) { return Err("only test-mode events are accepted (livemode must be false)".into()); }
     let o = v.pointer("/data/object").cloned().unwrap_or(Value::Null);
     match s(v, "type") {
-        "checkout.session.completed" | "checkout.session.async_payment_succeeded" => {
-            if s(&o, "payment_status") != "paid" { return Ok(Webhook::Ignored("checkout not paid yet".into())); }
-            if !s(&o, "currency").eq_ignore_ascii_case("gbp") { return Err("only GBP payments are recorded".into()); }
-            let inv = o.pointer("/metadata/invoice").and_then(Value::as_str).unwrap_or("").to_string();
-            if inv.is_empty() { return Ok(Webhook::Ignored("not a Nodach invoice".into())); }
-            Ok(Webhook::Paid { invoice: inv, teamspace: o.pointer("/metadata/teamspace").and_then(Value::as_str).unwrap_or("").into(),
-                amount: o.get("amount_total").and_then(Value::as_i64).unwrap_or(0), payment_intent: s(&o, "payment_intent").into(), session: s(&o, "id").into() })
-        }
+        "checkout.session.completed" | "checkout.session.async_payment_succeeded" => paid_session(&o),
         "charge.refunded" => Ok(Webhook::Refunded { payment_intent: s(&o, "payment_intent").into(),
             amount_refunded: o.get("amount_refunded").and_then(Value::as_i64).unwrap_or(0), charge: s(&o, "id").into() }),
         other => Ok(Webhook::Ignored(format!("{other} isn't used"))),
     }
+}
+
+/// Read one Checkout Session object: from a webhook, or fetched from Stripe by the hub itself when the webhook never
+/// arrived (bug 122: two test payments on staging, 23 Nov, reached Stripe but never the ledger). Test mode only.
+pub fn paid_session(o: &Value) -> Result<Webhook, String> {
+    if o.get("livemode").and_then(Value::as_bool) == Some(true) { return Err("only test-mode sessions are accepted".into()); }
+    if s(o, "payment_status") != "paid" { return Ok(Webhook::Ignored("checkout not paid yet".into())); }
+    if !s(o, "currency").eq_ignore_ascii_case("gbp") { return Err("only GBP payments are recorded".into()); }
+    let inv = o.pointer("/metadata/invoice").and_then(Value::as_str).unwrap_or("").to_string();
+    if inv.is_empty() { return Ok(Webhook::Ignored("not a Nodach invoice".into())); }
+    Ok(Webhook::Paid { invoice: inv, teamspace: o.pointer("/metadata/teamspace").and_then(Value::as_str).unwrap_or("").into(),
+        amount: o.get("amount_total").and_then(Value::as_i64).unwrap_or(0), payment_intent: s(o, "payment_intent").into(), session: s(o, "id").into() })
 }
 
 /// Verify, then read, one webhook delivery: the raw body, its Stripe-Signature header and the signing secret.
@@ -720,6 +737,7 @@ impl State {
         match w {
             Webhook::Paid { invoice, teamspace, amount, payment_intent, session } => {
                 let inv = self.invoices.get(invoice).ok_or_else(|| format!("invoice {invoice} isn't on the record"))?;
+                if *amount <= 0 { return Err(format!("Stripe reported no amount for {invoice}")); }
                 if !teamspace.is_empty() && *teamspace != inv.teamspace { return Err(format!("{invoice} isn't in {teamspace}")); }
                 let pref = if payment_intent.is_empty() { session.as_str() } else { payment_intent.as_str() };
                 self.payment_events(invoice, *amount, Method::Card, pref, provider_cost, None)

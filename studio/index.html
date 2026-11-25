@@ -2276,6 +2276,8 @@ const FEE_RULES_ID = "FEE-rules";
 const FEE_DEFAULT = {nodach_bps:450, co_vendor_bps:0, own_provider_bps:100, plans:{free:0}, default_plan:"free", stripe_estimate_bps:150, stripe_estimate_fixed:20, overrides:{}, placeholders:["own_provider_bps","plans"]};
 let MONEY = null;
 S.monTs = null;
+// bug 122: invoices already asked about at Stripe in this page load (and card links made in it, which can't be paid yet)
+const MON_CHECKED = new Set();
 const pctTxt = bps => (bps / 100).toLocaleString("en-GB", {minimumFractionDigits:bps % 100 ? 1 : 0, maximumFractionDigits:2}) + "%";
 const LEDGER_WORDS = {"invoice.create":"Invoice", "invoice.checkout":"Card link", "payment.received":"Payment", "fee.charged":"Fee", "refund":"Refund", "money.charging":"Charging", "money.account":"Stripe account"};
 function ledgerLine(l, i){
@@ -2296,7 +2298,7 @@ function invoiceLine(inv, i, M){
       ${M.owner ? `<input data-recamt="${esc(inv.id)}" type="number" min="0.01" step="0.01" value="${(due / 100).toFixed(2)}" style="width:100px" aria-label="Amount received £">
       <select data-recmeth="${esc(inv.id)}" aria-label="How it was paid"><option value="recorded_bank_transfer">bank transfer (recorded)</option><option value="own_provider">own payment provider</option></select>
       <button data-invrec="${esc(inv.id)}">Record a payment</button>` : ""}</span>` : ""}
-    ${inv.checkout_url ? `<br><a data-paylink="${esc(inv.id)}" href="${esc(inv.checkout_url)}" target="_blank" rel="noopener">Open the test card link ↗</a>` : ""}</span></li>`;
+    ${inv.checkout_url ? `<br><a data-paylink="${esc(inv.id)}" href="${esc(inv.checkout_url)}" target="_blank" rel="noopener">Open the test card link ↗</a>${due > 0 && can ? ` <button data-invcheck="${esc(inv.id)}" title="Ask Stripe whether this card link was paid, in case its webhook didn't reach the hub">Check payment</button>` : ""}` : ""}</span></li>`;
 }
 async function moneyFetch(path, body){
   const r = await fetch(path, {method:"POST", credentials:"same-origin", headers:{"content-type":"application/json", "x-nodach-studio":"1", ...NodachProfile.headers()}, body:JSON.stringify(body)});
@@ -2379,7 +2381,20 @@ async function renderMoneyLedger(){
   const as = $("#monAcctSave"); if (as) as.onclick = async () => { const a = $("#monAcctIn").value.trim();
     if (!/^acct_[A-Za-z0-9]{1,59}$/.test(a)){ note("A Stripe connected account looks like acct_ followed by letters and digits."); return; }
     const w = await write("money.account", ts, {teamspace:ts, provider:"stripe", account:a}); if (w){ toast("Connected account saved.", [w]); again(); } };
-  document.querySelectorAll("[data-invpay]").forEach(b => b.onclick = async () => { b.disabled = true; note("Asking Stripe (test mode) for a card link…");
+  const check = async id => { MON_CHECKED.add(id); const r = await moneyFetch("/studio/api/money/check", {invoice:id}); return r; };
+  document.querySelectorAll("[data-invcheck]").forEach(b => b.onclick = async () => { b.disabled = true; note("Asking Stripe whether it was paid…");
+    const r = await check(b.dataset.invcheck);
+    if (r.error){ note(r.error); b.disabled = false; return; }
+    note(r.paid ? (/written/.test(r.outcome || "") ? `Payment found at Stripe and recorded on ${b.dataset.invcheck}.` : `${b.dataset.invcheck} was already recorded.`) : "Stripe says this card link hasn't been paid yet.");
+    if (r.paid) again(); else b.disabled = false; });
+  // bug 122: once per page load, ask Stripe about every unpaid card link, so a payment whose webhook got lost still lands
+  const unchecked = M.invoices.filter(x => x.checkout_url && x.total - (x.paid - x.refunded) > 0 && !MON_CHECKED.has(x.id));
+  if (unchecked.length && M.stripe?.ready && can) (async () => {
+    let found = 0;
+    for (const x of unchecked){ const r = await check(x.id); if (r.paid && /written/.test(r.outcome || "")) found++; }
+    if (found && S.view === "money" && S.monTs === ts){ note(`${found} card payment${found > 1 ? "s" : ""} found at Stripe and recorded.`); again(); }
+  })();
+  document.querySelectorAll("[data-invpay]").forEach(b => b.onclick = async () => { b.disabled = true; MON_CHECKED.add(b.dataset.invpay); note("Asking Stripe (test mode) for a card link…");
     const r = await moneyFetch("/studio/api/money/checkout", {invoice:b.dataset.invpay});
     if (r.error){ note(r.error); b.disabled = false; return; }
     note("Card link ready: pay with 4242 4242 4242 4242, any future date, any CVC. The ledger updates when Stripe's webhook arrives."); toast("Test card link ready"); await again();
@@ -2503,7 +2518,7 @@ function renderOneSpace(T, t, me, can){
       <label for="tsInvRole">as</label><select id="tsInvRole">${opt(["member","guest","owner"], "member")}</select><button id="tsInvite">Invite</button></div>
       <p class="mute" style="margin:4px 0 0;font-size:12px">Everyone has a Personal profile named P- and their GitHub login (P-nassar). They see the invitation in Teamspaces and click Join. Someone new signs in first through Invite on the Hub page.</p>` : ""}
     <h4 style="margin:12px 0 4px">Money</h4>
-    <div id="tsMoney" class="mute" style="font-size:13px">${reading ? `Invoices, payments, Nodach's fee and its net for this teamspace are in its Money view. <button id="tsOpenMoney" data-tsmoney="${esc(t.id)}">Open Money</button>`
+    <div id="tsMoney" class="mute" style="font-size:13px">${reading ? `<span id="tsMoneyTotals" data-tsfor="${esc(t.id)}">Invoices, payments, Nodach's fee and its net for this teamspace are in its Money view.</span> <button id="tsOpenMoney" data-tsmoney="${esc(t.id)}">Open Money</button>`
       + (money ? ` · its notes on money: <b>${esc(money.title)}</b> <button data-tsgo="${esc(money.id)}">Open</button>` : owner && can ? ` <button id="tsAddMoney">Add a money notes node</button>` : "") : "This teamspace's money isn't shared with you."}</div>
     <h4 style="margin:12px 0 4px">Nodes in this teamspace</h4>
     <ul class="log" id="tsNodes">${nodes.length ? nodes.map((it, i) => row(it, i, lvl(it.id) ? ` <span class="mute">shared with ${esc(lvl(it.id))}</span>` : "")).join("") : `<li><span class="n"></span><span class="mute">${reading ? "No nodes yet." : "Nothing here is shared with you yet."}</span></li>`}</ul>
@@ -2595,6 +2610,13 @@ function renderSpaces(){
     const id = "TN-" + Date.now().toString(36);
     if (after(await write("item.create", null, {id, type:"idea", title, body:"", status:"open", teamspace:ts}))) toast(`Added ${title} to the teamspace.`); };
   document.querySelectorAll("[data-tsmoney]").forEach(b => b.onclick = () => { S.monTs = b.dataset.tsmoney; show("money"); });
+  // the Money tile (bug 122): this teamspace's totals, read from the hub each time the card opens
+  const mt = $("#tsMoneyTotals");
+  if (mt && tsHere()) (async () => { const id = mt.dataset.tsfor;
+    try { const r = await fetch("/studio/api/money?teamspace=" + encodeURIComponent(id), {credentials:"same-origin", cache:"no-store", headers:{...NodachProfile.headers()}});
+      if (!r.ok) return; const t = (await r.json()).totals; const el = document.querySelector(`#tsMoneyTotals[data-tsfor="${CSS.escape(id)}"]`); if (!el || !t) return;
+      el.innerHTML = `Received <b data-tt="received">${gbp(t.received)}</b> · Nodach's fees <b data-tt="platform_fees">${gbp(t.platform_fees)}</b> · outstanding <b data-tt="outstanding">${gbp(t.outstanding)}</b>.`;
+    } catch {} })();
   const money = $("#tsAddMoney"); if (money) money.onclick = async () => { if (after(await addMoneyNode(ts, T.spaces.get(ts)?.label))) toast("Money rules node added."); };
   const sh = $("#tsShare"); if (sh) sh.onclick = async () => {
     const node = $("#tsShareNode").value, to = $("#tsShareTo").value.trim(), level = $("#tsShareLevel").value;
