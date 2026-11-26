@@ -2494,7 +2494,7 @@ async def s93_teamspaces_is_the_galaxy(b):
     systems = sorted(i for i in await world_ids(o) if i.startswith("sys:"))
     ok = (first == {"view": "map", "sys": None, "lit": "true", "section": "teams", "page": False, "hash": "#/"} and panel_gone and "Create" in card
           and kinds == ["teamspace.create", "item.create"] and at == {"sys": ts, "planet": None, "hash": f"#/{ts}"}
-          and {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:money", "ctl:invite", "ctl:add", "ctl:share"} <= set(ids) and "ctl:money" not in ids
+          and {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:money", "ctl:invite", "ctl:node", "ctl:step", "ctl:share"} <= set(ids) and "ctl:money" not in ids
           and star_ok and still_no_panel and systems == sorted(["sys:home", f"sys:{ts}"]) and not o.errors)
     return ok, (f"first={first}, no side panel={panel_gone}, new node card={card.strip()[:40]!r}, writes={kinds}, landed at={at}, on map={sorted(ids)}, "
                 f"star controls={star_ok}, still no panel={still_no_panel}, galaxy={systems}, errors={o.errors[:1]}")
@@ -2541,7 +2541,7 @@ async def s95_invite_join_leave_on_the_galaxy(b):
     H = team_hub(); o = await open_teams_canvas(b, H, "Morami49", True)
     await to_teams_galaxy(o); await open_ctl(o, "ctl:new"); await o.fill("#wcLabel", "Insydr pilot"); await act(o, "ctl:new", "create", 1300)
     ts = await o.evaluate("S.world.sys")
-    await open_ctl(o, "ctl:add"); await o.fill("#wcNodeTitle", "Plan"); await act(o, "ctl:add", "addnode")
+    await open_ctl(o, "ctl:node"); await o.fill("#wcNodeTitle", "Plan"); await act(o, "ctl:node", "addnode")
     await open_ctl(o, "ctl:invite"); await o.fill("#wcInvProf", "P-nassar"); await o.select_option("#wcInvRole", "member"); await act(o, "ctl:invite", "invite")
     n = await open_teams_canvas(b, H, "nassar", False)
     await to_teams_galaxy(n)
@@ -2583,7 +2583,7 @@ async def s96_support_access_from_the_galaxy(b):
     at = await o.evaluate("location.hash")
     star = await open_ctl(o, f"sys:{ts}")
     ids = await canvas_ids(o)
-    read_only = (not {"ctl:invite", "ctl:add", "ctl:share", "ctl:money"} & set(ids) and await o.locator("[data-act=export], [data-act=leave]").count() == 0
+    read_only = (not {"ctl:invite", "ctl:node", "ctl:step", "ctl:share", "ctl:money"} & set(ids) and await o.locator("[data-act=export], [data-act=leave]").count() == 0
                  and await o.locator("#tsSupportNote").count() == 1)
     margins = await o.evaluate("[...F.items.values()].some(i => i.title === 'Margins')")
     await shot(o, "s96-1-support-access-star")
@@ -2618,7 +2618,7 @@ async def s97_email_account_joins_and_writes(b):
         await open_ctl(n, f"ctl:inv:{ts}"); await act(n, f"ctl:inv:{ts}", "join", 1300)
         joined = await n.evaluate(f"TEAMS.roleOf(myLogin(), {json.dumps(ts)})")
         if joined:
-            await open_ctl(n, "ctl:add"); await n.fill("#wcNodeTitle", "Insydr intake form"); await act(n, "ctl:add", "addnode")
+            await open_ctl(n, "ctl:node"); await n.fill("#wcNodeTitle", "Insydr intake form"); await act(n, "ctl:node", "addnode")
     mine = [x["event"] for x in H["posts"] if (x["event"].get("author") or {}).get("id", "").endswith(nassar)]
     await shot(n, "s97-2-email-account-joined")
     ok = (who == {"me": f"github:{nassar}", "login": nassar} and seen and joined == "member" and not H["refused"]
@@ -2629,6 +2629,69 @@ async def s97_email_account_joins_and_writes(b):
 
 
 SCENARIOS += [s97_email_account_joins_and_writes]
+
+
+
+# ---------------------------------------------------------------- W1c (208b c): map work in a teamspace, detail as a node card
+async def s98_map_a_project_and_plan_a_step(b):
+    """Friday with Nassar: Insydr pilot has its six stages on the Stories planet, linked in order. Nassar (an email
+    account, member) lands on Stories and sees them with their links. He opens + Node, adds 'Order: lighting' as a
+    Lead linked under 4 · Procurement. He drags from 2 · Costing's right dot to 6 · Close-out and picks 'relates to'.
+    He opens + Step, plans 'Fetch from a source: supplier delivery dates' under 4 · Procurement; it lands on a new
+    Automation planet. He clicks 4 · Procurement: its detail opens inside the node (no side panel), he comments there,
+    and Esc closes the card."""
+    H = team_hub(); H["authors"] = True
+    nassar = "e-48c506ac9edcd4f7"
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await to_teams_galaxy(o); await open_ctl(o, "ctl:new"); await o.fill("#wcLabel", "Insydr pilot"); await act(o, "ctl:new", "create", 1300)
+    ts = await o.evaluate("S.world.sys")
+    stages = ["1 · Opportunity", "2 · Costing", "3 · Project won", "4 · Procurement", "5 · Deliver and install", "6 · Close-out"]
+    for i, t in enumerate(stages):
+        nxt = [f"IP-stage-{i + 2}"] if i < 5 else []
+        await o.evaluate(f"write('item.create', null, {{id: 'IP-stage-{i + 1}', type: 'story', title: {json.dumps(t)}, status: 'open', teamspace: {json.dumps(ts)}, refs: {json.dumps(nxt)}}})")
+        await o.wait_for_timeout(120)
+    await open_ctl(o, "ctl:invite"); await o.fill("#wcInvProf", f"P-{nassar}"); await o.select_option("#wcInvRole", "member"); await act(o, "ctl:invite", "invite")
+    n = await open_teams_canvas(b, H, nassar, False)
+    await to_teams_galaxy(n); await open_ctl(n, f"ctl:inv:{ts}"); await act(n, f"ctl:inv:{ts}", "join", 1300)
+    await click_node(n, f"pl:{ts}:t:story"); await n.wait_for_timeout(800)
+    on = await world_ids(n)
+    edges = await n.evaluate("[...document.querySelectorAll('#canvas .react-flow__edge')].length")
+    await shot(n, "s98-1-six-stages")
+    await open_ctl(n, "ctl:node"); await n.fill("#wcNodeTitle", "Order: lighting"); await n.select_option("#wcNodeType", "lead")
+    await n.select_option("#wcNodeLink", "IP-stage-4"); await act(n, "ctl:node", "addnode", 900)
+    made = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "item.create" and x["event"]["body"].get("title") == "Order: lighting"), {})
+    # drag to link: from Costing's right dot to Close-out's left dot, then pick the link type
+    src = n.locator('.react-flow__node[data-id="IP-stage-2"] .react-flow__handle-right'); dst = n.locator('.react-flow__node[data-id="IP-stage-6"] .react-flow__handle-left')
+    a, z = await src.bounding_box(), await dst.bounding_box()
+    await n.mouse.move(a["x"] + a["width"] / 2, a["y"] + a["height"] / 2); await n.mouse.down()
+    await n.mouse.move(z["x"] + z["width"] / 2, z["y"] + z["height"] / 2, steps=12); await n.mouse.up(); await n.wait_for_timeout(400)
+    picker = await n.locator(".nd-pick").count() == 1
+    if picker: await n.locator(".nd-pick button", has_text="relates to").click(); await n.wait_for_timeout(700)
+    link = [x["event"] for x in H["posts"] if x["event"]["kind"] == "link" and x["event"].get("item") == "IP-stage-2"]
+    await open_ctl(n, "ctl:step"); await n.select_option("#wcStepKind", "fetch"); await n.fill("#wcStepWhat", "supplier delivery dates")
+    await n.select_option("#wcStepLink", "IP-stage-4"); await act(n, "ctl:step", "addstep", 900)
+    step = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "item.create" and (x["event"]["body"].get("meta") or {}).get("step")), {})
+    auto = await n.evaluate(f"!!document.querySelector('.react-flow__node[data-id=\"pl:{ts}:steps\"]') || worldPlanets(worldModel().find(x => x.id === {json.dumps(ts)})).some(p => p.key === 'steps')")
+    await click_node(n, "IP-stage-4"); await n.wait_for_timeout(700)
+    card = await n.evaluate("({inCard: !!document.querySelector('[data-ctl=\"IP-stage-4\"] [data-host] #insp'), panel: getComputedStyle(document.querySelector('#inspector')).display,"
+                            " title: (document.querySelector('[data-ctl=\"IP-stage-4\"] #insp h2') || {}).innerText || ''})")
+    await shot(n, "s98-2-node-card-open")
+    await n.fill("#reply", "Lighting order chased on Tuesday"); await n.click("#sendAnswer"); await n.wait_for_timeout(600)
+    comment = [x["event"] for x in H["posts"] if x["event"]["kind"] == "comment" and x["event"].get("item") == "IP-stage-4"]
+    await n.keyboard.press("Escape"); await n.wait_for_timeout(500)
+    closed = await n.evaluate("S.sel === null && !document.querySelector('[data-ctl=\"IP-stage-4\"]') && document.querySelector('#inspector').contains(document.querySelector('#insp'))")
+    ok = ({f"IP-stage-{i}" for i in range(1, 7)} <= set(on) and edges >= 5
+          and made.get("body", {}).get("type") == "lead" and made["body"].get("refs") == ["IP-stage-4"] and made["body"].get("teamspace") == ts
+          and picker and link and link[-1]["body"] == {"refs": ["IP-stage-6"], "rel": "relates"}
+          and step.get("body", {}).get("meta") == {"step": "fetch", "planned": True} and step["body"].get("refs") == ["IP-stage-4"] and auto
+          and card == {"inCard": True, "panel": "none", "title": "4 · Procurement"} and len(comment) == 1 and closed
+          and not H["refused"] and not (o.errors + n.errors))
+    return ok, (f"stages on planet={sorted(x for x in on if x.startswith('IP-'))}, edges={edges}, new node={made.get('body', {}).get('type')} refs={made.get('body', {}).get('refs')}, "
+                f"picker={picker}, link={link[-1]['body'] if link else None}, step={step.get('body', {}).get('meta')} automation planet={auto}, card={card}, "
+                f"comment={len(comment)}, Esc closed={closed}, refused={H['refused']}, errors={(o.errors + n.errors)[:1]}")
+
+
+SCENARIOS += [s98_map_a_project_and_plan_a_step]
 
 
 async def main():
