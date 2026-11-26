@@ -12,6 +12,7 @@
 //!   member.role      {teamspace, profile, role}       owner only; a teamspace always keeps at least one owner
 //!   member.remove    {teamspace, profile}             an owner removes anyone, a person removes (leaves) themselves
 //!   node.share       {node, profile | teamspace, level}   level viewer | commenter | editor | none (unshare)
+//!   node.move        {node, teamspace}                moves an existing node into a teamspace (BQ-node-move, 213a b)
 //! A node is in a teamspace when its `item.create` says `teamspace: <id>`; that is a link, not part of its id
 //! (D-nodach-ids). Each teamspace's money rules are a node in it (type setting, meta.money_rules); no payments yet.
 //!
@@ -41,6 +42,12 @@
 //! id only, `directory_for`) so he can ask; nothing inside them. Decision 117b (a): not even the name: a teamspace's
 //! label reaches him only while a support access he opened is running.
 //!
+//! Decision 213a (b), 26 Nov: a node's teamspace was fixed by its item.create. node.move puts an existing node into a
+//! teamspace, after which it is that teamspace's for reads, writes and export, with its whole history. Who may move:
+//! an owner of the target teamspace, who must also own the node's current teamspace, or, for a node outside every
+//! teamspace, be a hub owner (nodes outside teamspaces are the hub owner's). The move is an event like any other, so
+//! the record keeps where a node was and who moved it. Moving a node out of every teamspace isn't offered.
+//!
 //! Teamspace canvas (B-teamspace-graph, 23 Nov): "Open teamspace" opens the ActionMap focused on the teamspace. Positions
 //! dragged there are `canvas.layout {board: "ts:<id>", moves}` events; they belong to that teamspace (`layout_space`):
 //! owners and members read and save them, guests don't (they would carry the ids of nodes not shared with them).
@@ -50,7 +57,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-pub const KINDS: [&str; 7] = ["teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share", "support.access"];
+pub const KINDS: [&str; 8] = ["teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share", "support.access", "node.move"];
 
 /// How long one support.access event opens a teamspace to the hub owner (114b a): 24 hours.
 pub const SUPPORT_MS: i64 = 24 * 60 * 60 * 1000;
@@ -508,6 +515,23 @@ impl State {
                 }
                 Ok(())
             }
+            "node.move" => {
+                let node = node_of(ev);
+                if !valid_id(&node) { return Err("name the node to move".into()); }
+                let to = s(&b, "teamspace");
+                if !self.teamspaces.contains_key(to) { return Err(format!("teamspace {to} doesn't exist")); }
+                if self.role_of(&login, to) != Some(Role::Owner) { return Err(format!("only an owner of {to} can move nodes into it")); }
+                match self.item_space.get(&node).cloned() {
+                    Some(from) if from == to => return Err(format!("{node} is already in {to}")),
+                    Some(from) if self.role_of(&login, &from) != Some(Role::Owner) =>
+                        return Err(format!("{node} is in {from}: only someone who owns both {from} and {to} can move it")),
+                    None if !self.hub_owners.contains(&login) =>
+                        return Err(format!("{node} is outside every teamspace: only the hub owner can move it into one")),
+                    _ => {}
+                }
+                self.item_space.insert(node, to.to_string());
+                Ok(())
+            }
             "node.share" => {
                 let node = node_of(ev);
                 if !valid_id(&node) { return Err("name the node to share".into()); }
@@ -536,6 +560,42 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BQ-node-move (213a b): who may move a node into a teamspace, and what it means afterwards.
+    #[test]
+    fn node_move_rules() {
+        let home = ev("nowed", "item.create", None, json!({"id": "D-086", "type": "decision", "title": "build order"}));
+        let other = ev("rad", "teamspace.create", Some("TS-b"), json!({"id": "TS-b", "label": "Rad's"}));
+        let mv = |who: &str, node: &str, to: &str| ev(who, "node.move", Some(node), json!({"node": node, "teamspace": to}));
+        // a Home node: the hub owner, who owns TS-a, moves it in; rad (member) reads it afterwards, gus (guest) doesn't
+        let st = world(vec![home.clone(), mv("nowed", "D-086", "TS-a")]);
+        assert_eq!(st.item_space.get("D-086").map(String::as_str), Some("TS-a"));
+        assert_eq!(st.can_read("rad", "D-086"), Some(true));
+        assert_eq!(st.can_read("gus", "D-086"), Some(false));
+        assert!(st.findings.is_empty(), "{:?}", st.findings);
+        // refused: a member (not owner) of the target; a non-hub-owner moving a Home node; a target that doesn't exist;
+        // already there; out of a teamspace the mover doesn't own
+        let st = world(vec![home.clone()]);
+        assert!(st.decide(&mv("rad", "D-086", "TS-a")).unwrap().is_err());
+        assert!(st.decide(&mv("nowed", "D-086", "TS-nope")).unwrap().is_err());
+        assert!(st.decide(&mv("nowed", "N-in", "TS-a")).unwrap().is_err());
+        let st = world(vec![home.clone(), other.clone()]);
+        assert!(st.decide(&mv("rad", "D-086", "TS-b")).unwrap().unwrap_err().contains("hub owner"));
+        assert!(st.decide(&mv("rad", "N-in", "TS-b")).unwrap().unwrap_err().contains("owns both"));
+        // allowed between teamspaces when the mover owns both
+        let st = world(vec![other.clone(), ev("rad", "member.invite", Some("TS-b"), json!({"teamspace": "TS-b", "profile": "P-nowed", "role": "owner"})),
+                            ev("nowed", "member.join", Some("TS-b"), json!({"teamspace": "TS-b"})), mv("nowed", "N-in", "TS-b")]);
+        assert_eq!(st.item_space.get("N-in").map(String::as_str), Some("TS-b"));
+        assert!(st.findings.is_empty(), "{:?}", st.findings);
+        // a refused move kept on the record changes nothing and is reported
+        let st = world(vec![home, mv("rad", "D-086", "TS-a")]);
+        assert!(!st.item_space.contains_key("D-086"));
+        assert_eq!(st.findings.len(), 1);
+        // the move event is seen by the target teamspace's people, like other teamspace events
+        let st = world(vec![]);
+        assert_eq!(st.visible("rad", &mv("nowed", "N-x", "TS-a")), Some(true));
+        assert_eq!(st.visible("eve", &mv("nowed", "N-x", "TS-a")), Some(false));
+    }
 
     fn ev(author: &str, kind: &str, item: Option<&str>, body: Value) -> Value {
         json!({"ts": "2026-11-22T12:00:00.000Z", "kind": kind, "item": item, "body": body,

@@ -1842,6 +1842,8 @@ def _team_fold(H):
             spaces[b["teamspace"]].add(who)
         elif k == "item.create" and b.get("teamspace"):
             item_space[b.get("id")] = b["teamspace"]
+        elif k == "node.move" and b.get("teamspace") in spaces and who in owners.get(b["teamspace"], set()):
+            item_space[b.get("node") or e.get("item")] = b["teamspace"]   # BQ-node-move, as far as reads go
         elif k == "support.access" and who == H["owner"] and b.get("teamspace") in spaces:
             support.append((b["teamspace"], who, ms(e["ts"])))
     return spaces, labels, owners, item_space, support
@@ -2692,6 +2694,43 @@ async def s98_map_a_project_and_plan_a_step(b):
 
 
 SCENARIOS += [s98_map_a_project_and_plan_a_step]
+
+
+
+# ---------------------------------------------------------------- BQ-node-move (213a b): move a Home node into a teamspace
+async def s99_move_a_home_node_into_foundry(b):
+    """Nowed (hub owner) owns Nodach Foundry. D-086, a decision made in Home before Foundry existed, is opened from
+    the List; its card offers 'In Home · move into' with Foundry, and he moves it. The move is one node.move event;
+    D-086 now lives on Foundry's Decisions planet with its history, and Rad, a Foundry member, reads it as Foundry's.
+    Rad, not an owner, is offered no Move. (Who could read it in Home before is the hub's access rule, covered by
+    hub-core's node_move_rules test.)"""
+    H = team_hub()
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await o.evaluate("write('item.create', null, {id: 'D-086', type: 'decision', title: 'Build order B > A > D > C', status: 'agreed'})"); await o.wait_for_timeout(200)
+    await o.evaluate("write('comment', 'D-086', {text: 'agreed after the 5 Nov review'})"); await o.wait_for_timeout(200)
+    await to_teams_galaxy(o); await open_ctl(o, "ctl:new"); await o.fill("#wcLabel", "Nodach Foundry"); await act(o, "ctl:new", "create", 1300)
+    ts = await o.evaluate("S.world.sys")
+    await open_ctl(o, "ctl:invite"); await o.fill("#wcInvProf", "P-rad"); await o.select_option("#wcInvRole", "member"); await act(o, "ctl:invite", "invite")
+    r = await open_teams_canvas(b, H, "rad", False)
+    await to_teams_galaxy(r); await open_ctl(r, f"ctl:inv:{ts}"); await act(r, f"ctl:inv:{ts}", "join", 1200)
+    await o.evaluate("select('D-086')"); await o.wait_for_timeout(800)
+    row = await o.inner_text('[data-nodach-part="item.move"]') if await o.locator('[data-nodach-part="item.move"]').count() else ""
+    await o.select_option("#moveTo", ts); await o.click("#moveGo"); await o.wait_for_timeout(1200)
+    mv = [x["event"] for x in H["posts"] if x["event"]["kind"] == "node.move"]
+    at = await o.evaluate("({sys: S.world && S.world.sys, planet: S.world && S.world.planet, space: TEAMS.itemSpace.get('D-086'), hist: F.items.get('D-086').history.length})")
+    await shot(o, "s99-1-moved-into-foundry")
+    r2 = await open_teams_canvas(b, H, "rad", False)
+    after = await r2.evaluate("F.items.has('D-086')")
+    await r2.evaluate("select('D-086')"); await r2.wait_for_timeout(800)
+    no_move_for_member = await r2.locator('[data-nodach-part="item.move"]').count() == 0
+    ok = ("In Home" in row and len(mv) == 1 and mv[0]["body"] == {"node": "D-086", "teamspace": ts}
+          and at["sys"] == ts and at["planet"] == "t:decision" and at["space"] == ts and at["hist"] >= 2
+          and after is True and no_move_for_member and not (o.errors + r.errors + r2.errors))
+    return ok, (f"move row={row.strip()[:40]!r}, events={[e['body'] for e in mv]}, after={at}, member reads it={after}, "
+                f"no Move for member={no_move_for_member}, errors={(o.errors + r.errors + r2.errors)[:1]}")
+
+
+SCENARIOS += [s99_move_a_home_node_into_foundry]
 
 
 async def main():

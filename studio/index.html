@@ -685,7 +685,7 @@ let F = {items:new Map(), evs:[], bs:{}};
    The same rules as hub_core::teamspaces, folded from the events this page holds. The hub is the one that enforces
    them (403 with the rule in words); this copy decides what to show and which buttons to offer. Roles are held by
    profiles; a person's role is the strongest one any of their profiles holds. */
-const TEAM_KINDS = ["teamspace.create","member.invite","member.join","member.role","member.remove","node.share"];
+const TEAM_KINDS = ["teamspace.create","member.invite","member.join","member.role","member.remove","node.share","node.move"];
 const ROLE_RANK = {guest:1, member:2, owner:3}, LEVEL_RANK = {viewer:1, commenter:2, editor:3};
 const SUPPORT_MS = 24 * 60 * 60 * 1000;   // 114b a: one support access opens a teamspace to the hub owner for 24 hours
 const loginOf = id => String(id || "").replace(/^(github|email):/, "").trim().toLowerCase();
@@ -720,6 +720,14 @@ function foldTeams(evs){
       if (!tsId || T.spaces.has(tsId)) return "exists";
       const owner = b.profile || acting; if (acctOf(owner) !== login) return "not your profile";
       T.spaces.set(tsId, {id:tsId, label:String(b.label || tsId).slice(0, 80), created:e.ts, by:e.author, members:new Map([[owner, "owner"]]), invites:new Map()}); return null;
+    }
+    if (e.kind === "node.move"){   // BQ-node-move (213a b): the same rule as hub_core::teamspaces
+      const node = b.node || e.item, to = b.teamspace, from = T.itemSpace.get(node);
+      if (!node || !T.spaces.has(to)) return "no teamspace";
+      if (T.roleOf(login, to) !== "owner") return "only an owner of the target moves nodes into it";
+      if (from === to) return "already there";
+      if (from ? T.roleOf(login, from) !== "owner" : e.author?.role !== "owner") return "can't move";
+      T.itemSpace.set(node, to); return null;
     }
     if (e.kind === "node.share"){
       const node = b.node || e.item, to = b.profile || b.teamspace, space = T.itemSpace.get(node);
@@ -1179,6 +1187,17 @@ function stepWords(st){
   const part = t.part ? ` (${t.part})` : "";
   return st.kind === "note" ? "Note: " + (st.text || "") : st.kind === "stroke" ? `Drew around ${what}${part}` : `Pointed at ${what}${part}`;
 }
+/* BQ-node-move (213a b): an owner of a teamspace moves a node into it (from Home: the hub owner; from another
+   teamspace: an owner of both). The hub decides; this only offers it where it would be accepted. */
+function moveRow(it){
+  if (it.private || !writable() || !tsHere()) return "";
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), from = T.itemSpace.get(it.id);
+  if (from ? T.roleOf(me, from) !== "owner" : !S.owner) return "";
+  const to = [...T.spaces.values()].filter(t => t.id !== from && T.roleOf(me, t.id) === "owner");
+  if (!to.length) return "";
+  return `<div class="row" data-nodach-part="item.move"><label for="moveTo" class="mute" style="font-size:12px">${from ? "In " + esc(T.spaces.get(from)?.label || from) + " · move to" : "In Home · move into"}</label>
+    <select id="moveTo">${to.map(t => `<option value="${esc(t.id)}">${esc(t.label)}</option>`).join("")}</select><button id="moveGo">Move</button></div>`;
+}
 function renderInspector(){
   const it = F.items.get(S.sel);
   $("#inspEmpty").hidden = !!it; $("#insp").hidden = !it;
@@ -1195,6 +1214,7 @@ function renderInspector(){
     ${it.private?`<div class="pill" style="color:var(--accent);align-self:flex-start">🔒 Only you can see this</div>`:""}
     <h2>${esc(it.title)}</h2>
     <div class="row"><span class="mono mute">studio/${esc(it.id)}@${it.history.length-1}</span><button class="link" id="copyAddr">copy address</button></div>
+    ${moveRow(it)}
     <div class="body" id="inspBody" data-nodach-part="item.body">${bodyLines(it.body)}</div>
     ${it.sketch?`<img src="${it.sketch}" alt="Sketch attached to ${esc(it.id)}" style="border:1px solid var(--line);border-radius:8px">`:""}
     ${showSection(it)}
@@ -1216,6 +1236,8 @@ function renderInspector(){
   const rp = $("#showReplayBtn"); if (rp) rp.onclick = () => window.NodachShow?.replay(it.id);
   const lj = $("#liveJoinBtn"); if (lj) lj.onclick = () => window.NodachLive?.open(it.id);
   $("#insp").querySelectorAll("[data-live-draft]").forEach(b => b.onclick = () => window.NodachLive?.draft(it.id, b.dataset.liveDraft));
+  const mv = $("#moveGo"); if (mv) mv.onclick = async () => { const to = $("#moveTo").value, T = TEAMS || foldTeams(S.events);
+    if (await write("node.move", it.id, {node:it.id, teamspace:to})){ toast(`Moved ${it.id} into ${T.spaces.get(to)?.label || to}. Its history moved with it.`); refresh(); if (S.world){ S.world.node = null; select(it.id); } } };   // fly to where it lives now
   $("#copyAddr").onclick = async () => { const a = `studio/${it.id}@${it.history.length-1}`;
     try { await navigator.clipboard.writeText(a); toast("Copied "+a); } catch { toast(a); } };
   if (S.line){ const el = document.getElementById("L-"+S.line); if (el){ el.classList.add("hit"); el.scrollIntoView({block:"center"}); } S.line = null; }
