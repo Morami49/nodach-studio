@@ -189,6 +189,10 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 380px}
 .nd-ctl-body input,.nd-ctl-body select{min-width:0;flex:1 1 120px;font-size:12px}
 .nd-ctl-body h4{margin:4px 0 0;font-size:12px}
 .nd-ctl-body .log{max-height:160px;overflow:auto}
+.nd-ctl.open.wide{width:460px}
+.nd-host{max-height:62vh;overflow:auto;margin:-8px;padding:8px}
+.nd-host #insp{display:flex;flex-direction:column;gap:8px}
+.nd-host #insp h2{font-size:16px;margin:0}
 main.nopanel{grid-template-columns:minmax(0,1fr)}
 main.nopanel > aside{display:none}
 .nd-frame{width:100%;height:100%;border:1.5px dashed var(--mute);border-radius:12px;background:color-mix(in srgb,var(--accent) 6%,transparent)}
@@ -1178,7 +1182,7 @@ function stepWords(st){
 function renderInspector(){
   const it = F.items.get(S.sel);
   $("#inspEmpty").hidden = !!it; $("#insp").hidden = !it;
-  document.querySelector("main").classList.toggle("nopanel", !it && !!S.world && S.view === "map" && !S.selStep);   // W1b: no side panel on the map; controls are nodes
+  document.querySelector("main").classList.toggle("nopanel", !!S.world && S.view === "map" && !S.selStep && (!it || !!S.worldShown?.has(it.id)));   // W1b/W1c: no side panel on the map; controls and detail are nodes
   if (!it) $("#inspEmpty").textContent = "Select anything on the map or in the list to see its history, links and answers.";
   if (!it) return;
   const back = [...F.items.values()].filter(x => (x.refs||[]).includes(it.id)).map(x=>x.id);
@@ -1215,7 +1219,7 @@ function renderInspector(){
   $("#copyAddr").onclick = async () => { const a = `studio/${it.id}@${it.history.length-1}`;
     try { await navigator.clipboard.writeText(a); toast("Copied "+a); } catch { toast(a); } };
   if (S.line){ const el = document.getElementById("L-"+S.line); if (el){ el.classList.add("hit"); el.scrollIntoView({block:"center"}); } S.line = null; }
-  $("#closeInsp").onclick = () => { $("#inspector").classList.add("closed"); S.sel=null; if (S.world && S.view === "map") renderInspector(); };
+  $("#closeInsp").onclick = () => { if (S.world && S.view === "map") return worldCloseCard(); $("#inspector").classList.add("closed"); S.sel=null; };
   $("#insp").querySelectorAll("[data-go]").forEach(b => b.onclick = () => select(b.dataset.go));
   $("#insp").querySelectorAll("[data-revert]").forEach(b => b.onclick = async () => { if (await revert(b.dataset.revert)) toast("Done. The original stays in history."); });
   $("#reply").oninput = e => store.set("reply."+it.id, e.target.value);
@@ -2522,6 +2526,10 @@ $("#tsCreate").onclick = () => createSpace($("#tsLabel"), $("#tsNote"));
    Leave, support log) or a person on Members (their role). Enter opens the focused node, Esc closes it, and what you
    type survives a redraw. The teamspace page (#v-spaces) stays only where the map can't draw. */
 S.worldOpen = null; S.worldOpenKey = 0; S.ctlTyped = {}; S.ctlNote = {};
+const STEP_KINDS = [["fetch", "Fetch from a source"], ["filter", "Filter"], ["calc", "Calculate"], ["ai", "Ask AI"], ["post", "Post to a node"]];
+const STEP_ICON_W = {fetch:"⇣", filter:"⧩", calc:"Σ", ai:"✦", post:"⇢"};
+function worldCloseCard(){ const id = S.sel; restoreInsp(); S.sel = null; if (S.world) S.world.node = null; renderMap(false); renderInspector();
+  setTimeout(() => document.querySelector(`.react-flow__node[data-id="${CSS.escape(id || "")}"]`)?.focus(), 150); }
 function worldOpen(id){
   S.worldOpen = id; S.worldOpenKey++;
   const w = S.world; if (w && w.planet === "members") w.node = id && id.startsWith("prof:") ? id : null;
@@ -2554,7 +2562,7 @@ function worldGalaxyControls(ctl, x0){
        ${ctlIn("wcWhy-" + o.id, "Why, e.g. Nassar asked for help with an import", {max:500, label:"Reason for support access"})}
        <div class="row"><button class="primary" data-act="support" data-ts="${esc(o.id)}" ${can ? "" : "disabled"}>Open with support access</button></div>${ctlNoteHtml(id)}`}); });
 }
-function worldSystemControls(ctl, s, x, y, only){
+function worldSystemControls(ctl, s, x, y, only, pl){
   const T = TEAMS || foldTeams(S.events), me = myLogin(), can = tsHere() && writable(), t = s.t;
   const role = T.roleOf(me, t.id), owner = role === "owner", member = owner || role === "member", want = k => !only || only.includes(k);
   const inTs = [...T.itemSpace].filter(([, sp]) => sp === t.id).map(([n]) => n).filter(n => F.items.has(n));
@@ -2564,8 +2572,20 @@ function worldSystemControls(ctl, s, x, y, only){
     `<div class="row">${ctlIn("wcInvProf", "P-their-login", {max:80, mono:true, label:"Profile to invite"})}${ctlSel("wcInvRole", ["member","guest","owner"], "member", "Role")}</div>
      <div class="row"><button class="primary" data-act="invite">Invite</button></div>
      <p class="mute">Everyone has a Personal profile named P- and their GitHub login (P-nassar). They see the invitation on their Galaxy and click Join. Someone new signs in first through Invite on the Hub page.</p>${ctlNoteHtml("ctl:invite")}`]);
-  if (want("add") && member && can) acts.push(["ctl:add", "idea", "+ ADD NODE", "A new idea in " + t.label, () =>
-    `<div class="row">${ctlIn("wcNodeTitle", "Title", {label:"New node title"})}<button class="primary" data-act="addnode">Add</button></div>${ctlNoteHtml("ctl:add")}`]);
+  // W1c (208b c): + Node of any type, + Step (a planned automation step), each optionally linked to a node already here
+  const linkOpts = [["", "— no link —"], ...inTs.filter(n => !F.items.get(n).meta?.money_rules).map(n => [n, (F.items.get(n).title || n).slice(0, 60)])];
+  const plType = pl && pl.key.startsWith("t:") ? pl.key.slice(2) : "idea";
+  if (want("node") && member && can) acts.push(["ctl:node", plType, "+ NODE", "A new node in " + t.label, () =>
+    `${ctlIn("wcNodeTitle", "Title, e.g. Order: lighting from supplier", {label:"New node title"})}
+     <div class="row">${ctlSel("wcNodeType", Object.entries(TYPES).map(([k, v]) => [k, v]), plType, "Type")}${ctlSel("wcNodeLink", linkOpts, "", "Link to")}</div>
+     <div class="row"><button class="primary" data-act="addnode">Add</button></div>
+     <p class="mute">Linked to a node, it sits under it (part of). Drag between dots on a planet to link more.</p>${ctlNoteHtml("ctl:node")}`]);
+  if (want("step") && member && can) acts.push(["ctl:step", "change", "+ STEP", "A planned automation step", () =>
+    `${ctlSel("wcStepKind", STEP_KINDS.map(([k, l]) => [k, l]), "fetch", "Kind of step")}
+     ${ctlIn("wcStepWhat", "What should it do? e.g. pull new supplier quotes from email", {label:"What the step does"})}
+     ${ctlSel("wcStepLink", linkOpts, "", "Link to")}
+     <div class="row"><button class="primary" data-act="addstep">Add step</button></div>
+     <p class="mute">A planned step sits on the Automation planet. It doesn't run yet; Nowed turns it into a running flow once the source it needs is connected.</p>${ctlNoteHtml("ctl:step")}`]);
   if (want("share") && can && role && shareable.length) acts.push(["ctl:share", "asset", "+ SHARE", "A node with someone, or everyone here", () =>
     `${ctlSel("wcShareNode", shareable.map(n => [n, F.items.get(n)?.title || n]), shareable[0], "Node to share")}
      ${ctlIn("wcShareTo", "P-their-login (blank: everyone here)", {max:80, mono:true, label:"Share with"})}
@@ -2610,8 +2630,18 @@ async function worldAct(act, card, b){
     if (act === "invite"){ const pid = val("wcInvProf"), r = val("wcInvRole") || "member";
       if (!PROF.test(pid)) return note("Name the profile to invite, e.g. P-nassar.");
       if (await write("member.invite", ts, {teamspace:ts, profile:pid, role:r})) done(["wcInvProf", "wcInvRole"], `${pid} invited as ${r}.`); return; }
-    if (act === "addnode"){ const title = val("wcNodeTitle"); if (!title) return note("Give the node a title.");
-      if (await write("item.create", null, {id:"TN-" + Date.now().toString(36), type:"idea", title, body:"", status:"open", teamspace:ts})) done(["wcNodeTitle"], `Added ${title} to the teamspace.`); return; }
+    if (act === "addnode"){ const title = val("wcNodeTitle"), type = val("wcNodeType") || "idea", to = val("wcNodeLink"); if (!title) return note("Give the node a title.");
+      const nid = "TN-" + Date.now().toString(36);
+      if (await write("item.create", null, {id:nid, type, title, body:"", status:"open", teamspace:ts, ...(to ? {refs:[to]} : {})})){
+        if (to) await write("link", nid, {refs:[to], rel:"part_of"});
+        done(["wcNodeTitle", "wcNodeType", "wcNodeLink"], `Added ${title}${to ? " under " + (F.items.get(to)?.title || to) : ""}.`); } return; }
+    if (act === "addstep"){ const kind = val("wcStepKind") || "fetch", what = val("wcStepWhat"), to = val("wcStepLink"); if (!what) return note("Say what the step should do.");
+      const k = STEP_KINDS.find(x => x[0] === kind) || STEP_KINDS[0], nid = "TN-" + Date.now().toString(36);
+      if (await write("item.create", null, {id:nid, type:"change", title:`${STEP_ICON_W[kind] || "•"} ${k[1]}: ${what}`.slice(0, 200), status:"open", teamspace:ts,
+          meta:{step:kind, planned:true}, ...(to ? {refs:[to]} : {}),
+          body:`Planned automation step (${k[1].toLowerCase()}). It doesn't run yet: it marks where a running step goes. To run, it needs its source connected (a key saved for that service), then it becomes a flow step.`})){
+        if (to) await write("link", nid, {refs:[to], rel:"part_of"});
+        done(["wcStepKind", "wcStepWhat", "wcStepLink"], "Step planned on the Automation planet."); } return; }
     if (act === "share"){ const node = val("wcShareNode"), to = val("wcShareTo"), level = val("wcShareLevel") || "viewer";
       if (to && !PROF.test(to)) return note("Share with a profile id like P-nassar, or leave it blank for everyone here.");
       if (await write("node.share", node, to ? {node, profile:to, level} : {node, teamspace:ts, level})) done(["wcShareNode", "wcShareTo", "wcShareLevel"], level === "none" ? "Unshared." : `Shared as ${level}.`); return; }
@@ -2631,7 +2661,8 @@ async function worldAct(act, card, b){
   cv.addEventListener("click", e => { const b = e.target.closest?.("[data-act]"), card = b?.closest("[data-ctl]"); if (card && S.world) worldAct(b.dataset.act, card, b); });
   cv.addEventListener("input", keep); cv.addEventListener("change", keep);
   // Esc closes the open node from anywhere on the page (an action can redraw the card the focus was in)
-  document.addEventListener("keydown", e => { if (e.key !== "Escape" || !S.world || !S.worldOpen || S.view !== "map") return;
+  document.addEventListener("keydown", e => { if (e.key !== "Escape" || !S.world || S.view !== "map") return;
+    if (!S.worldOpen){ if (S.sel && S.worldShown?.has(S.sel)){ e.preventDefault(); worldCloseCard(); } return; }
     const id = S.worldOpen; e.preventDefault(); worldOpen(null);
     setTimeout(() => document.querySelector(`.react-flow__node[data-id="${CSS.escape(id)}"]`)?.focus(), 150); });
   cv.addEventListener("keydown", e => {
@@ -2717,8 +2748,10 @@ function worldPlanets(s){
     pl.push({key:"members", label:"Members", type:"story", profiles:[...s.t.members].map(([p, r]) => ({pid:p, role:r})).concat([...s.t.invites].map(([p, r]) => ({pid:p, role:"invited as " + r})))});
     pl.push({key:"money", label:"Money", type:"setting", items:s.items.filter(i => i.meta?.money_rules)});
   }
-  const rest = s.items.filter(i => !i.meta?.money_rules);
+  const steps = s.items.filter(i => i.meta?.step && !i.meta?.money_rules);   // W1c: planned automation steps get their own planet
+  const rest = s.items.filter(i => !i.meta?.money_rules && !i.meta?.step);
   for (const t of WORLD_ORDER){ const xs = rest.filter(i => typeKey(i.type) === t); if (xs.length) pl.push({key:"t:" + t, label:PLURAL[t] || TYPES[t] + "s", type:t, items:xs}); }
+  if (steps.length) pl.push({key:"steps", label:"Automation", type:"change", items:steps});
   if (s.shared.length) pl.push({key:"shared", label:"Shared in", type:"asset", items:s.shared});
   for (const p of pl) p.count = p.profiles ? p.profiles.length : p.items.length;
   return pl;
@@ -2728,7 +2761,7 @@ function enterWorld(){ S.world = {sys:null, planet:null, node:null}; S.sel = nul
 function worldGo(sys, planet){ S.world = {sys, planet:planet || null, node:null}; S.worldOpen = null; S.sel = null; S.worldFly = true; renderMap(true); }
 /* W0: every place has an address, #/<system>/<planet>/<node> (#/ alone is the Galaxy), so Back, reload and pasted links
    land on the same place. Item addresses (#D-001) keep working: they fly to the node's place. */
-const planetSlug = key => key.replace(/^t:/, ""), planetKey = slug => ["members","money","shared"].includes(slug) ? slug : "t:" + slug;
+const planetSlug = key => key.replace(/^t:/, ""), planetKey = slug => ["members","money","shared","steps"].includes(slug) ? slug : "t:" + slug;
 function worldAddress(w){ return "#/" + [w.sys, w.sys && w.planet && planetSlug(w.planet), w.sys && w.planet && w.node].filter(Boolean).map(encodeURIComponent).join("/"); }
 function parseWorld(hash){
   if (!/^#\//.test(hash || "")) return null;
@@ -2748,7 +2781,7 @@ function worldFromHash(){
   const w = parseWorld(location.hash); if (!w || !tsCanvasOk()) return false;
   S.worldFromHistory = true; S.world = w; S.worldOpen = w.node && w.node.startsWith("prof:") ? w.node : null; S.worldFly = true; S.sel = null;
   if (S.view !== "map") show("map"); else renderMap(true);
-  if (w.node && !w.node.startsWith("prof:") && F.items.has(w.node)) select(w.node);
+  if (w.node && !w.node.startsWith("prof:")){ if (F.items.has(w.node)) select(w.node); else S.worldPendingSel = w.node; }   // not loaded yet: open it once it is
   return true;
 }
 addEventListener("popstate", () => { if (/^#\//.test(location.hash)) worldFromHash(); });
@@ -2784,6 +2817,7 @@ function renderWorld(relayout){
   const pl = s && w.planet ? planets.find(p => p.key === w.planet) || null : null;
   const missing = (w.sys && !s) || (w.planet && !pl);
   const el = $("#canvas"); el.hidden = false; $("#cy").hidden = true;
+  restoreInsp();   // the node card borrows #insp; give it back before React redraws the card
   worldBar(s, pl);
   const nodes = [], edges = [];
   const mk = (id, x, y, type, label, title, filled, extra) => nodes.push({id, type:"item", position:{x, y}, selected:id === w.node,
@@ -2828,11 +2862,20 @@ function renderWorld(relayout){
       worldSystemControls(ctl, s, -420, 0, ["invite"]);
     }
     else {
-      const ids = new Set(pl.items.map(i => i.id));
-      pl.items.forEach((it, i) => { const d = tsItemData(it);
-        mk(it.id, Math.floor(i / ROWS) * 260, (i % ROWS) * 84, d.type, (it.private ? "🔒 " : "") + d.label, d.title, it.answers.length + it.comments.length > 0,
+      const ids = new Set(pl.items.map(i => i.id)), rels = canvasLayout().rels;
+      pl.items.forEach((it, i) => { const d = tsItemData(it), x = Math.floor(i / ROWS) * 300, y = (i % ROWS) * 84;
+        if (S.sel === it.id)   // W1c (205b b): the node's own detail opens in the node itself, not in a side panel
+          nodes.push({id:it.id, type:"control", position:{x, y}, zIndex:20, selected:true,
+            data:{type:d.type, label:(it.private ? "🔒 " : "") + d.label, title:d.title, open:true, wide:true, html:'<div class="nd-host" data-host></div>'}});
+        else mk(it.id, x, y, d.type, (it.private ? "🔒 " : "") + d.label, d.title, it.answers.length + it.comments.length > 0,
           {open:OPEN.has(it.status), closed:["withdrawn","closed"].includes(it.status)}); });
-      for (const it of pl.items) for (const r of it.refs || []) if (ids.has(r)) edges.push({id:it.id + ">" + r, source:it.id, target:r, markerEnd:{type:"arrowclosed"}, style:{stroke:"var(--mute)", strokeWidth:1}});
+      for (const it of pl.items) for (const r of it.refs || []) if (ids.has(r)){ const rel = rels[it.id + ">" + r];
+        edges.push({id:it.id + ">" + r, source:it.id, target:r, label:rel ? REL_LABEL[rel] : undefined, markerEnd:{type:"arrowclosed"},
+          style:{stroke:rel ? "var(--accent)" : "var(--mute)", strokeWidth:rel ? 1.5 : 1}, labelStyle:{fontSize:10, fill:"var(--ink)"}, labelBgStyle:{fill:"var(--surface)"}}); }
+      if (s.kind === "teamspace"){
+        hint = (pl.count ? "Click a node to open it · drag from a node's right dot to another's left dot to link them" : "Nothing here yet") + " · a dashed node adds something";
+        worldSystemControls(ctl, s, -420, 0, pl.key === "steps" ? ["step"] : ["node", "step"], pl);
+      }
     }
   }
   if (relayout) canvasFitKey++;
@@ -2843,9 +2886,24 @@ function renderWorld(relayout){
   if (!S.sel && S.view === "map") renderInspector();
   const none = () => {}, fly = S.worldFly; S.worldFly = false;
   if (S.worldOpen && !nodes.some(n => n.id === S.worldOpen)) S.worldOpen = null;   // its node isn't here any more
-  window.NodachCanvas.render(el, {nodes, edges, sel:S.worldOpen || w.node, can:false, focus:hint, dark:document.documentElement.dataset.theme === "dark",
-    fit:!!relayout, fitKey:canvasFitKey, flyMs:fly ? 600 : 0, onSelect:worldSelect, focusNode:S.worldOpen, focusKey:S.worldOpenKey, onMove:none, onConnect:none, onFrame:none, isStep:() => false,
+  S.worldShown = new Set(nodes.map(n => n.id));
+  document.querySelector("main").classList.toggle("nopanel", !S.selStep && (!S.sel || S.worldShown.has(S.sel)));
+  if (S.worldPendingSel && F.items.has(S.worldPendingSel)){ const id = S.worldPendingSel; S.worldPendingSel = null; setTimeout(() => select(id)); }   // a pasted link that came before the data
+  const T0 = TEAMS || foldTeams(S.events), r0 = s?.kind === "teamspace" ? T0.roleOf(myLogin(), s.id) : null;
+  const linkable = !!pl && !pl.profiles && s?.kind === "teamspace" && (r0 === "owner" || r0 === "member") && writable();
+  window.NodachCanvas.render(el, {nodes, edges, sel:S.worldOpen || w.node, can:linkable, connect:linkable, focus:hint, dark:document.documentElement.dataset.theme === "dark",
+    fit:!!relayout, fitKey:canvasFitKey, flyMs:fly ? 600 : 0, onSelect:worldSelect, focusNode:S.worldOpen || (S.sel && S.worldShown.has(S.sel) ? S.sel : null),
+    focusKey:S.worldOpenKey + ":" + (S.sel || ""), onMove:none, onConnect:canvasConnect, onFrame:none, isStep:() => false,
     onWire:none, onMixed:none, onStep:none, onAddStep:none, onTemplate:none, onStepMove:none});
+  if (S.sel) mountInsp();
+}
+/* W1c: the node card shows the same detail the side panel did (text, links, respond, history), so it borrows #insp */
+function restoreInsp(){ const i = $("#insp"), a = $("#inspector"); if (i && a && i.parentElement !== a) a.appendChild(i); }
+function mountInsp(tries = 0){
+  const host = document.querySelector(`[data-ctl="${CSS.escape(S.sel || "")}"] [data-host]`), i = $("#insp");
+  if (!S.sel || !i) return;
+  if (!host){ if (tries < 30) setTimeout(() => mountInsp(tries + 1), 25); return; }
+  if (i.parentElement !== host){ host.appendChild(i); i.hidden = false; }
 }
 function worldSelect(id){
   const w = S.world; if (!w) return;
@@ -2853,6 +2911,7 @@ function worldSelect(id){
   if (id.startsWith("sys:") && !(w.sys === id.slice(4) && !w.planet)) return worldGo(id.slice(4), null);
   if (id.startsWith("pl:")){ const rest = id.slice(3), cut = rest.indexOf(":"); return worldGo(rest.slice(0, cut), rest.slice(cut + 1)); }
   if (id.startsWith("sys:") || id.startsWith("ctl:") || id.startsWith("prof:")) return worldOpen(S.worldOpen === id ? null : id);
+  if (S.sel === id) return worldCloseCard();   // a click on an open card's header closes it
   w.node = id;
   select(id);   // the node's own history, links and answers
 }
@@ -3759,7 +3818,7 @@ function StepNode({ data, selected }) {
    builds. Buttons carry data-act; the page handles them from one listener on the canvas, so this never writes. */
 function ControlNode({ id, data, selected }) {
   const col = `var(--t-${data.type})`, hot = selected || data.open;
-  return h("div", { className: "nd-item nd-ctl" + (data.open ? " open nodrag nopan nowheel" : "") + (data.action ? " nd-action" : ""), "data-ctl": id, title: data.title,
+  return h("div", { className: "nd-item nd-ctl" + (data.open ? " open nodrag nopan nowheel" : "") + (data.wide ? " wide" : "") + (data.action ? " nd-action" : ""), "data-ctl": id, title: data.title,
       style: { borderColor: hot ? "var(--accent)" : col, borderWidth: data.open ? 3 : 2, borderStyle: data.action ? "dashed" : "solid",
                background: data.filled ? col : "var(--raise)", color: data.filled ? "var(--surface)" : "var(--ink)", opacity: data.dim ? .6 : 1 } },
     h(Handle, { type: "target", position: Position.Left }),
@@ -3804,7 +3863,7 @@ function Inner(p) {
         onNodeClick: (e, n) => { if (n.type === "item") p.onSelect(n.id); if (n.type === "step") p.onStep(n.id);
           if (n.type === "control" && !e.target.closest(".nd-ctl-body")) p.onSelect(n.id); },
         onPaneClick: () => p.onSelect(null),
-        nodesDraggable: true, nodesConnectable: p.can && !p.focus, elementsSelectable: true, selectionOnDrag: false, panOnScroll: false,
+        nodesDraggable: true, nodesConnectable: p.can && (!p.focus || !!p.connect), elementsSelectable: true, selectionOnDrag: false, panOnScroll: false,
         minZoom: .1, maxZoom: 2.5, fitView: true, proOptions: { hideAttribution: false }, colorMode: p.dark ? "dark" : "light" },
       h(Background, { gap: 24, size: 1 }),
       h(MiniMap, { pannable: true, zoomable: true, nodeColor: n => n.type === "frame" ? "transparent" : getComputedStyle(document.documentElement).getPropertyValue("--t-" + n.data.type).trim(), nodeStrokeWidth: 2 }),
