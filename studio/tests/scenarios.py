@@ -1766,7 +1766,8 @@ async def open_teams_hub(browser, H, login, owner):
     html = ('<!doctype html><html lang=en><head><meta charset=utf-8><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style>'
             '<script>window.__nodachBuild="test";window.__nodachEnv="production";window.__nodachPollMs=60000;</script>'
             f'<script>{SHIM.read_text()}</script></head><body>{PAGE.read_text()}</body></html>')
-    me = {"login": login, "id": f"github:{login}", "owner": owner}
+    # like the real hub (/studio/api/me), an email account (login e-<16 hex>) is named email:<login>
+    me = {"login": login, "id": f"email:{login}" if login.startswith("e-") else f"github:{login}", "owner": owner}
 
     async def serve(route):
         req = route.request; u = urllib.parse.urlparse(req.url); path = u.path; q = urllib.parse.parse_qs(u.query)
@@ -1791,6 +1792,10 @@ async def open_teams_hub(browser, H, login, owner):
             return await js(team_directory(H, login))
         if path == "/studio/api/events" and req.method == "POST":
             b = json.loads(req.post_data or "{}"); e = b.get("event", {})
+            # hub_core::authorship::authored_by: every account, email ones included, writes as github:<login>
+            if H.get("authors") and (e.get("author") or {}).get("id", "").lower() != f"github:{login.lower()}":
+                H["refused"].append(e.get("kind"))
+                return await js({"error": "you can only write events authored by yourself", "refused": True}, 403)
             if e.get("kind") == "member.role" and login.lower() != H["owner"]:
                 H["refused"].append(e.get("kind"))
                 return await js({"error": f"only an owner of {e.get('item')} can change roles", "refused": True, "teamspace_refused": True}, 403)
@@ -2589,6 +2594,41 @@ async def s96_support_access_from_the_galaxy(b):
 
 
 SCENARIOS += [s93_teamspaces_is_the_galaxy, s94_member_roles_on_the_node, s95_invite_join_leave_on_the_galaxy, s96_support_access_from_the_galaxy]
+
+
+# ---------------------------------------------------------------- Friday onboarding: an email account (F-email-author)
+async def s97_email_account_joins_and_writes(b):
+    """Nassar signs in by email link (his work address isn't a Google account), so the hub names him email:e-<hash>
+    and keys him as github:e-<hash> internally. Nowed invites P-e-<hash> to Insydr pilot. Nassar clicks Teamspaces,
+    sees the invitation node, joins, and adds a node in the teamspace. Every write he makes is authored the way the
+    hub checks (github:<login>), so none is refused."""
+    H = team_hub(); H["authors"] = True
+    nassar = "e-48c506ac9edcd4f7"
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await to_teams_galaxy(o); await open_ctl(o, "ctl:new"); await o.fill("#wcLabel", "Insydr pilot"); await act(o, "ctl:new", "create", 1300)
+    ts = await o.evaluate("S.world.sys")
+    await open_ctl(o, "ctl:invite"); await o.fill("#wcInvProf", f"P-{nassar}"); await o.select_option("#wcInvRole", "member"); await act(o, "ctl:invite", "invite")
+    n = await open_teams_canvas(b, H, nassar, False)
+    await to_teams_galaxy(n)
+    who = await n.evaluate("({me: S.me, login: myLogin()})")
+    seen = await n.locator(f'.react-flow__node[data-id="ctl:inv:{ts}"]').count() == 1
+    await shot(n, "s97-1-email-account-invitation")
+    joined = None
+    if seen:
+        await open_ctl(n, f"ctl:inv:{ts}"); await act(n, f"ctl:inv:{ts}", "join", 1300)
+        joined = await n.evaluate(f"TEAMS.roleOf(myLogin(), {json.dumps(ts)})")
+        if joined:
+            await open_ctl(n, "ctl:add"); await n.fill("#wcNodeTitle", "Insydr intake form"); await act(n, "ctl:add", "addnode")
+    mine = [x["event"] for x in H["posts"] if (x["event"].get("author") or {}).get("id", "").endswith(nassar)]
+    await shot(n, "s97-2-email-account-joined")
+    ok = (who == {"me": f"github:{nassar}", "login": nassar} and seen and joined == "member" and not H["refused"]
+          and [e["kind"] for e in mine] == ["member.join", "item.create"] and all(e["author"]["id"] == f"github:{nassar}" for e in mine)
+          and not (o.errors + n.errors))
+    return ok, (f"who={who}, invitation seen={seen}, joined as={joined}, his writes={[(e['kind'], e['author']['id']) for e in mine]}, refused={H['refused']}, "
+                f"errors={(o.errors + n.errors)[:1]}")
+
+
+SCENARIOS += [s97_email_account_joins_and_writes]
 
 
 async def main():

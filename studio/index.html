@@ -684,7 +684,7 @@ let F = {items:new Map(), evs:[], bs:{}};
 const TEAM_KINDS = ["teamspace.create","member.invite","member.join","member.role","member.remove","node.share"];
 const ROLE_RANK = {guest:1, member:2, owner:3}, LEVEL_RANK = {viewer:1, commenter:2, editor:3};
 const SUPPORT_MS = 24 * 60 * 60 * 1000;   // 114b a: one support access opens a teamspace to the hub owner for 24 hours
-const loginOf = id => String(id || "").replace(/^github:/, "").trim().toLowerCase();
+const loginOf = id => String(id || "").replace(/^(github|email):/, "").trim().toLowerCase();
 const myLogin = () => loginOf(S.me);
 const personalOf = login => "P-" + String(login || "").toLowerCase();
 const myProfile = () => (S.profile && S.profile.id) || personalOf(myLogin());
@@ -2888,7 +2888,10 @@ async function signOut(){
   if (!db){ clearTimeout(timer); $("#conn").textContent = "sign in to load"; return; }
   S.db = db; S.user = user;
   if (user){
-    try { S.me = await user.id(); } catch {}
+    // F-email-author: the hub keys every account, email ones included, as github:<login> (hub_core::authorship), while
+    // /studio/api/me names an email account email:<login>. Writes signed with that id were refused, so someone signed in
+    // by email link couldn't write anything. The page works with the hub's own form.
+    try { S.me = String(await user.id() || "").replace(/^email:/, "github:") || null; } catch {}
     try { S.owner = !!(await user.isOwner()); } catch {}
     try { S.canEdit = await user.canEdit(); } catch {}
     try { S.canWrite = await user.can("data.write"); } catch {}

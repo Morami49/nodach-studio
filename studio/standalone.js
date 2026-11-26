@@ -244,7 +244,8 @@
     canEdit: async () => true,
     can: async k => (k === "data.write" ? true : null),
     me: async () => ({ id: (await me()).id }),
-    profiles: async ids => { const m = await me(); return Object.fromEntries(ids.map(i => [i, { id: i, name: i === m.id ? m.login : "" }])); },
+    // an email account is named email:<login> here but writes as github:<login> (F-email-author): both are you
+    profiles: async ids => { const m = await me(); return Object.fromEntries(ids.map(i => [i, { id: i, name: i === m.id || i === "github:" + m.login ? m.login : "" }])); },
   };
 
   /* ---------------------------------------------------------------- release rules (Q26 C)
