@@ -685,8 +685,24 @@ let F = {items:new Map(), evs:[], bs:{}};
    The same rules as hub_core::teamspaces, folded from the events this page holds. The hub is the one that enforces
    them (403 with the rule in words); this copy decides what to show and which buttons to offer. Roles are held by
    profiles; a person's role is the strongest one any of their profiles holds. */
-const TEAM_KINDS = ["teamspace.create","member.invite","member.join","member.role","member.remove","node.share","node.move"];
+const ROLE_KINDS = ["role.create","role.edit","role.assign","override.set","agent.allow"];   // BQ-access-model
+const TEAM_KINDS = ["teamspace.create","member.invite","member.join","member.role","member.remove","node.share","node.move", ...ROLE_KINDS];
 const ROLE_RANK = {guest:1, member:2, owner:3}, LEVEL_RANK = {viewer:1, commenter:2, editor:3};
+/* BQ-access-model (D-access-model): the same switches, built-in roles and order as hub_core::roles. Owner has every
+   switch and sits at 1000; roles anyone makes sit at 1-999; Member 20, Guest 10, Everyone 0. */
+const SWITCHES = ["read","comment","add_nodes","link_move","invite","manage_roles","run_agents","merge_low","merge_high","money","legal","change_rules","hand_on"];
+const SWITCH_LABEL = {read:"Read", comment:"Comment", add_nodes:"Add and change nodes", link_move:"Link and move nodes", invite:"Invite people",
+  manage_roles:"Manage roles", run_agents:"Run agents", merge_low:"Merge low-risk changes", merge_high:"Merge high-risk changes", money:"Money",
+  legal:"Terms and legal", change_rules:"Change rules", hand_on:"Hand on ownership"};
+// stored and shown, but nothing in Nodach does these yet (they move in with Briefs and safe rule changes, 226.6)
+const SWITCH_LATER = new Set(["run_agents","merge_low","merge_high","money","legal","change_rules","hand_on"]);
+const BUILT_IN_ROLES = ["owner","member","guest","everyone"], OWNER_POS = 1000, AGENT_LIMITED = ["merge_high","hand_on"];
+const SHARE_SWITCHES = {viewer:["read"], commenter:["read","comment"], editor:["read","comment","add_nodes","link_move"]};
+const isAgentLogin = l => /^agent:/.test(String(l || "").trim().toLowerCase()) || String(l || "").trim().toLowerCase() === "service:deploy-check";
+const builtInRoles = () => new Map([["owner", "Owner", SWITCHES, OWNER_POS], ["member", "Member", ["read","comment","add_nodes","link_move"], 20],
+  ["guest", "Guest", [], 10], ["everyone", "Everyone", [], 0]].map(([id, name, sw, position]) => [id, {id, name, switches:new Set(sw), position, hidden:false, holders:new Set()}]));
+const switchList = v => { if (v == null) return []; if (!Array.isArray(v)) return null; const out = [];
+  for (const x of v){ if (!SWITCHES.includes(x)) return null; if (!out.includes(x)) out.push(x); } return out; };
 const SUPPORT_MS = 24 * 60 * 60 * 1000;   // 114b a: one support access opens a teamspace to the hub owner for 24 hours
 const loginOf = id => String(id || "").replace(/^(github|email):/, "").trim().toLowerCase();
 const myLogin = () => loginOf(S.me);
@@ -694,7 +710,7 @@ const personalOf = login => "P-" + String(login || "").toLowerCase();
 const myProfile = () => (S.profile && S.profile.id) || personalOf(myLogin());
 let TEAMS = null;
 function foldTeams(evs){
-  const T = {spaces:new Map(), itemSpace:new Map(), itemAuthor:new Map(), shares:new Map(), profOwner:new Map(), findings:[], support:[]};
+  const T = {spaces:new Map(), itemSpace:new Map(), itemAuthor:new Map(), itemType:new Map(), shares:new Map(), profOwner:new Map(), findings:[], support:[]};
   let mine = []; try { mine = NodachProfile.list(); } catch {}
   for (const p of mine) T.profOwner.set(p.id, myLogin());
   for (const e of evs) if (e.author?.profile && !T.profOwner.has(e.author.profile)) T.profOwner.set(e.author.profile, loginOf(e.author.id));
@@ -706,12 +722,36 @@ function foldTeams(evs){
   T.invitedAs = (login, ts) => { const t = T.spaces.get(ts); if (!t) return null; const hit = [...t.invites].find(([p]) => acctOf(p) === login); return hit ? {profile:hit[0], role:hit[1]} : null; };
   T.levelOf = (login, node) => { const m = T.shares.get(node); if (!m) return null;
     return best([...m].filter(([to]) => T.spaces.has(to) ? !!T.roleOf(login, to) : acctOf(to) === login).map(([, l]) => l), LEVEL_RANK); };
+  // BQ-access-model: the roles an account holds in a teamspace (Everyone, its base role, roles given to its profiles),
+  // its rank, and its switches at a planet (node type) or node: roles, then planet and node overrides, then shares.
+  T.held = (login, ts) => { const v = ["everyone"], t = T.spaces.get(ts), r = t && T.roleOf(login, ts); if (!r) return v; v.push(r);
+    for (const ro of t.roles.values()) if (!BUILT_IN_ROLES.includes(ro.id) && [...ro.holders].some(p => t.members.has(p) && acctOf(p) === login)) v.push(ro.id);
+    return v; };
+  T.highest = (login, ts) => { const t = T.spaces.get(ts); return t ? Math.max(0, ...T.held(login, ts).map(r => t.roles.get(r)?.position ?? 0)) : 0; };
+  T.rankOfProfile = (pid, ts) => { const a = acctOf(pid); return a ? T.highest(a, ts) : 0; };
+  const scoped = (t, scope, held, p) => {
+    const ev = t.overrides.get(scope + "\n" + "everyone"); if (ev){ for (const x of ev.deny) p.delete(x); for (const x of ev.allow) p.add(x); }
+    const allow = new Set(), deny = new Set();
+    for (const r of held) if (r !== "everyone"){ const o = t.overrides.get(scope + "\n" + r); if (o){ o.allow.forEach(x => allow.add(x)); o.deny.forEach(x => deny.add(x)); } }
+    for (const x of deny) p.delete(x); for (const x of allow) p.add(x); return p; };
+  T.switchesAt = (login, ts, planet, node) => { const t = T.spaces.get(ts); if (!t) return new Set();
+    const held = T.held(login, ts); let p;
+    if (held.includes("owner")) p = new Set(SWITCHES);
+    else { p = new Set(); for (const r of held) for (const x of t.roles.get(r)?.switches || []) p.add(x);
+      const pl = planet || (node && T.itemType.get(node));
+      if (pl) p = scoped(t, "planet:" + pl, held, p);
+      if (node) p = scoped(t, "node:" + node, held, p); }
+    const l = node && T.levelOf(login, node); if (l) for (const x of SHARE_SWITCHES[l]) p.add(x);
+    if (isAgentLogin(login)){ const ok = t.agentAllow.get(login) || new Set(); for (const x of AGENT_LIMITED) if (!ok.has(x)) p.delete(x); }
+    return p; };
+  T.switches = (login, ts) => T.switchesAt(login, ts, null, null);
   T.canRead = (login, node) => { const ts = T.itemSpace.get(node);
-    if (ts){ const r = T.roleOf(login, ts); return r === "owner" || r === "member" || !!T.levelOf(login, node); }
+    if (ts) return T.switchesAt(login, ts, null, node).has("read");
     return T.levelOf(login, node) ? true : null; };
   T.supportOpen = (login, ts, now = Date.now()) => T.support.filter(x => x.teamspace === ts && x.by === login && Date.parse(x.at) <= now && now < x.until).reduce((a, x) => Math.max(a, x.until), 0) || null;
-  T.canWriteNode = (login, node, kind) => { const ts = T.itemSpace.get(node), r = ts && T.roleOf(login, ts), l = T.levelOf(login, node);
-    return r === "owner" || r === "member" || l === "editor" || (kind === "comment" && LEVEL_RANK[l] >= 2); };
+  T.canWriteNode = (login, node, kind) => { const ts = T.itemSpace.get(node), l = T.levelOf(login, node);
+    const need = kind === "comment" || kind === "retract" ? "comment" : kind === "link" || kind === "node.move" ? "link_move" : "add_nodes";
+    return ts ? T.switchesAt(login, ts, null, node).has(need) : l === "editor" || (need === "comment" && LEVEL_RANK[l] >= 2); };
   const owners = t => [...t.members.values()].filter(r => r === "owner").length;
   function apply(e){
     const b = e.body || {}, login = loginOf(e.author?.id), acting = e.author?.profile || personalOf(login);
@@ -719,7 +759,8 @@ function foldTeams(evs){
     if (e.kind === "teamspace.create"){
       if (!tsId || T.spaces.has(tsId)) return "exists";
       const owner = b.profile || acting; if (acctOf(owner) !== login) return "not your profile";
-      T.spaces.set(tsId, {id:tsId, label:String(b.label || tsId).slice(0, 80), created:e.ts, by:e.author, members:new Map([[owner, "owner"]]), invites:new Map()}); return null;
+      T.spaces.set(tsId, {id:tsId, label:String(b.label || tsId).slice(0, 80), created:e.ts, by:e.author, members:new Map([[owner, "owner"]]), invites:new Map(),
+        roles:builtInRoles(), overrides:new Map(), agentAllow:new Map()}); return null;
     }
     if (e.kind === "node.move"){   // BQ-node-move (213a b): the same rule as hub_core::teamspaces
       const node = b.node || e.item, to = b.teamspace, from = T.itemSpace.get(node);
@@ -742,13 +783,50 @@ function foldTeams(evs){
     if (e.kind === "member.join"){ if (!own || !t.invites.has(target)) return "join"; t.members.set(target, t.invites.get(target)); t.invites.delete(target); return null; }
     if (e.kind === "member.role"){ const cur = t.members.get(target); if (!isOwner || !cur || !ROLE_RANK[b.role] || (cur === "owner" && b.role !== "owner" && owners(t) === 1)) return "role";
       t.members.set(target, b.role); return null; }
+    if (ROLE_KINDS.includes(e.kind)) return applyRole(e.kind, login, t, b, isOwner);
     if (e.kind === "member.remove"){ if (!isOwner && !own) return "remove"; if (!t.members.has(target)){ return t.invites.delete(target) ? null : "remove"; }
       if (t.members.get(target) === "owner" && owners(t) === 1) return "last owner"; t.members.delete(target); return null; }
     return null;
   }
+  // BQ-access-model: role.create, role.edit, role.assign, override.set, agent.allow, judged as hub_core does
+  function applyRole(kind, login, t, b, isOwner){
+    const mine = T.switches(login, t.id), rank = T.highest(login, t.id);
+    if (kind === "agent.allow"){ const sw = switchList(b.switches), agent = String(b.login || "").trim().toLowerCase();
+      if (!isOwner || !isAgentLogin(agent) || !sw || sw.some(x => !AGENT_LIMITED.includes(x))) return "agent.allow";
+      if (sw.length) t.agentAllow.set(agent, new Set(sw)); else t.agentAllow.delete(agent); return null; }
+    if (!mine.has("manage_roles")) return "manage roles";
+    const rid = String(b.role || "").trim().toLowerCase(); if (rid === "owner") return "owner role";
+    const grantable = sw => sw.every(x => mine.has(x));
+    const posOk = p => Number.isInteger(p) && p >= 1 && p <= 999 && p < rank;
+    const r = t.roles.get(rid); if (r && r.position >= rank) return "ranked above";
+    if (kind === "role.create"){ const sw = switchList(b.switches);
+      if (!/^[A-Za-z0-9_.:-]{1,40}$/.test(rid) || r || !sw || !grantable(sw)) return "role.create";
+      const position = b.position != null ? b.position : Math.min(999, Math.max(1, rank - 1)); if (!posOk(position)) return "position";
+      t.roles.set(rid, {id:rid, name:String(b.name || "").trim().slice(0, 60) || rid, switches:new Set(sw), position, hidden:!!b.hidden, holders:new Set()}); return null; }
+    if (!r) return "no role";
+    if (kind === "role.edit"){ const next = {...r};
+      if (b.switches != null){ const sw = switchList(b.switches); if (!sw) return "switches";
+        if (!grantable(SWITCHES.filter(x => sw.includes(x) !== r.switches.has(x)))) return "grant"; next.switches = new Set(sw); }
+      if (b.position != null){ if (BUILT_IN_ROLES.includes(rid) || !posOk(b.position)) return "position"; next.position = b.position; }
+      if (String(b.name || "").trim()) next.name = String(b.name).trim().slice(0, 60);
+      if (typeof b.hidden === "boolean") next.hidden = b.hidden;
+      t.roles.set(rid, next); return null; }
+    if (kind === "role.assign"){ const target = String(b.profile || "").trim();
+      if (BUILT_IN_ROLES.includes(rid) || !t.members.has(target)) return "role.assign";
+      if (!isOwner && acctOf(target) !== login && T.rankOfProfile(target, t.id) >= rank) return "ranked above";
+      if (b.on === false) r.holders.delete(target); else r.holders.add(target); return null; }
+    if (kind === "override.set"){ const target = String(b.target || "").trim(), [k, v] = [target.split(":")[0], target.slice(target.indexOf(":") + 1)];
+      if (!(k === "planet" && /^[A-Za-z0-9_.:-]{1,80}$/.test(v)) && !(k === "node" && T.itemSpace.get(v) === t.id)) return "target";
+      const allow = switchList(b.allow), deny = switchList(b.deny);
+      if (!allow || !deny || allow.some(x => deny.includes(x)) || !grantable([...allow, ...deny])) return "override.set";
+      const key = target + "\n" + rid;
+      if (!allow.length && !deny.length) t.overrides.delete(key); else t.overrides.set(key, {target, role:rid, allow:new Set(allow), deny:new Set(deny)}); return null; }
+    return null;
+  }
   for (const e of [...evs].sort(byTsThenId)){
     if (e.kind === "item.create" && e.body?.id && !T.itemAuthor.has(e.body.id)){
-      T.itemAuthor.set(e.body.id, loginOf(e.author?.id)); if (e.body.teamspace) T.itemSpace.set(e.body.id, e.body.teamspace); continue; }
+      T.itemAuthor.set(e.body.id, loginOf(e.author?.id)); if (e.body.type) T.itemType.set(e.body.id, String(e.body.type));
+      if (e.body.teamspace) T.itemSpace.set(e.body.id, e.body.teamspace); continue; }
     if (e.kind === "support.access"){   // 114b a: the hub owner's logged, 24-hour read access to one teamspace
       const at = Date.parse(e.ts), b = e.body || {};
       if (b.teamspace && !isNaN(at)) T.support.push({id:e._id, teamspace:b.teamspace, by:loginOf(e.author?.id), reason:String(b.reason || ""), at:e.ts, until:at + SUPPORT_MS});
@@ -2555,12 +2633,13 @@ function worldCloseCard(){ const id = S.sel; restoreInsp(); S.sel = null; if (S.
 function worldOpen(id){
   S.worldOpen = id; S.worldOpenKey++;
   const w = S.world; if (w && w.planet === "members") w.node = id && id.startsWith("prof:") ? id : null;
+  if (w && w.planet === "roles") w.node = id && id.startsWith("role:") ? id : null;
   renderMap(false);
   if (id) setTimeout(() => document.querySelector(`[data-ctl="${CSS.escape(id)}"] .nd-ctl-body`)
     ?.querySelector("input:not([disabled]),select:not([disabled]),button:not([disabled])")?.focus({preventScroll:true}), 150);
 }
 const ctlTyped = (id, dflt) => S.ctlTyped[id] ?? dflt ?? "";
-const ctlIn = (id, ph, o = {}) => `<input id="${esc(id)}" aria-label="${esc(o.label || ph)}" placeholder="${esc(ph)}" maxlength="${o.max || 200}" value="${esc(ctlTyped(id))}"${o.dis ? " disabled" : ""}${o.mono ? ' class="mono"' : ""}>`;
+const ctlIn = (id, ph, o = {}) => `<input id="${esc(id)}" aria-label="${esc(o.label || ph)}" placeholder="${esc(ph)}" maxlength="${o.max || 200}" value="${esc(ctlTyped(id, o.val))}"${o.dis ? " disabled" : ""}${o.mono ? ' class="mono"' : ""}>`;
 const ctlSel = (id, vals, dflt, label) => `<select id="${esc(id)}" aria-label="${esc(label)}">${vals.map(v => { const [k, l] = Array.isArray(v) ? v : [v, v];
   return `<option value="${esc(k)}"${k === ctlTyped(id, dflt) ? " selected" : ""}>${esc(l)}</option>`; }).join("")}</select>`;
 const ctlNoteHtml = id => `<span class="mute" role="status" data-note>${esc(S.ctlNote[id] || "")}</span>`;
@@ -2630,10 +2709,76 @@ function profileBody(s, pid){
   const T = TEAMS || foldTeams(S.events), me = myLogin(), t = s.t, can = tsHere() && writable();
   const r = t.members.get(pid), inv = t.invites.get(pid), mine = T.acctOf(pid) === me, owner = T.roleOf(me, t.id) === "owner";
   const made = [...T.itemSpace].filter(([n, sp]) => sp === t.id && T.itemAuthor.get(n) === T.acctOf(pid) && F.items.has(n)).length;
+  const extra = [...t.roles.values()].filter(x => !BUILT_IN_ROLES.includes(x.id) && x.holders.has(pid) && (!x.hidden || T.switches(me, t.id).has("manage_roles"))).map(x => x.name);
   return `<p>Role in ${esc(t.label)}: <b id="wpRoleNow">${r ? esc(r) : `invited as ${esc(inv || "")}, not joined yet`}</b>${mine ? " (you)" : ""} · created ${made} node${made === 1 ? "" : "s"} you can read here.</p>
+    ${extra.length ? `<p id="wpRolesHeld">Also holds: ${extra.map(esc).join(", ")} (Roles planet).</p>` : ""}
     ${owner && can ? (r ? `<div class="row">${ctlSel("wcRole", ROLE_OPTS, r, "Role")}<button class="primary" data-act="role" data-pid="${esc(pid)}">Change role</button></div>` : "") +
         (!mine || !r ? `<div class="row"><button data-act="remove" data-pid="${esc(pid)}">${r ? "Remove from teamspace" : "Cancel invite"}</button></div>` : "")
       : `<p class="mute">Only owners change roles.</p>`}${ctlNoteHtml("prof:" + pid)}`;
+}
+/* BQ-access-model step 2 (D-access-model): the Roles planet. A role is a node; open, it shows its place in the order,
+   its switches (ticked), who holds it and its overrides. Whoever has Manage roles changes roles ranked below their own
+   highest, and only with switches they hold themselves; everyone else reads. The hub judges every change the same way. */
+function roleHolders(t, r){
+  if (r.id === "everyone") return null;
+  if (BUILT_IN_ROLES.includes(r.id)) return [...t.members].filter(([, x]) => x === r.id).map(([p]) => p);
+  return [...r.holders].filter(p => t.members.has(p));
+}
+function roleNote(t, r){
+  const h = roleHolders(t, r), n = r.switches.size;
+  return `${n} switch${n === 1 ? "" : "es"} · ${h ? `${h.length} holder${h.length === 1 ? "" : "s"}` : "every signed-in account"}`;
+}
+const roleSlug = (t, name) => { const base = String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 36) || "role";
+  let id = base, i = 2; while (t.roles.has(id)) id = base + "-" + i++; return id; };
+const swBox = (id, sw, on, dis) => `<label class="sw" style="display:block;font-size:13px"><input type="checkbox" id="${esc(id)}" data-sw="${esc(sw)}"${ctlTyped(id, on ? "1" : "0") === "1" ? " checked" : ""}${dis ? " disabled" : ""}> ${esc(SWITCH_LABEL[sw])}${SWITCH_LATER.has(sw) ? ' <span class="mute">· not used yet</span>' : ""}</label>`;
+const ovText = o => [o.allow.size ? "allows " + [...o.allow].map(x => SWITCH_LABEL[x]).join(", ") : "", o.deny.size ? "denies " + [...o.deny].map(x => SWITCH_LABEL[x]).join(", ") : ""].filter(Boolean).join("; ");
+function ovTarget(target){ const [k, v] = [target.split(":")[0], target.slice(target.indexOf(":") + 1)];
+  return k === "planet" ? `planet ${PLURAL[v] || (TYPES[v] ? TYPES[v] + "s" : v)}` : `node ${F.items.get(v)?.title || v}`; }
+function roleBody(s, rid){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), t = s.t, r = t.roles.get(rid), can = tsHere() && writable();
+  if (!r) return `<p class="mute">This role isn't here any more.</p>`;
+  const mine = T.switches(me, t.id), rank = T.highest(me, t.id), isOwner = T.roleOf(me, t.id) === "owner";
+  const edit = can && mine.has("manage_roles") && rid !== "owner" && r.position < rank, k = "wcR-" + rid + "-";
+  const holders = roleHolders(t, r), custom = !BUILT_IN_ROLES.includes(rid);
+  const who = holders == null ? "Everyone: every account signed in to Nodach holds it." : holders.length ? `Held by ${holders.map(esc).join(", ")}.` : "Nobody holds it yet.";
+  const how = rid === "owner" ? "Every switch. It can't be changed; make someone an owner on the Members planet."
+    : rid === "member" || rid === "guest" ? "Comes with membership: change who holds it on the Members planet."
+    : rid === "everyone" ? "The base everyone starts from (no switches unless you add some)." : "";
+  const ovs = [...t.overrides.values()].filter(o => o.role === rid);
+  const people = [...t.members.keys()].filter(p => !r.holders.has(p) && t.members.get(p) !== "owner" && (isOwner || T.acctOf(p) === me || T.rankOfProfile(p, t.id) < rank));
+  return `<p>${esc(r.name)} · place <b>${r.position}</b> in the order${r.hidden ? " · hidden: only people who manage roles see it" : ""}. ${who}${how ? " " + esc(how) : ""}</p>
+    <fieldset style="border:0;padding:0;margin:4px 0" aria-label="Switches of ${esc(r.name)}"><legend class="mute" style="font-size:12px">Switches</legend>
+      ${SWITCHES.map(sw => swBox(k + sw, sw, r.switches.has(sw), !edit || !mine.has(sw))).join("")}</fieldset>
+    ${edit ? `<div class="row">${ctlIn(k + "name", "Name", {max:60, label:"Role name", val:r.name})}${custom ? ctlIn(k + "pos", "Place 1-" + (rank - 1), {max:3, label:"Place in the order", val:String(r.position)}) : ""}</div>
+      <label style="font-size:13px"><input type="checkbox" id="${esc(k + "hidden")}"${ctlTyped(k + "hidden", r.hidden ? "1" : "0") === "1" ? " checked" : ""}> Hidden: only people who manage roles see this role and who holds it</label>
+      <div class="row"><button class="primary" data-act="rolesave" data-role="${esc(rid)}">Save role</button></div>`
+      : `<p class="mute">${rid === "owner" ? "" : mine.has("manage_roles") ? "This role is ranked at or above your own highest, so you can't change it." : "Only people with Manage roles change roles."}</p>`}
+    ${edit && custom ? `<h4 style="margin:8px 0 2px;font-size:13px">Who holds it</h4>
+      ${holders.map(p => `<div class="row"><span class="mono">${esc(p)}</span><button data-act="roletake" data-role="${esc(rid)}" data-pid="${esc(p)}">Take away</button></div>`).join("")}
+      ${people.length ? `<div class="row">${ctlSel(k + "give", people, people[0], "Member to give this role")}<button data-act="rolegive" data-role="${esc(rid)}">Give role</button></div>` : ""}` : ""}
+    ${ovs.length ? `<h4 style="margin:8px 0 2px;font-size:13px">Overrides</h4>${ovs.map(o => `<div class="row" data-ov="${esc(o.target)}"><span>On ${esc(ovTarget(o.target))}: ${esc(ovText(o))}</span>${edit ? `<button data-act="ovclear" data-role="${esc(rid)}" data-target="${esc(o.target)}">Remove</button>` : ""}</div>`).join("")}` : ""}
+    ${ctlNoteHtml("role:" + rid)}`;
+}
+function worldRoleControls(ctl, s, x, y){
+  const T = TEAMS || foldTeams(S.events), me = myLogin(), t = s.t, can = tsHere() && writable();
+  const mine = T.switches(me, t.id), rank = T.highest(me, t.id);
+  if (!can || !mine.has("manage_roles")) return;
+  const below = [...t.roles.values()].filter(r => r.id !== "owner" && r.position < rank).sort((a, b) => b.position - a.position);
+  ctl("ctl:role", x, y, "setting", "+ ROLE", "A named set of switches", {action:true, body:() =>
+    `<div class="row">${ctlIn("wcRoleName", "Name, e.g. Steward", {max:60, label:"Role name"})}${ctlIn("wcRolePos", "Place 1-" + (rank - 1), {max:3, label:"Place in the order"})}</div>
+     <fieldset style="border:0;padding:0;margin:4px 0" aria-label="Switches of the new role"><legend class="mute" style="font-size:12px">Switches (you can give only ones you hold)</legend>
+       ${SWITCHES.map(sw => swBox("wcRoleSw-" + sw, sw, false, !mine.has(sw))).join("")}</fieldset>
+     <label style="font-size:13px"><input type="checkbox" id="wcRoleHidden"${ctlTyped("wcRoleHidden", "0") === "1" ? " checked" : ""}> Hidden</label>
+     <div class="row"><button class="primary" data-act="rolecreate">Create role</button></div>
+     <p class="mute">Higher places outrank lower ones: you manage only roles and people below your own highest (${rank}).</p>${ctlNoteHtml("ctl:role")}`});
+  const nodes = [...T.itemSpace].filter(([, sp]) => sp === t.id).map(([n]) => n).filter(n => F.items.has(n));
+  const targets = [...Object.keys(TYPES).map(k => ["planet:" + k, "Planet · " + (PLURAL[k] || TYPES[k] + "s")]), ...nodes.map(n => ["node:" + n, "Node · " + (F.items.get(n).title || n).slice(0, 50)])];
+  ctl("ctl:override", x, y + 100, "setting", "+ OVERRIDE", "Allow or deny a switch for a role on one planet or node", {action:true, body:() =>
+    `${ctlSel("wcOvRole", below.map(r => [r.id, r.name]), "everyone", "Role")}
+     ${ctlSel("wcOvTarget", targets, targets[0]?.[0], "Planet or node")}
+     <div class="row">${ctlSel("wcOvEffect", [["allow", "Allow"], ["deny", "Deny"], ["clear", "Back to the role's own"]], "allow", "Allow or deny")}${ctlSel("wcOvSwitch", SWITCHES.filter(sw => mine.has(sw)).map(sw => [sw, SWITCH_LABEL[sw]]), "read", "Switch")}</div>
+     <div class="row"><button class="primary" data-act="override">Set override</button></div>
+     <p class="mute">e.g. Everyone · Planet Questions · Allow · Add and change nodes: anyone signed in can post there and read nothing else.</p>${ctlNoteHtml("ctl:override")}`});
 }
 async function worldAct(act, card, b){
   const id = card.dataset.ctl, ts = b.dataset.ts || S.world?.sys, T = TEAMS || foldTeams(S.events), me = myLogin();
@@ -2674,12 +2819,40 @@ async function worldAct(act, card, b){
       if (await write("member.remove", ts, {teamspace:ts, profile:mine})){ toast("You left the teamspace."); refresh(); worldGo(null); } return; }
     if (act === "role"){ const pid = b.dataset.pid, r = val("wcRole");
       if (await write("member.role", ts, {teamspace:ts, profile:pid, role:r})){ delete S.ctlTyped.wcRole; toast(`${pid} is now ${r}.`); refresh(); } return; }
+    if (act === "rolecreate"){ const t = T.spaces.get(ts), name = val("wcRoleName"), pos = val("wcRolePos");
+      if (!name) return note("Give the role a name.");
+      const sw = SWITCHES.filter(x => card.querySelector("#" + CSS.escape("wcRoleSw-" + x))?.checked), role = roleSlug(t, name);
+      const body = {teamspace:ts, role, name, switches:sw, hidden:!!card.querySelector("#wcRoleHidden")?.checked};
+      if (pos){ if (!/^\d{1,3}$/.test(pos)) return note("The place is a number, 1 to 999."); body.position = +pos; }
+      if (await write("role.create", ts, body)) done(["wcRoleName", "wcRolePos", "wcRoleHidden", ...SWITCHES.map(x => "wcRoleSw-" + x)], `Role ${name} created.`); return; }
+    if (act === "rolesave"){ const rid = b.dataset.role, r = T.spaces.get(ts)?.roles.get(rid), k = "wcR-" + rid + "-"; if (!r) return;
+      const sw = SWITCHES.filter(x => card.querySelector("#" + CSS.escape(k + x))?.checked), name = val(k + "name"), pos = val(k + "pos");
+      const hidden = !!card.querySelector("#" + CSS.escape(k + "hidden"))?.checked, body = {teamspace:ts, role:rid};
+      if (SWITCHES.some(x => sw.includes(x) !== r.switches.has(x))) body.switches = sw;
+      if (name && name !== r.name) body.name = name;
+      if (pos){ if (!/^\d{1,3}$/.test(pos)) return note("The place is a number, 1 to 999."); if (+pos !== r.position) body.position = +pos; }
+      if (hidden !== r.hidden) body.hidden = hidden;
+      if (Object.keys(body).length === 2) return note("Nothing changed.");
+      if (await write("role.edit", ts, body)) done([k + "name", k + "pos", k + "hidden", ...SWITCHES.map(x => k + x)], `${r.name} saved.`); return; }
+    if (act === "rolegive" || act === "roletake"){ const rid = b.dataset.role, pid = act === "rolegive" ? val("wcR-" + rid + "-give") : b.dataset.pid;
+      if (!pid) return note("Pick a member.");
+      if (await write("role.assign", ts, {teamspace:ts, role:rid, profile:pid, on:act === "rolegive"})){
+        delete S.ctlTyped["wcR-" + rid + "-give"]; delete S.ctlNote[id]; toast(act === "rolegive" ? `${pid} now holds ${rid}.` : `${rid} taken from ${pid}.`); refresh(); } return; }
+    if (act === "override" || act === "ovclear"){ const t = T.spaces.get(ts);
+      const rid = act === "ovclear" ? b.dataset.role : val("wcOvRole"), target = act === "ovclear" ? b.dataset.target : val("wcOvTarget");
+      const cur = t?.overrides.get(target + "\n" + rid), allow = new Set(cur?.allow || []), deny = new Set(cur?.deny || []);
+      if (act === "override"){ const sw = val("wcOvSwitch"), eff = val("wcOvEffect") || "allow"; if (!rid || !target || !sw) return note("Pick a role, a place and a switch.");
+        allow.delete(sw); deny.delete(sw); if (eff === "allow") allow.add(sw); if (eff === "deny") deny.add(sw); }
+      else { allow.clear(); deny.clear(); }
+      if (await write("override.set", ts, {teamspace:ts, target, role:rid, allow:[...allow], deny:[...deny]})){
+        if (act === "override") done(["wcOvRole", "wcOvTarget", "wcOvEffect", "wcOvSwitch"], `Override set on ${ovTarget(target)}.`);
+        else { toast("Override removed."); refresh(); } } return; }
     if (act === "remove"){ const pid = b.dataset.pid;
       if (await write("member.remove", ts, {teamspace:ts, profile:pid})){ toast(`${pid} removed. Their history stays.`); refresh(); worldOpen(null); } return; }
   } finally { if (b.isConnected) b.disabled = false; }
 }
 (() => {
-  const cv = $("#canvas"), keep = e => { if (e.target.closest?.(".nd-ctl-body") && e.target.id) S.ctlTyped[e.target.id] = e.target.value; };
+  const cv = $("#canvas"), keep = e => { if (e.target.closest?.(".nd-ctl-body") && e.target.id) S.ctlTyped[e.target.id] = e.target.type === "checkbox" ? (e.target.checked ? "1" : "0") : e.target.value; };
   cv.addEventListener("click", e => { const b = e.target.closest?.("[data-act]"), card = b?.closest("[data-ctl]"); if (card && S.world) worldAct(b.dataset.act, card, b); });
   cv.addEventListener("input", keep); cv.addEventListener("change", keep);
   // Esc closes the open node from anywhere on the page (an action can redraw the card the focus was in)
@@ -2768,6 +2941,10 @@ function worldPlanets(s){
   const pl = [];
   if (s.kind === "teamspace"){
     pl.push({key:"members", label:"Members", type:"story", profiles:[...s.t.members].map(([p, r]) => ({pid:p, role:r})).concat([...s.t.invites].map(([p, r]) => ({pid:p, role:"invited as " + r})))});
+    // BQ-access-model step 2: the teamspace's roles, highest first; a hidden role shows only to those who manage roles
+    const T = TEAMS || foldTeams(S.events), manage = T.switches(myLogin(), s.t.id).has("manage_roles");
+    pl.push({key:"roles", label:"Roles", type:"setting", roles:[...s.t.roles.values()].filter(r => manage || !r.hidden)
+      .sort((a, b) => b.position - a.position || a.id.localeCompare(b.id))});
     pl.push({key:"money", label:"Money", type:"setting", items:s.items.filter(i => i.meta?.money_rules)});
   }
   const steps = s.items.filter(i => i.meta?.step && !i.meta?.money_rules);   // W1c: planned automation steps get their own planet
@@ -2775,15 +2952,17 @@ function worldPlanets(s){
   for (const t of WORLD_ORDER){ const xs = rest.filter(i => typeKey(i.type) === t); if (xs.length) pl.push({key:"t:" + t, label:PLURAL[t] || TYPES[t] + "s", type:t, items:xs}); }
   if (steps.length) pl.push({key:"steps", label:"Automation", type:"change", items:steps});
   if (s.shared.length) pl.push({key:"shared", label:"Shared in", type:"asset", items:s.shared});
-  for (const p of pl) p.count = p.profiles ? p.profiles.length : p.items.length;
+  for (const p of pl) p.count = (p.profiles || p.roles || p.items).length;
   return pl;
 }
 const worldNodes = s => s.items.length + s.shared.length;
+const planetCount = p => `${p.count} ${p.profiles ? "profile" : p.roles ? "role" : "node"}${p.count === 1 ? "" : "s"}`;
+const openable = id => /^(sys|ctl|prof|role):/.test(id || "");
 function enterWorld(){ S.world = {sys:null, planet:null, node:null}; S.sel = null; S.worldFly = false; if (S.view !== "map") show("map"); renderMap(true); }
 function worldGo(sys, planet){ S.world = {sys, planet:planet || null, node:null}; S.worldOpen = null; S.sel = null; S.worldFly = true; renderMap(true); }
 /* W0: every place has an address, #/<system>/<planet>/<node> (#/ alone is the Galaxy), so Back, reload and pasted links
    land on the same place. Item addresses (#D-001) keep working: they fly to the node's place. */
-const planetSlug = key => key.replace(/^t:/, ""), planetKey = slug => ["members","money","shared","steps"].includes(slug) ? slug : "t:" + slug;
+const planetSlug = key => key.replace(/^t:/, ""), planetKey = slug => ["members","roles","money","shared","steps"].includes(slug) ? slug : "t:" + slug;
 function worldAddress(w){ return "#/" + [w.sys, w.sys && w.planet && planetSlug(w.planet), w.sys && w.planet && w.node].filter(Boolean).map(encodeURIComponent).join("/"); }
 function parseWorld(hash){
   if (!/^#\//.test(hash || "")) return null;
@@ -2801,9 +2980,9 @@ function worldHash(){
 }
 function worldFromHash(){
   const w = parseWorld(location.hash); if (!w || !tsCanvasOk()) return false;
-  S.worldFromHistory = true; S.world = w; S.worldOpen = w.node && w.node.startsWith("prof:") ? w.node : null; S.worldFly = true; S.sel = null;
+  S.worldFromHistory = true; S.world = w; S.worldOpen = openable(w.node) ? w.node : null; S.worldFly = true; S.sel = null;
   if (S.view !== "map") show("map"); else renderMap(true);
-  if (w.node && !w.node.startsWith("prof:")){ if (F.items.has(w.node)) select(w.node); else S.worldPendingSel = w.node; }   // not loaded yet: open it once it is
+  if (w.node && !openable(w.node)){ if (F.items.has(w.node)) select(w.node); else S.worldPendingSel = w.node; }   // not loaded yet: open it once it is
   return true;
 }
 addEventListener("popstate", () => { if (/^#\//.test(location.hash)) worldFromHash(); });
@@ -2825,7 +3004,7 @@ function worldBar(s, pl){
   const w = S.world, crumbs = [`<button data-wgo="" ${!s ? 'aria-current="location"' : ""}>Galaxy</button>`];
   if (s) crumbs.push(`<button data-wgo="${esc(s.id)}" ${!pl ? 'aria-current="location"' : ""}>${esc(s.label)}</button>`);
   if (pl) crumbs.push(`<button data-wgo="${esc(s.id)}" data-wpl="${esc(pl.key)}" ${!w.node ? 'aria-current="location"' : ""}>${esc(pl.label)}</button>`);
-  if (w.node) crumbs.push(`<span class="chip" aria-current="location"><span class="mono">${esc(w.node.replace(/^prof:/, ""))}</span></span>`);
+  if (w.node) crumbs.push(`<span class="chip" aria-current="location"><span class="mono">${esc(w.node.replace(/^(prof|role):/, ""))}</span></span>`);
   const sys = worldModel();
   const where = !s ? `${sys.length} system${sys.length === 1 ? "" : "s"}` : !pl ? `${worldPlanets(s).length} planets · ${worldNodes(s)} nodes${s.kind === "teamspace" ? " · you: " + esc(s.role) : ""}` : `${pl.count} here`;
   bar.innerHTML = `<span class="chip" id="worldCrumbs">${crumbs.join(" › ")}</span><span class="chip mute" id="worldWhere">${where}</span>`;
@@ -2860,7 +3039,7 @@ function renderWorld(relayout){
         data:{title:sy.kind === "home" ? "Home system" : "System · " + sy.id, can:false, onFrame:() => {}}});
       mk("sys:" + sy.id, x0 + (W - 210) / 2, 24, "lead", "SYSTEM · " + (sy.kind === "home" ? "home" : sy.id), `${sy.label} · ${ps.length} planets · ${worldNodes(sy)} nodes`, true);
       ps.forEach((p, i) => { const id = "pl:" + sy.id + ":" + p.key;
-        mk(id, x0 + 20 + (i % cols) * 240, 110 + Math.floor(i / cols) * 84, p.type, "PLANET · " + p.label, `${p.count} ${p.profiles ? "profile" : "node"}${p.count === 1 ? "" : "s"}`, false);
+        mk(id, x0 + 20 + (i % cols) * 240, 110 + Math.floor(i / cols) * 84, p.type, "PLANET · " + p.label, planetCount(p), false);
         edge("sys:" + sy.id, id); });
       x0 += W + 120;
     }
@@ -2873,7 +3052,7 @@ function renderWorld(relayout){
     const R = Math.max(300, planets.length * 60);
     if (s.kind === "teamspace") worldSystemControls(ctl, s, -Math.round(R * 1.4) - 420, -R);
     planets.forEach((p, i) => { const a = -Math.PI / 2 + i * 2 * Math.PI / planets.length, id = "pl:" + s.id + ":" + p.key;
-      mk(id, Math.round(R * 1.4 * Math.cos(a)), Math.round(R * Math.sin(a)), p.type, "PLANET · " + p.label, `${p.count} ${p.profiles ? "profile" : "node"}${p.count === 1 ? "" : "s"}`, false);
+      mk(id, Math.round(R * 1.4 * Math.cos(a)), Math.round(R * Math.sin(a)), p.type, "PLANET · " + p.label, planetCount(p), false);
       edge("sys:" + s.id, id); });
   } else {
     hint = pl.count ? "Click a node to open it · the bar takes you back up" : "Nothing on this planet yet";
@@ -2882,6 +3061,13 @@ function renderWorld(relayout){
       hint = "Click a person to see or change their role · + Invite adds someone";
       pl.profiles.forEach((p, i) => ctl("prof:" + p.pid, Math.floor(i / ROWS) * 330, (i % ROWS) * 84, "story", "PROFILE · " + p.pid, p.role, {body:() => profileBody(s, p.pid)}));
       worldSystemControls(ctl, s, -420, 0, ["invite"]);
+    }
+    else if (pl.roles){   // BQ-access-model step 2: each role is a node; open, it shows its switches and who holds it
+      const T = TEAMS || foldTeams(S.events), mine = T.switches(myLogin(), s.id);
+      hint = `Click a role to see its switches and who holds it · you hold ${mine.size} of ${SWITCHES.length} switches here`;
+      pl.roles.forEach((r, i) => ctl("role:" + r.id, Math.floor(i / ROWS) * 330, (i % ROWS) * 84, "setting",
+        "ROLE · " + r.position + (r.hidden ? " · hidden" : ""), `${r.name} · ${roleNote(s.t, r)}`, {filled:r.id === "owner", body:() => roleBody(s, r.id)}));
+      worldRoleControls(ctl, s, -420, 0);
     }
     else {
       const ids = new Set(pl.items.map(i => i.id)), rels = canvasLayout().rels;
@@ -2903,8 +3089,9 @@ function renderWorld(relayout){
   if (relayout) canvasFitKey++;
   if (!missing) worldHash();
   S.worldHere = !s ? sys.map(x => ({id:"sys:" + x.id, label:x.label, note:`${worldPlanets(x).length} planets · ${worldNodes(x)} nodes`}))
-    : !pl ? planets.map(p => ({id:"pl:" + s.id + ":" + p.key, label:p.label, note:`${p.count} ${p.profiles ? "profile" : "node"}${p.count === 1 ? "" : "s"}`}))
-    : pl.profiles ? pl.profiles.map(p => ({id:"prof:" + p.pid, label:p.pid, note:p.role})) : pl.items.map(i => ({id:i.id, label:i.title || i.id, note:i.id}));
+    : !pl ? planets.map(p => ({id:"pl:" + s.id + ":" + p.key, label:p.label, note:planetCount(p)}))
+    : pl.profiles ? pl.profiles.map(p => ({id:"prof:" + p.pid, label:p.pid, note:p.role}))
+    : pl.roles ? pl.roles.map(r => ({id:"role:" + r.id, label:r.name, note:roleNote(s.t, r)})) : pl.items.map(i => ({id:i.id, label:i.title || i.id, note:i.id}));
   if (!S.sel && S.view === "map") renderInspector();
   const none = () => {}, fly = S.worldFly; S.worldFly = false;
   if (S.worldOpen && !nodes.some(n => n.id === S.worldOpen)) S.worldOpen = null;   // its node isn't here any more
@@ -2912,7 +3099,7 @@ function renderWorld(relayout){
   document.querySelector("main").classList.toggle("nopanel", !S.selStep && (!S.sel || S.worldShown.has(S.sel)));
   if (S.worldPendingSel && F.items.has(S.worldPendingSel)){ const id = S.worldPendingSel; S.worldPendingSel = null; setTimeout(() => select(id)); }   // a pasted link that came before the data
   const T0 = TEAMS || foldTeams(S.events), r0 = s?.kind === "teamspace" ? T0.roleOf(myLogin(), s.id) : null;
-  const linkable = !!pl && !pl.profiles && s?.kind === "teamspace" && (r0 === "owner" || r0 === "member") && writable();
+  const linkable = !!pl && !pl.profiles && !pl.roles && s?.kind === "teamspace" && (r0 === "owner" || r0 === "member") && writable();
   window.NodachCanvas.render(el, {nodes, edges, sel:S.worldOpen || w.node, can:linkable, connect:linkable, focus:hint, dark:document.documentElement.dataset.theme === "dark",
     fit:!!relayout, fitKey:canvasFitKey, flyMs:fly ? 600 : 0, onSelect:worldSelect, focusNode:S.worldOpen || (S.sel && S.worldShown.has(S.sel) ? S.sel : null),
     focusKey:S.worldOpenKey + ":" + (S.sel || ""), onMove:none, onConnect:canvasConnect, onFrame:none, isStep:() => false,
@@ -2932,7 +3119,7 @@ function worldSelect(id){
   if (!id){ if (S.worldOpen) worldOpen(null); return; }   // a click on empty space closes an open control
   if (id.startsWith("sys:") && !(w.sys === id.slice(4) && !w.planet)) return worldGo(id.slice(4), null);
   if (id.startsWith("pl:")){ const rest = id.slice(3), cut = rest.indexOf(":"); return worldGo(rest.slice(0, cut), rest.slice(cut + 1)); }
-  if (id.startsWith("sys:") || id.startsWith("ctl:") || id.startsWith("prof:")) return worldOpen(S.worldOpen === id ? null : id);
+  if (openable(id)) return worldOpen(S.worldOpen === id ? null : id);
   if (S.sel === id) return worldCloseCard();   // a click on an open card's header closes it
   w.node = id;
   select(id);   // the node's own history, links and answers

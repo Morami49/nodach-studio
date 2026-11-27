@@ -1852,7 +1852,8 @@ def _team_fold(H):
 def _space_of(e, item_space):
     b = e.get("body") or {}; k = e.get("kind")
     if k == "teamspace.create": return b.get("id")
-    if k in ("member.invite", "member.join", "member.role", "member.remove", "support.access"): return b.get("teamspace") or e.get("item")
+    if k in ("member.invite", "member.join", "member.role", "member.remove", "support.access",
+             "role.create", "role.edit", "role.assign", "override.set", "agent.allow"): return b.get("teamspace") or e.get("item")
     if k == "node.share": return b.get("teamspace") or item_space.get(b.get("node") or e.get("item"))
     return item_space.get(e.get("item") or b.get("id"))
 
@@ -2358,7 +2359,7 @@ async def s90_galaxy_travel_as_owner(b):
     await o.evaluate("S.asof = null; refresh();"); await o.wait_for_timeout(300)
     whole = await o.evaluate("!document.querySelector('#worldLeave') && !!document.querySelector('#worldBar')")   # no Whole graph (201)
     ok = (systems == sorted(["sys:home", f"sys:{ts}"]) and clusters == sorted(["cl:home", f"cl:{ts}"])
-          and set(system) == {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:money", f"pl:{ts}:t:idea"}
+          and set(system) == {f"sys:{ts}", f"pl:{ts}:members", f"pl:{ts}:roles", f"pl:{ts}:money", f"pl:{ts}:t:idea"}
           and set(planet) == {ids["Plan"], ids["Quote"]} and panel == ids["Plan"]
           and all(x in crumbs for x in ("Galaxy", "Insydr pilot", "Ideas", ids["Plan"])) and back == systems and past == ["sys:home"]
           and whole and len(H["posts"]) == posts0 and not (p.errors + n.errors + o.errors))
@@ -2696,9 +2697,70 @@ async def s98_map_a_project_and_plan_a_step(b):
 SCENARIOS += [s98_map_a_project_and_plan_a_step]
 
 
+# ---------------------------------------------------------------- BQ-access-model step 2: the Roles planet
+async def s99_roles_planet(b):
+    """BQ-access-model step 2: in Insydr pilot Nowed lands on the Roles planet: Owner, Member, Guest and Everyone are
+    nodes, highest first. He opens + Role, names it Steward at place 50 with Invite people and Manage roles, and
+    creates it; he opens Steward and gives it to Nassar (a guest). With + Override he lets Everyone read Plan. Nassar
+    now reads Plan, which he couldn't before; on his Roles planet he can change Guest (below him) but not Steward
+    (his own highest), and he can't give switches he doesn't hold."""
+    H = team_hub(); p, n, ts, ids = await seeded_space(b, H)
+    plan = ids["Plan"]
+    o = await open_teams_canvas(b, H, "Morami49", True)
+    await fly_to_system(o, ts)
+    planets = sorted(i for i in await world_ids(o) if i.startswith("pl:"))
+    await click_node(o, f"pl:{ts}:roles"); await o.wait_for_timeout(600)
+    order = [i for i in await canvas_ids(o) if i.startswith("role:")]
+    await shot(o, "s99-1-roles-planet")
+    owner_card = await open_ctl(o, "role:owner")
+    await open_ctl(o, "ctl:role")
+    await o.fill("#wcRoleName", "Steward"); await o.fill("#wcRolePos", "50")
+    await o.check("#wcRoleSw-invite"); await o.check("#wcRoleSw-manage_roles")
+    await o.evaluate("refreshView()"); await o.wait_for_timeout(400)   # what he ticked survives a redraw
+    kept = await o.is_checked("#wcRoleSw-invite") and await o.is_checked("#wcRoleSw-manage_roles") and not await o.is_checked("#wcRoleSw-read")
+    await act(o, "ctl:role", "rolecreate", 900)
+    made = [x["event"]["body"] for x in H["posts"] if x["event"]["kind"] == "role.create"]
+    card = await open_ctl(o, "role:steward")
+    await shot(o, "s99-2-steward-card")
+    await o.select_option("#wcR-steward-give", "P-nassar"); await act(o, "role:steward", "rolegive", 900)
+    given = [x["event"]["body"] for x in H["posts"] if x["event"]["kind"] == "role.assign"]
+    held = await o.evaluate(f"TEAMS.held('nassar', {json.dumps(ts)})")
+    before = await n.evaluate(f"F.items.has({json.dumps(plan)})")
+    await open_ctl(o, "ctl:override")
+    await o.select_option("#wcOvRole", "everyone"); await o.select_option("#wcOvTarget", f"node:{plan}")
+    await o.select_option("#wcOvEffect", "allow"); await o.select_option("#wcOvSwitch", "read")
+    await act(o, "ctl:override", "override", 900)
+    ov = [x["event"]["body"] for x in H["posts"] if x["event"]["kind"] == "override.set"]
+    await o.keyboard.press("Escape"); await o.wait_for_timeout(400)
+    ev_card = await open_ctl(o, "role:everyone")
+    g = await open_teams_canvas(b, H, "nassar", False)
+    reads_plan = await g.evaluate(f"F.items.has({json.dumps(plan)})")
+    await fly_to_system(g, ts); await click_node(g, f"pl:{ts}:roles"); await g.wait_for_timeout(600)
+    g_ids = await canvas_ids(g)
+    st = await open_ctl(g, "role:steward")
+    await g.keyboard.press("Escape"); await g.wait_for_timeout(400)
+    gu = await open_ctl(g, "role:guest")
+    gu_save = await g.locator('[data-ctl="role:guest"] [data-act="rolesave"]').count() == 1
+    no_money = await g.is_disabled("#wcR-guest-money") and not await g.is_disabled("#wcR-guest-invite")
+    await shot(g, "s99-3-nassar-roles")
+    ok = (f"pl:{ts}:roles" in planets and order == ["role:owner", "role:member", "role:guest", "role:everyone"]
+          and "Every switch" in owner_card and kept
+          and made == [{"teamspace": ts, "role": "steward", "name": "Steward", "switches": ["invite", "manage_roles"], "hidden": False, "position": 50}]
+          and "Nobody holds it yet" in card and given == [{"teamspace": ts, "role": "steward", "profile": "P-nassar", "on": True}]
+          and "steward" in held and not before
+          and ov == [{"teamspace": ts, "target": f"node:{plan}", "role": "everyone", "allow": ["read"], "deny": []}]
+          and "allows Read" in ev_card and reads_plan
+          and "ctl:role" in g_ids and "ranked at or above" in st and gu_save and no_money
+          and not (p.errors + n.errors + o.errors + g.errors))
+    return ok, (f"planets={planets}, order={order}, ticks kept={kept}, made={made}, given={given}, held={held}, plan before/after={before}/{reads_plan}, "
+                f"override={ov}, nassar controls={'ctl:role' in g_ids}, steward locked={'ranked at or above' in st}, guest editable={gu_save}, "
+                f"money off={no_money}, errors={(p.errors + n.errors + o.errors + g.errors)[:1]}")
+
+
+SCENARIOS += [s99_roles_planet]
 
 # ---------------------------------------------------------------- BQ-node-move (213a b): move a Home node into a teamspace
-async def s99_move_a_home_node_into_foundry(b):
+async def s101_move_a_home_node_into_foundry(b):
     """Nowed (hub owner) owns Nodach Foundry. D-086, a decision made in Home before Foundry existed, is opened from
     the List; its card offers 'In Home · move into' with Foundry, and he moves it. The move is one node.move event;
     D-086 now lives on Foundry's Decisions planet with its history, and Rad, a Foundry member, reads it as Foundry's.
@@ -2718,7 +2780,7 @@ async def s99_move_a_home_node_into_foundry(b):
     await o.select_option("#moveTo", ts); await o.click("#moveGo"); await o.wait_for_timeout(1200)
     mv = [x["event"] for x in H["posts"] if x["event"]["kind"] == "node.move"]
     at = await o.evaluate("({sys: S.world && S.world.sys, planet: S.world && S.world.planet, space: TEAMS.itemSpace.get('D-086'), hist: F.items.get('D-086').history.length})")
-    await shot(o, "s99-1-moved-into-foundry")
+    await shot(o, "s101-1-moved-into-foundry")
     r2 = await open_teams_canvas(b, H, "rad", False)
     after = await r2.evaluate("F.items.has('D-086')")
     await r2.evaluate("select('D-086')"); await r2.wait_for_timeout(800)
@@ -2730,7 +2792,7 @@ async def s99_move_a_home_node_into_foundry(b):
                 f"no Move for member={no_move_for_member}, errors={(o.errors + r.errors + r2.errors)[:1]}")
 
 
-SCENARIOS += [s99_move_a_home_node_into_foundry]
+SCENARIOS += [s101_move_a_home_node_into_foundry]
 
 
 async def main():

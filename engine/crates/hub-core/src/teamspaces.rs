@@ -53,11 +53,16 @@
 //! owners and members read and save them, guests don't (they would carry the ids of nodes not shared with them).
 //! Rollback: revert the PR. The events stay on the record (append-only) and simply stop meaning anything.
 use crate::profiles;
+use crate::roles::{self, Perms};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-pub const KINDS: [&str; 8] = ["teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share", "support.access", "node.move"];
+pub const KINDS: [&str; 13] = ["teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share", "support.access",
+    // BQ-access-model (D-access-model): roles, overrides and agent allowances, see `roles`
+    "role.create", "role.edit", "role.assign", "override.set", "agent.allow",
+    // BQ-node-move (213a b)
+    "node.move"];
 
 /// How long one support.access event opens a teamspace to the hub owner (114b a): 24 hours.
 pub const SUPPORT_MS: i64 = 24 * 60 * 60 * 1000;
@@ -145,6 +150,10 @@ pub struct State {
     pub findings: Vec<profiles::Finding>,
     /// 114b a: every accepted support.access, in record order
     pub support: Vec<Support>,
+    /// BQ-access-model: each teamspace's roles, overrides and agent allowances (built-ins only until someone edits)
+    pub spaces: BTreeMap<String, roles::Space>,
+    /// node id → its type (its planet in Studio, where planet overrides apply)
+    item_type: HashMap<String, String>,
     profiles: profiles::State,
     hub_owners: Vec<String>,
     /// The clock reads are judged at (ms); None: no support access is open (safe default)
@@ -200,6 +209,8 @@ impl State {
             let id = s(&b, "id").to_string();
             if id.is_empty() || self.item_author.contains_key(&id) { return; } // F-19: a second create changes nothing
             if let Some(a) = author_login(ev) { self.item_author.insert(id.clone(), self.account_of_login(&a)); }
+            let ty = s(&b, "type");
+            if !ty.is_empty() { self.item_type.insert(id.clone(), ty.to_string()); }
             let ts = s(&b, "teamspace");
             if !ts.is_empty() {
                 // kept in the teamspace even when the author had no right to write there, so it stays hidden
@@ -317,7 +328,8 @@ impl State {
         match self.profiles.profiles.get(pid) {
             Some(p) if p.revoked.is_some() => None,
             Some(p) => Some(p.account.clone()),
-            None => pid.strip_prefix("P-").filter(|l| crate::session::valid_login(l)).map(|l| self.account_of_login(l)),
+            // an agent's own profile, P-agent:<name> (BQ-access-model; agent sign-in keys come with BQ-sign-in-switch)
+            None => pid.strip_prefix("P-").filter(|l| crate::session::valid_login(l) || roles::is_agent(l)).map(|l| self.account_of_login(l)),
         }
     }
 
@@ -347,6 +359,74 @@ impl State {
         }).map(|(_, l)| *l).max()
     }
 
+    /// BQ-access-model: the roles `login` holds in `ts`, by id: Everyone always, then its base role (owner, member,
+    /// guest) and the custom roles given to one of its profiles that is still a member.
+    pub fn held(&self, login: &str, ts: &str) -> Vec<String> {
+        let mut v = vec![roles::EVERYONE.to_string()];
+        let (Some(t), Some(sp)) = (self.teamspaces.get(ts), self.spaces.get(ts)) else { return v };
+        match self.role_of(login, ts) {
+            Some(Role::Owner) => v.push(roles::OWNER.into()),
+            Some(Role::Member) => v.push(roles::MEMBER.into()),
+            Some(Role::Guest) => v.push(roles::GUEST.into()),
+            None => return v,
+        }
+        let acct = self.account_of_login(login);
+        for r in sp.roles.values().filter(|r| !roles::BUILT_IN.contains(&r.id.as_str())) {
+            if r.holders.iter().any(|p| t.members.contains_key(p) && self.account_of_profile(p).as_deref() == Some(acct.as_str())) {
+                v.push(r.id.clone());
+            }
+        }
+        v
+    }
+
+    /// `login`'s rank in `ts`: the position of its highest role (Owner 1000, Member 20, Guest 10, Everyone 0).
+    pub fn highest(&self, login: &str, ts: &str) -> i32 {
+        let Some(sp) = self.spaces.get(ts) else { return 0 };
+        self.held(login, ts).iter().filter_map(|r| sp.roles.get(r)).map(|r| r.position).max().unwrap_or(0)
+    }
+
+    /// The rank of the account behind a profile (for managing people: only those ranked below you).
+    fn highest_of_profile(&self, pid: &str, ts: &str) -> i32 {
+        let Some(login) = self.account_of_profile(pid).and_then(|a| a.strip_prefix("acct:github:").map(str::to_string))
+            .or_else(|| pid.strip_prefix("P-").map(str::to_string)) else { return 0 };
+        self.highest(&login, ts)
+    }
+
+    /// BQ-access-model: the switches `login` has in `ts`, at a planet (node type) and/or a node. Owner: all. Else the
+    /// held roles' switches, then planet overrides, then node overrides, then the node's shares (which only add).
+    /// Agents lose merge_high and hand_on unless an Owner allowed them (agent.allow).
+    pub fn switches_at(&self, login: &str, ts: &str, planet: Option<&str>, node: Option<&str>) -> Perms {
+        let Some(sp) = self.spaces.get(ts) else { return Perms::NONE };
+        let held = self.held(login, ts);
+        let mut p = if held.iter().any(|r| r == roles::OWNER) { Perms::ALL } else {
+            let held_refs: Vec<&str> = held.iter().map(String::as_str).collect();
+            let mut p = held.iter().filter_map(|r| sp.roles.get(r)).fold(Perms::NONE, |a, r| a.union(r.switches));
+            let planet = planet.map(str::to_string).or_else(|| node.and_then(|n| self.item_type.get(n).cloned()));
+            if let Some(pl) = planet { p = roles::apply_scope(sp, &format!("planet:{pl}"), &held_refs, p); }
+            if let Some(n) = node { p = roles::apply_scope(sp, &format!("node:{n}"), &held_refs, p); }
+            p
+        };
+        if let Some(l) = node.and_then(|n| self.share_level(login, n)) { p = p.union(roles::share_perms(l)); }
+        if roles::is_agent(login) {
+            let allowed = sp.agent_allow.get(&lc(login)).copied().unwrap_or_default();
+            p = p.minus(roles::agent_limited().minus(allowed));
+        }
+        p
+    }
+
+    /// The switches `login` has across a teamspace (no planet or node), for Studio.
+    pub fn switches(&self, login: &str, ts: &str) -> Perms { self.switches_at(login, ts, None, None) }
+
+    /// Is this role event about a hidden role that `login` can't manage (222c: hidden roles and holders stay hidden)?
+    fn hides_role(&self, login: &str, ev: &Value) -> bool {
+        if !roles::KINDS.contains(&s(ev, "kind")) { return false; }
+        let ts = teamspace_of(ev);
+        let rid = ev.pointer("/body/role").and_then(Value::as_str).map(str::trim).unwrap_or("");
+        let hidden = self.spaces.get(&ts).and_then(|sp| sp.roles.get(rid)).is_some_and(|r| r.hidden)
+            || ev.pointer("/body/hidden").and_then(Value::as_bool) == Some(true);
+        hidden && !self.switches(login, &ts).has("manage_roles")
+    }
+
     /// The GitHub logins of a teamspace's owners (BQ-1 step 3: whose queue a usage notice goes to).
     pub fn owner_logins(&self, ts: &str) -> Vec<String> {
         let Some(t) = self.teamspaces.get(ts) else { return vec![] };
@@ -362,16 +442,35 @@ impl State {
             if r.is_none() && !self.invited(login, &t.id) { return None; }
             let mut v = json!({"id": t.id, "label": t.label, "role": r, "invited": r.is_none(), "members": t.members, "invites": t.invites});
             if let Some(log) = self.support_log_for(login, &t.id) { v["support_log"] = json!(log); }
+            if r.is_some() { v["access"] = self.access_view(login, &t.id); }
             Some(v)
         }).collect();
         json!({"teamspaces": mine, "others": self.directory_for(login)})
     }
 
+    /// BQ-access-model, for Studio: my switches, the roles I may see (hidden ones only if I manage roles) with their
+    /// holders, and the overrides if I manage roles.
+    pub fn access_view(&self, login: &str, ts: &str) -> Value {
+        let Some(sp) = self.spaces.get(ts) else { return Value::Null };
+        let mine = self.switches(login, ts);
+        let manage = mine.has("manage_roles");
+        let mut list: Vec<&roles::RoleDef> = sp.roles.values().filter(|r| manage || !r.hidden).collect();
+        list.sort_by(|a, b| b.position.cmp(&a.position).then(a.id.cmp(&b.id)));
+        let mut v = json!({"switches": mine, "rank": self.highest(login, ts), "held": self.held(login, ts), "roles": list,
+                           "all_switches": roles::SWITCHES});
+        if manage {
+            v["overrides"] = json!(sp.overrides.iter().map(|((t, r), o)| json!({"target": t, "role": r, "allow": o.allow, "deny": o.deny})).collect::<Vec<_>>());
+            v["agent_allow"] = json!(sp.agent_allow);
+        }
+        v
+    }
+
     /// May `login` read this node? None when no teamspace or share is involved (the access rules decide).
+    /// BQ-access-model: the read switch at that node (members have it, guests only through a share, and an override
+    /// can open a node or planet to Everyone: Foundry's open doors, 222a).
     pub fn can_read(&self, login: &str, node: &str) -> Option<bool> {
         if let Some(ts) = self.item_space.get(node) {
-            if matches!(self.role_of(login, ts), Some(Role::Owner | Role::Member)) { return Some(true); }
-            return Some(self.share_level(login, node).is_some());
+            return Some(self.switches_at(login, ts, None, Some(node)).has("read"));
         }
         self.share_level(login, node).map(|_| true)
     }
@@ -390,8 +489,9 @@ impl State {
             return Some(to_me || to_my_space || self.can_read(login, &node).unwrap_or(false));
         }
         if let Some(ts) = self.layout_space(ev) {
-            // B-teamspace-graph: a teamspace canvas's positions are for its owners and members
-            return Some(matches!(self.role_of(login, &ts), Some(Role::Owner | Role::Member)));
+            // B-teamspace-graph: a teamspace canvas's positions are for its owners and members (the read switch across
+            // the teamspace; a node or planet opened to someone doesn't open the canvas, which names every node)
+            return Some(self.role_of(login, &ts).is_some() && self.switches(login, &ts).has("read"));
         }
         if kind == "support.access" {
             // 114b a: logged where the teamspace's owners see it (the hub owner sees his own as their author)
@@ -399,6 +499,7 @@ impl State {
         }
         if KINDS.contains(&kind) {
             let ts = teamspace_of(ev);
+            if self.hides_role(login, ev) { return Some(false); }
             return Some(self.role_of(login, &ts).is_some() || self.invited(login, &ts));
         }
         let node = subject(ev)?;
@@ -419,20 +520,24 @@ impl State {
             return self.item_space.contains_key(&n).then(|| Err("writes into a teamspace need a signed-in author".into()));
         };
         if let Some(ts) = self.layout_space(ev) {
-            return Some(match self.role_of(&login, &ts) {
-                Some(Role::Owner | Role::Member) => Ok(()),
-                _ => Err(format!("only owners and members save positions on {ts}'s canvas; yours stay on this screen. Nothing was saved.")),
+            let ok = self.role_of(&login, &ts).is_some() && self.switches(&login, &ts).contains(Perms::of(&["read", "link_move"]));
+            return Some(if ok { Ok(()) } else {
+                Err(format!("only owners and members save positions on {ts}'s canvas; yours stay on this screen. Nothing was saved."))
             });
         }
         if kind == "item.create" {
             let ts = ev.pointer("/body/teamspace").and_then(Value::as_str).map(str::trim).unwrap_or("");
             if !ts.is_empty() {
                 if !self.teamspaces.contains_key(ts) { return Some(Err(format!("teamspace {ts} doesn't exist. Nothing was saved."))); }
-                return Some(match self.role_of(&login, ts) {
-                    Some(Role::Owner | Role::Member) => Ok(()),
-                    Some(Role::Guest) => Err(format!("guests can't add nodes to {ts}: a write into a teamspace needs member or editor rights. Nothing was saved.")),
-                    None => Err(format!("you aren't a member of {ts}, so you can't add nodes to it. Nothing was saved.")),
-                });
+                // BQ-access-model: the add_nodes switch on the new node's planet (its type), so an override can open one
+                // planet, e.g. Foundry's inbox, to Everyone (222a) or close one to a role
+                let ty = ev.pointer("/body/type").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
+                if self.switches_at(&login, ts, ty, None).has("add_nodes") { return Some(Ok(())); }
+                return Some(Err(match self.role_of(&login, ts) {
+                    Some(Role::Guest) => format!("guests can't add nodes to {ts}: a write into a teamspace needs member or editor rights. Nothing was saved."),
+                    None => format!("you aren't a member of {ts}, so you can't add nodes to it. Nothing was saved."),
+                    Some(_) => format!("your roles in {ts} don't allow adding {} nodes there. Nothing was saved.", ty.unwrap_or("these")),
+                }));
             }
         }
         let node = subject(ev)?;
@@ -440,8 +545,12 @@ impl State {
         let lvl = self.share_level(&login, &node);
         let by_share = lvl.is_some_and(|l| l == Level::Editor || (commenting && l >= Level::Commenter));
         if let Some(ts) = self.item_space.get(&node) {
-            if matches!(self.role_of(&login, ts), Some(Role::Owner | Role::Member)) || by_share { return Some(Ok(())); }
+            // BQ-access-model: the switch this kind of write needs, at this node (roles, overrides, then shares)
+            let need = match kind { "comment" | "retract" => "comment", "link" | "node.move" => "link_move", _ => "add_nodes" };
+            if self.switches_at(&login, ts, None, Some(&node)).has(need) { return Some(Ok(())); }
             let why = match (self.role_of(&login, ts), lvl) {
+                (Some(Role::Owner | Role::Member), _) => format!("your roles in {ts} don't allow {} on {node}. Nothing was saved.",
+                    match need { "comment" => "comments", "link_move" => "linking or moving", _ => "changes" }),
                 (_, Some(Level::Commenter)) => format!("{node} is shared with you as commenter: you can comment, not change it. Nothing was saved."),
                 (_, Some(Level::Viewer)) => format!("{node} is shared with you as viewer: you can read it, not change it. Nothing was saved."),
                 (Some(Role::Guest), None) => format!("{node} isn't shared with you: guests in {ts} read and write only what is shared with them. Nothing was saved."),
@@ -472,6 +581,7 @@ impl State {
                     return Err(format!("{owner} isn't one of your active profiles, so it can't own a teamspace"));
                 }
                 let created = s(ev, "ts").to_string();
+                self.spaces.insert(ts_id.clone(), roles::Space::default());
                 self.teamspaces.insert(ts_id.clone(), Teamspace { id: ts_id, label, created, members: BTreeMap::from([(owner, Role::Owner)]), invites: BTreeMap::new() });
                 Ok(())
             }
@@ -479,12 +589,20 @@ impl State {
                 let is_owner = self.role_of(&login, &ts_id) == Some(Role::Owner);
                 let target = match s(&b, "profile") { "" if kind == "member.join" => Self::acting_profile(ev, &login), p => p.to_string() };
                 let own_target = self.account_of_profile(&target).as_deref() == Some(actor.as_str());
+                // BQ-access-model: an Owner, or a role with the switch whose rank is above both the person and the role
+                // they would get (Discord's order). Making or unmaking an Owner stays the Owner's (hand_on).
+                let mine = self.switches(&login, &ts_id);
+                let rank = self.highest(&login, &ts_id);
+                let base_pos = |r: Role| match r { Role::Owner => roles::OWNER_POS, Role::Member => 20, Role::Guest => 10 };
+                let target_rank = self.highest_of_profile(&target, &ts_id);
+                let may = |switch: &str, r: Option<Role>| is_owner
+                    || (mine.has(switch) && target_rank < rank && r.is_none_or(|r| r != Role::Owner && base_pos(r) < rank));
                 let t = self.teamspaces.get_mut(&ts_id).ok_or_else(|| format!("teamspace {ts_id} doesn't exist"))?;
                 if !valid_id(&target) { return Err("name the member by profile id".into()); }
                 match kind {
                     "member.invite" => {
-                        if !is_owner { return Err(format!("only an owner of {ts_id} can invite people")); }
                         let r = role(s(&b, "role"))?;
+                        if !may("invite", Some(r)) { return Err(format!("only an owner of {ts_id}, or a role with 'invite' ranked above the role offered, can invite people")); }
                         if t.members.contains_key(&target) { return Err(format!("{target} is already in {ts_id}; change their role instead")); }
                         t.invites.insert(target, r);
                     }
@@ -494,8 +612,11 @@ impl State {
                         t.members.insert(target, r);
                     }
                     "member.role" => {
-                        if !is_owner { return Err(format!("only an owner of {ts_id} can change roles")); }
                         let r = role(s(&b, "role"))?;
+                        let cur_is_owner = t.members.get(&target) == Some(&Role::Owner);
+                        if !may("manage_roles", Some(r)) || (cur_is_owner && !is_owner) {
+                            return Err(format!("only an owner of {ts_id} can change roles, or a role with 'manage roles' ranked above the person and the new role"));
+                        }
                         let cur = *t.members.get(&target).ok_or_else(|| format!("{target} isn't a member of {ts_id}"))?;
                         if cur == Role::Owner && r != Role::Owner && Self::owners(t) == 1 {
                             return Err(format!("{ts_id} needs at least one owner: make someone else owner first"));
@@ -503,7 +624,7 @@ impl State {
                         t.members.insert(target, r);
                     }
                     _ => {
-                        if !is_owner && !own_target { return Err(format!("only an owner of {ts_id} can remove someone else")); }
+                        if !own_target && !may("manage_roles", None) { return Err(format!("only an owner of {ts_id}, or a role with 'manage roles' ranked above them, can remove someone else")); }
                         let cur = t.members.get(&target).copied();
                         if cur.is_none() && t.invites.remove(&target).is_some() { return Ok(()); }
                         let cur = cur.ok_or_else(|| format!("{target} isn't in {ts_id}"))?;
@@ -511,6 +632,8 @@ impl State {
                             return Err(format!("{ts_id} needs at least one owner: export it, then make someone else owner before leaving"));
                         }
                         t.members.remove(&target);
+                        // their custom roles go with them
+                        if let Some(sp) = self.spaces.get_mut(&ts_id) { for r in sp.roles.values_mut() { r.holders.remove(&target); } }
                     }
                 }
                 Ok(())
@@ -550,6 +673,103 @@ impl State {
                 if !may { return Err(format!("only {node}'s author or an owner of its teamspace can share it")); }
                 let m = self.shares.entry(node).or_default();
                 match lvl { Some(l) => { m.insert(target, l); } None => { m.remove(&target); } }
+                Ok(())
+            }
+            k if roles::KINDS.contains(&k) => self.apply_role(k, &login, &ts_id, &b),
+            _ => Ok(()),
+        }
+    }
+
+    /// BQ-access-model: role.create, role.edit, role.assign, override.set, agent.allow (see `roles`).
+    fn apply_role(&mut self, kind: &str, login: &str, ts: &str, b: &Value) -> Result<(), String> {
+        if !self.teamspaces.contains_key(ts) { return Err(format!("teamspace {ts} doesn't exist")); }
+        let is_owner = self.role_of(login, ts) == Some(Role::Owner);
+        let mine = self.switches(login, ts);
+        let rank = self.highest(login, ts);
+        if kind == "agent.allow" {
+            if !is_owner { return Err(format!("only an owner of {ts} can let an agent merge high-risk changes or hand on ownership")); }
+            let agent = lc(s(b, "login"));
+            if !roles::is_agent(&agent) { return Err(format!("{agent:?} isn't an agent login (agent:<name>); people's switches come from their roles")); }
+            let p = Perms::parse(b.get("switches"))?;
+            if !roles::agent_limited().contains(p) { return Err("agent.allow takes only merge_high and hand_on; other switches come from roles".into()); }
+            let sp = self.spaces.entry(ts.to_string()).or_default();
+            if p == Perms::NONE { sp.agent_allow.remove(&agent); } else { sp.agent_allow.insert(agent, p); }
+            return Ok(());
+        }
+        if !mine.has("manage_roles") { return Err(format!("managing roles in {ts} needs the 'manage roles' switch")); }
+        let rid = s(b, "role").to_ascii_lowercase();
+        if rid == roles::OWNER { return Err("the Owner role has every switch and can't be changed; hand ownership on with member.role".into()); }
+        // you can't hand out a switch you don't hold (the Owner holds them all)
+        let grantable = |p: Perms| if mine.contains(p) { Ok(()) } else {
+            Err(format!("you can't give switches you don't hold: {}", p.minus(mine).names().join(", ")))
+        };
+        let pos_ok = |p: i64| if (1..=999).contains(&p) && (p as i32) < rank { Ok(p as i32) } else {
+            Err(format!("a role's position is 1-999 and below your own highest ({rank})"))
+        };
+        let sp_now = self.spaces.get(ts).cloned().unwrap_or_default();
+        let existing = sp_now.roles.get(&rid).cloned();
+        if let Some(r) = &existing { if r.position >= rank { return Err(format!("{} is ranked at or above your highest role, so you can't manage it", r.name)); } }
+        match kind {
+            "role.create" => {
+                if !valid_id(&rid) || rid.len() > 40 { return Err("a role id is 1-40 letters, digits or - _ . :".into()); }
+                if existing.is_some() { return Err(format!("role {rid} already exists in {ts}; edit it instead")); }
+                let switches = Perms::parse(b.get("switches"))?;
+                grantable(switches)?;
+                let position = match b.get("position").and_then(Value::as_i64) { Some(p) => pos_ok(p)?, None => (rank - 1).clamp(1, 999) };
+                if position >= rank { return Err(format!("you can only make roles below your own highest ({rank})")); }
+                let name: String = match s(b, "name") { "" => rid.clone(), n => n.chars().take(60).collect() };
+                let hidden = b.get("hidden").and_then(Value::as_bool).unwrap_or(false);
+                self.spaces.entry(ts.to_string()).or_default().roles.insert(rid.clone(), roles::RoleDef { id: rid, name, switches, position, hidden, holders: Default::default() });
+                Ok(())
+            }
+            "role.edit" => {
+                let mut r = existing.ok_or_else(|| format!("role {rid} doesn't exist in {ts}"))?;
+                if let Some(v) = b.get("switches") {
+                    let p = Perms::parse(Some(v))?;
+                    // only the switches that change need to be yours
+                    grantable(Perms(p.0 ^ r.switches.0))?;
+                    r.switches = p;
+                }
+                if let Some(p) = b.get("position").and_then(Value::as_i64) {
+                    if roles::BUILT_IN.contains(&rid.as_str()) { return Err(format!("{}'s place in the order is fixed", r.name)); }
+                    r.position = pos_ok(p)?;
+                }
+                let name = s(b, "name");
+                if !name.is_empty() { r.name = name.chars().take(60).collect(); }
+                if let Some(h) = b.get("hidden").and_then(Value::as_bool) { r.hidden = h; }
+                self.spaces.entry(ts.to_string()).or_default().roles.insert(rid, r);
+                Ok(())
+            }
+            "role.assign" => {
+                let r = existing.ok_or_else(|| format!("role {rid} doesn't exist in {ts}"))?;
+                if roles::BUILT_IN.contains(&rid.as_str()) { return Err(format!("{} comes with membership; change it with member.role", r.name)); }
+                let target = s(b, "profile").to_string();
+                let t = &self.teamspaces[ts];
+                if !t.members.contains_key(&target) { return Err(format!("{target} isn't a member of {ts}; invite them first")); }
+                let own = self.account_of_profile(&target) == Some(self.account_of_login(login));
+                if !is_owner && !own && self.highest_of_profile(&target, ts) >= rank {
+                    return Err(format!("{target} is ranked at or above you in {ts}, so you can't change their roles"));
+                }
+                let on = b.get("on").and_then(Value::as_bool).unwrap_or(true);
+                let holders = &mut self.spaces.get_mut(ts).expect("checked").roles.get_mut(&rid).expect("checked").holders;
+                if on { holders.insert(target); } else { holders.remove(&target); }
+                Ok(())
+            }
+            "override.set" => {
+                if existing.is_none() { return Err(format!("role {rid} doesn't exist in {ts}")); }
+                let target = s(b, "target").to_string();
+                match target.split_once(':') {
+                    Some(("planet", ty)) if valid_id(ty) => {}
+                    Some(("node", n)) if self.item_space.get(n).map(String::as_str) == Some(ts) => {}
+                    Some(("node", n)) => return Err(format!("{n} isn't a node in {ts}")),
+                    _ => return Err("an override's target is planet:<node type> or node:<id>".into()),
+                }
+                let (allow, deny) = (Perms::parse(b.get("allow"))?, Perms::parse(b.get("deny"))?);
+                if allow.0 & deny.0 != 0 { return Err(format!("a switch can't be both allowed and denied: {}", Perms(allow.0 & deny.0).names().join(", "))); }
+                grantable(allow.union(deny))?;
+                let sp = self.spaces.entry(ts.to_string()).or_default();
+                let key = (target, rid);
+                if allow == Perms::NONE && deny == Perms::NONE { sp.overrides.remove(&key); } else { sp.overrides.insert(key, roles::Override { allow, deny }); }
                 Ok(())
             }
             _ => Ok(()),
@@ -811,5 +1031,117 @@ mod tests {
         assert_eq!(st.visible("eve", &lay("nowed", "main")), None);
         assert_eq!(st.layout_space(&lay("nowed", "ts:TS-zz")), None);
         assert_eq!(st.space_of_event(&lay("nowed", "ts:TS-a")).as_deref(), Some("TS-a"));
+    }
+
+    // ---- BQ-access-model (D-access-model) ----
+
+    fn r(who: &str, kind: &str, body: Value) -> Value {
+        let mut b = body; b["teamspace"] = json!("TS-a");
+        ev(who, kind, Some("TS-a"), b)
+    }
+
+    #[test]
+    fn todays_roles_carry_over_as_switches() {
+        let st = world(vec![]);
+        assert_eq!(st.switches("nowed", "TS-a"), Perms::ALL, "owner holds every switch");
+        assert_eq!(st.switches("rad", "TS-a").names(), vec!["read", "comment", "add_nodes", "link_move"]);
+        assert_eq!(st.switches("gus", "TS-a"), Perms::NONE, "guests read only what is shared");
+        assert_eq!(st.switches_at("gus", "TS-a", None, Some("N-shared")).names(), vec!["read", "comment"], "a commenter share");
+        assert_eq!(st.switches("eve", "TS-a"), Perms::NONE, "Everyone has nothing by default (222a)");
+        assert_eq!(st.held("rad", "TS-a"), vec!["everyone", "member"]);
+        assert_eq!(st.highest("nowed", "TS-a"), roles::OWNER_POS);
+    }
+
+    #[test]
+    fn a_role_with_manage_roles_works_only_below_itself() {
+        // nowed makes a Steward role (manage_roles, invite, read, comment) at 50 and gives it to rad
+        let steward = r("nowed", "role.create", json!({"role": "steward", "name": "Steward", "position": 50,
+            "switches": ["read", "comment", "add_nodes", "link_move", "invite", "manage_roles"]}));
+        let give = r("nowed", "role.assign", json!({"role": "steward", "profile": "P-rad"}));
+        let st = world(vec![steward.clone(), give.clone()]);
+        assert!(st.findings.is_empty(), "{:?}", st.findings);
+        assert_eq!(st.highest("rad", "TS-a"), 50);
+        // rad can make a role below 50 with switches he holds, not one at or above, nor with switches he lacks
+        assert_eq!(st.decide(&r("rad", "role.create", json!({"role": "scribe", "position": 30, "switches": ["comment"]}))), Some(Ok(())));
+        assert!(st.decide(&r("rad", "role.create", json!({"role": "boss", "position": 60}))).unwrap().is_err());
+        assert!(st.decide(&r("rad", "role.create", json!({"role": "rich", "position": 30, "switches": ["money"]}))).unwrap().unwrap_err().contains("money"));
+        // he can't edit his own role (not below him) or the Owner
+        assert!(st.decide(&r("rad", "role.edit", json!({"role": "steward", "switches": []}))).unwrap().is_err());
+        assert!(st.decide(&r("rad", "role.edit", json!({"role": "owner", "name": "Boss"}))).unwrap().is_err());
+        // he can rename the built-in Member role (custom names, 222b), but not move it
+        assert_eq!(st.decide(&r("rad", "role.edit", json!({"role": "member", "name": "Crew"}))), Some(Ok(())));
+        assert!(st.decide(&r("rad", "role.edit", json!({"role": "member", "position": 5}))).unwrap().is_err());
+        // with 'invite' he invites members and guests, never owners; with 'manage roles' he changes gus, not nowed
+        assert_eq!(st.decide(&ev("rad", "member.invite", Some("TS-a"), json!({"teamspace": "TS-a", "profile": "P-eve", "role": "guest"}))), Some(Ok(())));
+        assert!(st.decide(&ev("rad", "member.invite", Some("TS-a"), json!({"teamspace": "TS-a", "profile": "P-eve", "role": "owner"}))).unwrap().is_err());
+        assert_eq!(st.decide(&ev("rad", "member.role", Some("TS-a"), json!({"teamspace": "TS-a", "profile": "P-gus", "role": "member"}))), Some(Ok(())));
+        assert!(st.decide(&ev("rad", "member.role", Some("TS-a"), json!({"teamspace": "TS-a", "profile": "P-nowed", "role": "member"}))).unwrap().is_err());
+        assert!(st.decide(&ev("rad", "member.remove", Some("TS-a"), json!({"teamspace": "TS-a", "profile": "P-nowed"}))).unwrap().is_err());
+        // a plain member still can't manage roles at all, and forged role events are ignored and reported
+        assert!(world(vec![]).decide(&r("rad", "role.create", json!({"role": "x"}))).unwrap().unwrap_err().contains("manage roles"));
+        let forged = world(vec![r("rad", "role.create", json!({"role": "x", "switches": ["money"]}))]);
+        assert_eq!(forged.findings.len(), 1);
+        assert!(!forged.spaces["TS-a"].roles.contains_key("x"));
+        // leaving the teamspace takes the custom roles with it
+        let st = world(vec![steward, give, ev("rad", "member.remove", Some("TS-a"), json!({"teamspace": "TS-a", "profile": "P-rad"}))]);
+        assert_eq!(st.switches("rad", "TS-a"), Perms::NONE);
+    }
+
+    #[test]
+    fn overrides_open_a_planet_to_everyone_and_close_a_node_to_a_role() {
+        // Foundry's inbox (222a): Everyone may add inbox nodes but reads nothing else
+        let open = r("nowed", "override.set", json!({"target": "planet:inbox", "role": "everyone", "allow": ["add_nodes"]}));
+        let st = world(vec![open]);
+        let send = |who: &str, ty: &str| ev(who, "item.create", None, json!({"id": "N-x", "type": ty, "title": "t", "teamspace": "TS-a"}));
+        assert_eq!(st.decide(&send("eve", "inbox")), Some(Ok(())), "anyone signed in can send to the inbox");
+        assert!(st.decide(&send("eve", "idea")).unwrap().is_err(), "but not add other nodes");
+        assert_eq!(st.can_read("eve", "N-in"), Some(false));
+        // a tender marked open to Everyone (223b): read and comment on that node only
+        let st = world(vec![r("nowed", "override.set", json!({"target": "node:N-in", "role": "everyone", "allow": ["read", "comment"]}))]);
+        assert_eq!(st.can_read("eve", "N-in"), Some(true));
+        assert_eq!(st.decide(&ev("eve", "comment", Some("N-in"), json!({"text": "bid"}))), Some(Ok(())));
+        assert!(st.decide(&ev("eve", "item.edit", Some("N-in"), json!({"title": "x"}))).unwrap().is_err());
+        assert_eq!(st.visible("eve", &ev("nowed", "canvas.layout", None, json!({"board": "ts:TS-a", "moves": {}}))), Some(false), "the canvas stays closed");
+        // deny on a node for the Member role: members can't change it, the owner still can
+        let st = world(vec![r("nowed", "override.set", json!({"target": "node:N-in", "role": "member", "deny": ["add_nodes"]}))]);
+        assert!(st.decide(&ev("rad", "item.edit", Some("N-in"), json!({"title": "x"}))).unwrap().unwrap_err().contains("don't allow changes"));
+        assert_eq!(st.decide(&ev("rad", "comment", Some("N-in"), json!({"text": "ok"}))), Some(Ok(())));
+        assert_eq!(st.decide(&ev("nowed", "item.edit", Some("N-in"), json!({"title": "x"}))), Some(Ok(())));
+        // bad targets and contradictions are refused; an empty override is removed
+        assert!(world(vec![]).decide(&r("nowed", "override.set", json!({"target": "node:D-001", "role": "member", "deny": ["read"]}))).unwrap().is_err());
+        assert!(world(vec![]).decide(&r("nowed", "override.set", json!({"target": "planet:idea", "role": "member", "allow": ["read"], "deny": ["read"]}))).unwrap().is_err());
+        let st = world(vec![r("nowed", "override.set", json!({"target": "node:N-in", "role": "member", "deny": ["add_nodes"]})),
+                            r("nowed", "override.set", json!({"target": "node:N-in", "role": "member"}))]);
+        assert!(st.spaces["TS-a"].overrides.is_empty());
+    }
+
+    #[test]
+    fn a_hidden_role_is_seen_only_by_those_who_manage_roles() {
+        let mk = r("nowed", "role.create", json!({"role": "auditor", "name": "Auditor", "hidden": true, "switches": ["read"]}));
+        let st = world(vec![mk.clone(), r("nowed", "role.assign", json!({"role": "auditor", "profile": "P-gus"}))]);
+        assert_eq!(st.visible("rad", &mk), Some(false));
+        assert_eq!(st.visible("nowed", &mk), Some(true));
+        assert!(!st.access_view("rad", "TS-a").to_string().contains("auditor"));
+        assert!(st.access_view("nowed", "TS-a").to_string().contains("auditor"));
+        // the hidden role still works: gus now reads every node
+        assert_eq!(st.can_read("gus", "N-in"), Some(true));
+    }
+
+    #[test]
+    fn agents_need_an_owner_to_merge_high_risk_or_hand_on() {
+        let mut st = world(vec![r("nowed", "role.create", json!({"role": "builder", "switches": ["read", "merge_low", "merge_high"]}))]);
+        // give the role to an agent account directly (agent sign-in arrives with BQ-sign-in-switch)
+        let t = st.teamspaces.get_mut("TS-a").unwrap();
+        t.members.insert("P-agent:sam".into(), Role::Member);
+        st.spaces.get_mut("TS-a").unwrap().roles.get_mut("builder").unwrap().holders.insert("P-agent:sam".into());
+        let p = st.switches("agent:sam", "TS-a");
+        assert!(p.has("merge_low") && !p.has("merge_high"), "{:?}", p.names());
+        let allow = r("nowed", "agent.allow", json!({"login": "agent:sam", "switches": ["merge_high"]}));
+        assert_eq!(st.decide(&allow), Some(Ok(())));
+        assert!(st.decide(&r("rad", "agent.allow", json!({"login": "agent:sam", "switches": ["merge_high"]}))).unwrap().is_err());
+        assert!(st.decide(&r("nowed", "agent.allow", json!({"login": "rad", "switches": ["merge_high"]}))).unwrap().is_err(), "people aren't agents");
+        assert!(st.decide(&r("nowed", "agent.allow", json!({"login": "agent:sam", "switches": ["money"]}))).unwrap().is_err());
+        st.observe("dx", &allow);
+        assert!(st.switches("agent:sam", "TS-a").has("merge_high"));
     }
 }

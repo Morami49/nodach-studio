@@ -36,12 +36,14 @@
 //!                            x-nodach-profile: <id> (B-profile-windows) names the window's profile; one that isn't an
 //!                            active profile of the signed-in account is refused 403 {profile_mismatch: true} on every
 //!                            POST /studio/api/* route and logged as outcome "profile mismatch".
-//! GET  /studio/api/teamspaces → {teamspaces:[{id,label,role,invited,members,invites,support_log?}], others:[{id,label,
+//! GET  /studio/api/teamspaces → {teamspaces:[{id,label,role,invited,members,invites,support_log?,access?}], others:[{id,label,
 //!                            support_until}]}: the ones you're in or invited to (BQ-1 step 2); owners of a teamspace get
 //!                            its support access log; a hub owner gets the other teamspaces by id and name only (114b a).
 //!                            The hub owner reads inside those only through support.access {teamspace, reason}: logged,
 //!                            shown to that teamspace's owners, open for 24 hours. Writes that break a teamspace rule (hub_core::teamspaces) are refused 403
 //!                            {teamspace_refused: true} with the rule in words and logged as outcome "refused: teamspace".
+//!                            BQ-access-model: `access` is {switches, rank, held, roles, all_switches, overrides?, agent_allow?}
+//!                            (hub_core::roles): your switches there, the roles you may see and, if you manage roles, overrides.
 //! GET  /studio/api/usage → this month's meters for your profiles (the window's first) and teamspaces, the free limits
 //!                            and the limits node (BQ-1 step 3, hub_core::usage). At 100% of a limit AI calls and flow runs
 //!                            are refused with "Monthly free limit reached; a top-up will be available soon", logged as
