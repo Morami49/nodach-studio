@@ -30,6 +30,7 @@ pub mod access;
 pub mod digest;
 pub mod authorship;
 pub mod teamspaces;
+pub mod roles;
 pub mod usage;
 
 pub const IMPORT_KIND: &str = "studio.event";
