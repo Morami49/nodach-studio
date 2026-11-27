@@ -15,6 +15,12 @@ name: hub-deploy
 # POLICY_HUB_DEPLOY is the fallback): auto = deploy after green CI on main · ask = only when a person starts it
 # (Actions → hub-deploy → Run workflow, optionally with a commit to roll back to) · off = never. Every run is
 # recorded in Studio (RUNS-hub-deploy) with the build it replaced, so undo is one dispatch.
+# Guarded auto (B-deploy-guarded-auto, Nowed 23 Nov): auto stays the default for ordinary merges, but a merged PR
+# labelled HIGH RISK, or touching money, access/authorship/teamspaces, design/ or workflows, switches that deploy to
+# ask (scripts/policy.py deploy-guard): it waits for Nowed's Run workflow and an urgent notice with the run link goes
+# to his My queue. After every deploy scripts/smoke_hub.py runs; if it fails, the recorded `replaced` build is
+# redeployed automatically (scripts/hub_rollback.py) and an urgent notice goes to My queue. Every deploy posts a short
+# notice to RUNS-hub-deploy with its undo command.
 on:
   workflow_run:
     workflows: [ci]
@@ -26,11 +32,15 @@ on:
         description: "commit to deploy (blank = latest main); use a recorded 'replaced' build to roll back"
         required: false
 permissions: {contents: read}
+# one production deploy (or rollback) at a time; a queued run waits, it is never cancelled
+concurrency: {group: hub-deploy, cancel-in-progress: false}
 jobs:
   deploy:
     # B1 d (public repo): only runs of this repository's own pushes, never a fork's pull request, may use secrets
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    # pull-requests: read lets the guard read the merged PR's labels and files; nothing here writes to GitHub
+    permissions: {contents: read, pull-requests: read}
     defaults: {run: {working-directory: hub}}
     env:
       SHA: ${{ inputs.sha || github.event.workflow_run.head_sha || github.sha }}
@@ -45,7 +55,8 @@ jobs:
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "Cloudflare not set up yet (Q57): skipping."; echo "go=no" >> "$GITHUB_OUTPUT"; else echo "go=yes" >> "$GITHUB_OUTPUT"; fi
       - if: steps.ready.outputs.go == 'yes'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: {ref: "${{ env.SHA }}"}
+        # full history: a rollback redeploys the recorded `replaced` build from its own commit
+        with: {ref: "${{ env.SHA }}", fetch-depth: 0}
       - if: steps.ready.outputs.go == 'yes'
         name: Resolve the deploy policy (Studio first, D-139)
         id: pol
@@ -53,16 +64,30 @@ jobs:
         env: {HUB_TOKEN: "${{ secrets.HUB_WRITE_TOKEN }}", PLATFORM: "${{ vars.POLICY_HUB_DEPLOY }}"}
         run: python3 scripts/policy.py SET-policy-hub-deploy --platform "$PLATFORM" --default auto
       - if: steps.ready.outputs.go == 'yes'
-        name: Decide
+        name: Decide (guarded auto)
         id: go
         working-directory: .
-        env: {EFFECTIVE: "${{ steps.pol.outputs.effective }}"}
+        env: {EFFECTIVE: "${{ steps.pol.outputs.effective }}", GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}", R: "${{ github.repository }}"}
         run: |
           prev=$(curl -fsS "$HUB_URL/health" 2>/dev/null | awk '{print $2}')
           echo "prev=${prev:-unknown}" >> "$GITHUB_OUTPUT"
-          if [ "$EFFECTIVE" = off ]; then echo "run=no" >> "$GITHUB_OUTPUT"; echo "Deploy policy is off: nothing deployed." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$GITHUB_EVENT_NAME" = workflow_run ] && [ "$EFFECTIVE" != auto ]; then echo "run=no" >> "$GITHUB_OUTPUT"; echo "Deploy policy is $EFFECTIVE: start it by hand to deploy." >> "$GITHUB_STEP_SUMMARY"
-          else echo "run=yes" >> "$GITHUB_OUTPUT"; fi
+          python3 scripts/policy.py deploy-guard --policy "$EFFECTIVE" --event "$GITHUB_EVENT_NAME" --sha "$SHA" --repo "$R"
+      - if: steps.go.outputs.mode == 'ask' && github.event_name == 'workflow_run'
+        name: Ask Nowed (urgent notice in My queue)
+        working-directory: .
+        env:
+          HUB_TOKEN: ${{ secrets.HUB_WRITE_TOKEN }}
+          REASONS: ${{ steps.go.outputs.reasons }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          APPROVE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/hub-deploy.yml
+          PREV: ${{ steps.go.outputs.prev }}
+        run: |
+          echo "Waiting for Nowed: $REASONS. Approve at $APPROVE_URL (Run workflow)." >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/hub_rollback.py notice ask --sha "$SHA" --reasons "$REASONS" --run-url "$RUN_URL" --approve-url "$APPROVE_URL"
+          short=$(echo "$SHA" | cut -c1-7)
+          RUN_SHA="$SHA" python3 scripts/run_record.py hub-deploy --title "Hub deploys" --outcome waiting \
+            --text "Waiting for Nowed: $short not deployed ($REASONS). Production stays on $PREV." --policy "guarded auto: ask" \
+            --undo "Nothing to undo: nothing was deployed. To deploy: Actions → hub-deploy → Run workflow." --field "build=$short" --field "live=$PREV"
       - if: steps.go.outputs.run == 'yes'
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with: {toolchain: stable, targets: wasm32-unknown-unknown}
@@ -141,6 +166,26 @@ jobs:
           rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"hub_log","arguments":{"limit":3}}}' | grep -q '"tool":"hub_log"'
           curl -fsS "$URL/health" | grep -q "ok $(echo "$SHA" | cut -c1-7)"
           echo "connector smoke test passed"
+      - if: always() && steps.go.outputs.run == 'yes' && steps.deploy.outcome == 'success'
+        name: Smoke-test production (scripts/smoke_hub.py)
+        id: smoke
+        working-directory: .
+        env: {URL: "${{ steps.deploy.outputs.url || env.HUB_URL }}"}
+        run: python3 scripts/smoke_hub.py --url "$URL" --build "$(echo "$SHA" | cut -c1-7)"
+      - if: always() && steps.smoke.outcome == 'failure'
+        name: Roll back to the replaced build (the smoke test failed)
+        id: rollback
+        working-directory: .
+        env:
+          PREV: ${{ steps.go.outputs.prev }}
+          URL: ${{ steps.deploy.outputs.url || env.HUB_URL }}
+          HUB_TOKEN: ${{ secrets.HUB_WRITE_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          short=$(echo "$SHA" | cut -c1-7)
+          r=$(python3 scripts/hub_rollback.py rollback --prev "$PREV" --build "$short" --url "$URL" | tee /dev/stderr | sed -n 's/^rollback: \([a-z-]*\).*/\1/p')
+          python3 scripts/hub_rollback.py notice rollback --sha "$SHA" --prev "$PREV" --result "${r:-failed}" --run-url "$RUN_URL"
+          echo "Rollback after a failed deploy of $short: ${r:-failed} (replaced build $PREV)." >> "$GITHUB_STEP_SUMMARY"
       - name: Record the run in Studio (P-13)
         if: always() && steps.go.outputs.run == 'yes'
         working-directory: .
@@ -149,11 +194,14 @@ jobs:
           STATUS: ${{ job.status }}
           POLICY: ${{ steps.pol.outputs.effective }}
           PREV: ${{ steps.go.outputs.prev }}
+          MODE: ${{ steps.go.outputs.mode }}
+          ROLLBACK: ${{ steps.rollback.outputs.result }}
         run: |
           now=$(curl -fsS "$HUB_URL/health" 2>/dev/null | awk '{print $2}')
           short=$(echo "$SHA" | cut -c1-7)
-          if [ "$STATUS" = success ]; then text="Deployed $short (replaced $PREV); health ok, connector smoke test passed."; outcome=success
-          else text="Deploy of $short $STATUS; the hub now answers ${now:-nothing} (was $PREV)."; outcome=failure; fi
+          undo="gh workflow run hub-deploy.yml --repo $GITHUB_REPOSITORY --ref main -f sha=$PREV"
+          if [ "$STATUS" = success ]; then text="Deployed $short ($MODE, replaced $PREV); smoke test passed. Undo: $undo"; outcome=success
+          else text="Deploy of $short $STATUS; rollback: ${ROLLBACK:-not tried}; the hub now answers ${now:-nothing} (was $PREV). Undo: $undo"; outcome=failure; fi
           RUN_SHA="$SHA" python3 scripts/run_record.py hub-deploy --title "Hub deploys" --outcome "$outcome" --text "$text" \
-            --policy "$POLICY" --undo "Roll back: Actions → hub-deploy → Run workflow with sha = $PREV" \
-            --field "build=$short" --field "replaced=$PREV" --field "live=${now:-unknown}"
+            --policy "$POLICY · $MODE" --undo "$undo (or Actions → hub-deploy → Run workflow with sha = $PREV)" \
+            --field "build=$short" --field "replaced=$PREV" --field "live=${now:-unknown}" --field "mode=$MODE" --field "rollback=${ROLLBACK:-none}"

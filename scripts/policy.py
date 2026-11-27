@@ -13,10 +13,22 @@ to $GITHUB_OUTPUT when set, and a line to $GITHUB_STEP_SUMMARY.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
+import subprocess
 import sys
 import urllib.request
+
+# B-deploy-guarded-auto (Nowed, 23 Nov: keep production on auto, refined for its trade-offs). A merged PR labelled
+# HIGH RISK, or touching any of these, turns an auto deploy into ask: it waits for Nowed's Run workflow.
+HIGH_RISK_LABEL = "HIGH RISK"
+GUARDED = [
+    ("money", ["*money*", "*stripe*"]),
+    ("access, authorship or teamspaces", ["*access*", "*authorship*", "*teamspace*"]),
+    ("design/", ["design/*", "design/**"]),
+    ("workflows", [".github/workflows/*", ".github/workflows/**"]),
+]
 
 
 def fold(docs: list[dict], key: str):
@@ -78,7 +90,84 @@ def resolve(studio, platform: str, default: str) -> dict:
     return {"effective": effective, "studio": studio or "unknown", "platform": platform or "unset", "drift": "yes" if drift else "no"}
 
 
+def guarded_reasons(labels: list[str], files: list[str]) -> list[str]:
+    """Why a merged change must wait for Nowed (empty: an ordinary merge). Paths are matched case-insensitively on
+    the whole path, so hub-core/src/money.rs, studio/tests/teamspaces.py and .github/workflows/x.yml all count."""
+    why = []
+    if any((l or "").strip().upper() == HIGH_RISK_LABEL for l in labels):
+        why.append(f"labelled {HIGH_RISK_LABEL}")
+    for area, globs in GUARDED:
+        hit = sorted({f for f in files if f and any(fnmatch.fnmatch(f.lower(), g) for g in globs)})
+        if hit:
+            why.append(f"touches {area}: " + ", ".join(hit[:5]) + (f" (+{len(hit) - 5} more)" if len(hit) > 5 else ""))
+    return why
+
+
+def deploy_mode(policy: str, event: str, labels: list[str], files: list[str], known: bool = True) -> dict:
+    """The production deploy decision for one run.
+
+    policy: the effective SET-policy-hub-deploy (auto | ask | off). event: workflow_run (CI passed on main) or
+    workflow_dispatch (a person pressed Run workflow: that is the approval). known: whether the merged PR's labels
+    and files could be read; when they can't, auto falls back to ask (when in doubt, ask).
+    Returns {"run": bool, "mode": "auto"|"ask"|"off"|"manual", "reasons": [...]}.
+    """
+    if policy == "off":
+        return {"run": False, "mode": "off", "reasons": ["the deploy policy is off"]}
+    if event == "workflow_dispatch":
+        return {"run": True, "mode": "manual", "reasons": ["started by hand (Run workflow)"]}
+    if policy != "auto":
+        return {"run": False, "mode": "ask", "reasons": [f"the deploy policy is {policy}"]}
+    why = guarded_reasons(labels, files) if known else ["the merged PR's labels and files couldn't be read"]
+    if why:
+        return {"run": False, "mode": "ask", "reasons": why}
+    return {"run": True, "mode": "auto", "reasons": ["an ordinary merge: auto"]}
+
+
+def merged_change(repo: str, sha: str, gh=None) -> tuple[list[str], list[str], int | None, bool]:
+    """(labels, files, PR number, known) for the commit main was deployed at, read with the gh CLI."""
+    gh = gh or (lambda *a: subprocess.run(["gh", "api", *a], capture_output=True, text=True, check=True).stdout)
+    try:
+        prs = json.loads(gh(f"repos/{repo}/commits/{sha}/pulls"))
+        pr = next((p for p in prs if p.get("merged_at") and (p.get("base") or {}).get("ref") == "main"), None)
+        if pr is None:
+            files = gh(f"repos/{repo}/commits/{sha}", "--jq", ".files[].filename").split()
+            return [], files, None, True
+        labels = [l.get("name", "") for l in pr.get("labels") or []]
+        files = gh(f"repos/{repo}/pulls/{pr['number']}/files", "--paginate", "--jq", ".[].filename").split()
+        return labels, files, pr["number"], True
+    except Exception as e:  # unreadable: the caller asks rather than guesses
+        print(f"could not read the merged change: {type(e).__name__}")
+        return [], [], None, False
+
+
+def main_deploy_guard(argv) -> int:
+    """python3 scripts/policy.py deploy-guard --policy auto --event workflow_run --sha <sha> --repo owner/name"""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--policy", required=True)
+    ap.add_argument("--event", required=True)
+    ap.add_argument("--sha", required=True)
+    ap.add_argument("--repo", required=True)
+    a = ap.parse_args(argv)
+    labels, files, pr, known = ([], [], None, True)
+    if a.event != "workflow_dispatch" and a.policy == "auto":
+        labels, files, pr, known = merged_change(a.repo, a.sha)
+    d = deploy_mode(a.policy, a.event, labels, files, known)
+    line = (f"Deploy decision: **{d['mode']}**" + (f" (PR #{pr})" if pr else "") + " — " + "; ".join(d["reasons"]))
+    print(line)
+    out = {"run": "yes" if d["run"] else "no", "mode": d["mode"], "reasons": "; ".join(d["reasons"])[:900], "pr": pr or ""}
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.writelines(f"{k}={v}\n" for k, v in out.items())
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write(line + "\n\n")
+    return 0
+
+
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["deploy-guard"]:
+        return main_deploy_guard(argv[1:])
     ap = argparse.ArgumentParser()
     ap.add_argument("key")
     ap.add_argument("--platform", default="")
