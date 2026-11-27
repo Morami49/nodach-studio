@@ -2617,7 +2617,7 @@ function worldOpen(id){
     ?.querySelector("input:not([disabled]),select:not([disabled]),button:not([disabled])")?.focus({preventScroll:true}), 150);
 }
 const ctlTyped = (id, dflt) => S.ctlTyped[id] ?? dflt ?? "";
-const ctlIn = (id, ph, o = {}) => `<input id="${esc(id)}" aria-label="${esc(o.label || ph)}" placeholder="${esc(ph)}" maxlength="${o.max || 200}" value="${esc(ctlTyped(id))}"${o.dis ? " disabled" : ""}${o.mono ? ' class="mono"' : ""}>`;
+const ctlIn = (id, ph, o = {}) => `<input id="${esc(id)}" aria-label="${esc(o.label || ph)}" placeholder="${esc(ph)}" maxlength="${o.max || 200}" value="${esc(ctlTyped(id, o.val))}"${o.dis ? " disabled" : ""}${o.mono ? ' class="mono"' : ""}>`;
 const ctlSel = (id, vals, dflt, label) => `<select id="${esc(id)}" aria-label="${esc(label)}">${vals.map(v => { const [k, l] = Array.isArray(v) ? v : [v, v];
   return `<option value="${esc(k)}"${k === ctlTyped(id, dflt) ? " selected" : ""}>${esc(l)}</option>`; }).join("")}</select>`;
 const ctlNoteHtml = id => `<span class="mute" role="status" data-note>${esc(S.ctlNote[id] || "")}</span>`;
@@ -2723,11 +2723,11 @@ function roleBody(s, rid){
     : rid === "member" || rid === "guest" ? "Comes with membership: change who holds it on the Members planet."
     : rid === "everyone" ? "The base everyone starts from (no switches unless you add some)." : "";
   const ovs = [...t.overrides.values()].filter(o => o.role === rid);
-  const people = [...t.members.keys()].filter(p => !r.holders.has(p) && (isOwner || T.acctOf(p) === me || T.rankOfProfile(p, t.id) < rank));
+  const people = [...t.members.keys()].filter(p => !r.holders.has(p) && t.members.get(p) !== "owner" && (isOwner || T.acctOf(p) === me || T.rankOfProfile(p, t.id) < rank));
   return `<p>${esc(r.name)} · place <b>${r.position}</b> in the order${r.hidden ? " · hidden: only people who manage roles see it" : ""}. ${who}${how ? " " + esc(how) : ""}</p>
     <fieldset style="border:0;padding:0;margin:4px 0" aria-label="Switches of ${esc(r.name)}"><legend class="mute" style="font-size:12px">Switches</legend>
       ${SWITCHES.map(sw => swBox(k + sw, sw, r.switches.has(sw), !edit || !mine.has(sw))).join("")}</fieldset>
-    ${edit ? `<div class="row">${ctlIn(k + "name", "Name", {max:60, label:"Role name"})}${custom ? ctlIn(k + "pos", "Place 1-" + (rank - 1), {max:3, label:"Place in the order"}) : ""}</div>
+    ${edit ? `<div class="row">${ctlIn(k + "name", "Name", {max:60, label:"Role name", val:r.name})}${custom ? ctlIn(k + "pos", "Place 1-" + (rank - 1), {max:3, label:"Place in the order", val:String(r.position)}) : ""}</div>
       <label style="font-size:13px"><input type="checkbox" id="${esc(k + "hidden")}"${ctlTyped(k + "hidden", r.hidden ? "1" : "0") === "1" ? " checked" : ""}> Hidden: only people who manage roles see this role and who holds it</label>
       <div class="row"><button class="primary" data-act="rolesave" data-role="${esc(rid)}">Save role</button></div>`
       : `<p class="mute">${rid === "owner" ? "" : mine.has("manage_roles") ? "This role is ranked at or above your own highest, so you can't change it." : "Only people with Manage roles change roles."}</p>`}
