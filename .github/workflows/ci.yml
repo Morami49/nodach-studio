@@ -28,6 +28,7 @@ jobs:
         with: {python-version: "3.12"}
       - run: pip install -r requirements.txt
       - run: python -m tests.test_core
+      - run: pip install jsonschema pillow && python pointer/test_pointer.py   # desktop pointer (F-pointer-webview), runs off Windows
   scripts:
     runs-on: ubuntu-latest
     steps:
