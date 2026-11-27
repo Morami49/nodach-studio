@@ -13,7 +13,7 @@
 //!   member.remove    {teamspace, profile}             an owner removes anyone, a person removes (leaves) themselves
 //!   node.share       {node, profile | teamspace, level}   level viewer | commenter | editor | none (unshare)
 //! A node is in a teamspace when its `item.create` says `teamspace: <id>`; that is a link, not part of its id
-//! (D-nodach-ids). Each teamspace's money rules are a node in it (type setting, meta.money_rules); no payments yet.
+//! (D-nodach-ids). Each teamspace's money rules are a node in it (type setting, meta.money_rules); its ledger is hub_core::money (BQ-1 step 4).
 //!
 //! Why new kinds and not access.grant / profile.assign: access.grant is the hub owner's grant to a sign-in by item id
 //! prefix (one owner, no roles), access.invite is a sign-in invitation by email hash, and profile.assign moves an
@@ -260,6 +260,8 @@ impl State {
             return self.item_space.get(&node_of(ev)).cloned();
         }
         if KINDS.contains(&kind) { return Some(teamspace_of(ev)).filter(|t| !t.is_empty()); }
+        // BQ-1 step 4: a money event belongs to its teamspace (so support access can open it for reading)
+        if crate::money::is_money_kind(kind) { return Some(crate::money::teamspace_of(ev)).filter(|t| self.teamspaces.contains_key(t)); }
         let n = subject(ev)?;
         self.item_space.get(&n).cloned()
     }
@@ -372,6 +374,8 @@ impl State {
     /// May `login` see this event? None when teamspaces have nothing to say about it.
     pub fn visible(&self, login: &str, ev: &Value) -> Option<bool> {
         let kind = s(ev, "kind");
+        // BQ-1 step 4: a teamspace's money is read by its members and owners only
+        if crate::money::is_money_kind(kind) { return Some(crate::money::visible(self, login, ev)); }
         if kind == "node.share" {
             let b = ev.get("body").cloned().unwrap_or(Value::Null);
             let node = node_of(ev);
@@ -404,6 +408,8 @@ impl State {
     /// that its author had no right to make.
     pub fn decide(&self, ev: &Value) -> Option<Result<(), String>> {
         let kind = s(ev, "kind");
+        // BQ-1 step 4: invoices need member rights, money settings owner rights; payments and fees come from the hub only
+        if let Some(v) = crate::money::decide(self, ev) { return Some(v); }
         if KINDS.contains(&kind) { return Some(self.check(ev)); }
         let Some(login) = author_login(ev) else {
             // not a GitHub author: only refuse when it touches a teamspace node or a teamspace canvas

@@ -40,6 +40,7 @@ jobs:
       - run: python scripts/test_smoke_hub.py
       - run: python scripts/test_change_intake.py
       - run: python scripts/test_check_no_seed_making.py
+      - run: python scripts/test_money_check.py
       - run: python scripts/test_check_reliability.py
       - run: python scripts/test_risk_class.py
       - run: python scripts/test_should_automerge.py
