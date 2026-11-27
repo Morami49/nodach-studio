@@ -6,8 +6,10 @@ name: hub-staging
 # Staging train (F-staging-one-branch, 19 Nov): staging used to show one branch at a time, so parallel chats overwrote
 # each other. Each deploy now builds, in the runner only, origin/main plus every open non-draft PR branch of this
 # repository (never a fork) whose required checks passed on its head SHA, oldest PR first, plus the branch that
-# triggered the run (scripts/staging_train.py). A branch that conflicts is left out and its PR gets one comment saying
-# with what. The included PRs and SHAs go to the run summary and to the "staging-train" artifact, which automerge
+# triggered the run (scripts/staging_train.py). A draft PR labelled "try" rides the train too (F-staging-train-drafts).
+# Each run compares its train with the previous run's "staging-train" artifact and comments once on every open PR that
+# dropped out, saying why, so nothing Nowed is trying vanishes from staging silently. A branch that conflicts is left
+# out and its PR gets one comment saying with what. The included PRs and SHAs go to the run summary and to the "staging-train" artifact, which automerge
 # reads to know which heads were staged. Nothing is pushed: the merged tree exists only in the runner.
 # Escape hatch: Actions -> hub-staging -> Run workflow with single = true deploys one branch/commit alone (old mode).
 #
@@ -42,7 +44,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     # read-only token: this job builds branch code, so it may list PRs and checks but never write
-    permissions: {contents: read, pull-requests: read, checks: read}
+    permissions: {contents: read, pull-requests: read, checks: read, actions: read}
     defaults: {run: {working-directory: hub}}
     outputs:
       left_out: ${{ steps.train.outputs.left_out }}
@@ -75,20 +77,25 @@ jobs:
           gh api "repos/$R/pulls?state=open&base=main&per_page=100" --paginate --jq '.[]' | jq -s . > "$T/prs.json"
           echo '{}' > "$T/checks.json"
           if [ "$SINGLE" != true ]; then
-            for sha in $(jq -r '.[] | select(.head.repo.full_name == env.R and .draft == false) | .head.sha' "$T/prs.json") "$SHA"; do
+            for sha in $(jq -r '.[] | select(.head.repo.full_name == env.R and (.draft == false or any(.labels[]?; .name == "try"))) | .head.sha' "$T/prs.json") "$SHA"; do
               runs=$(gh api "repos/$R/commits/$sha/check-runs?per_page=100" --jq '[.check_runs[] | {name, conclusion}]') || runs='[]'
               jq --arg s "$sha" --argjson r "$runs" '.[$s] = $r' "$T/checks.json" > "$T/c.tmp" && mv "$T/c.tmp" "$T/checks.json"
             done
           fi
           git cat-file -e "$SHA^{commit}" 2>/dev/null || git fetch -q origin "$SHA"
-          args=(--repo "$R" --base origin/main --prs "$T/prs.json" --checks "$T/checks.json" --trigger-branch "$BRANCH" --trigger-sha "$SHA" --out "$T/train.json")
+          # the previous deploy's train, to name PRs that dropped out (best effort: none on the first run or if expired)
+          prev_url=$(gh api "repos/$R/actions/artifacts?name=staging-train&per_page=10" --jq '[.artifacts[] | select(.expired == false)][0].archive_download_url // empty' 2>/dev/null) || prev_url=""
+          if [ -n "$prev_url" ] && gh api "$prev_url" > "$T/prev.zip" 2>/dev/null; then
+            mkdir -p "$T/prev" && unzip -o -q "$T/prev.zip" -d "$T/prev" 2>/dev/null || true
+          fi
+          args=(--repo "$R" --base origin/main --prs "$T/prs.json" --checks "$T/checks.json" --trigger-branch "$BRANCH" --trigger-sha "$SHA" --out "$T/train.json" --prev "$T/prev/train.json")
           [ "$SINGLE" = true ] && args+=(--single)
           python3 "$T/staging_train.py" "${args[@]}" > /dev/null
           head=$(jq -r .head "$T/train.json")
           git checkout -q --detach "$head"
           echo "DEPLOY_SHA=$head" >> "$GITHUB_ENV"
           echo "TRAIN_NOTE=$(jq -r '"\(.mode): " + ([.included[] | (if .pr then "#\(.pr) " else "" end) + .branch + "@" + .sha[0:7]] | join(", ") | if . == "" then "main only" else . end) + (if (.left_out | length) > 0 then "; left out: " + ([.left_out[] | .branch + " (" + .why + ")"] | join(", ")) else "" end)' "$T/train.json")" >> "$GITHUB_ENV"
-          echo "left_out=$(jq -c '[.left_out[] | select(.pr != null and .comment != null) | {pr, comment}]' "$T/train.json")" >> "$GITHUB_OUTPUT"
+          echo "left_out=$(jq -c '[(.left_out[], (.dropped_out // [])[]) | select(.pr != null and .comment != null) | {pr, comment}]' "$T/train.json")" >> "$GITHUB_OUTPUT"
           {
             echo "## Staging $(jq -r .mode "$T/train.json"): $(echo "$head" | cut -c1-7)"
             echo; echo "| PR | branch | head SHA |"; echo "|---|---|---|"
@@ -96,6 +103,10 @@ jobs:
             if [ "$(jq '.left_out | length' "$T/train.json")" != 0 ]; then
               echo; echo "### Left out"
               jq -r '.left_out[] | "- \(if .pr then "#\(.pr) " else "" end)\(.branch) `\(.sha[0:7])`: \(.why)\(if (.conflicts_with | length) > 0 then " with " + (.conflicts_with | join(", ")) else "" end)"' "$T/train.json"
+            fi
+            if [ "$(jq '.dropped_out // [] | length' "$T/train.json")" != 0 ]; then
+              echo; echo "### Dropped out since the previous deploy"
+              jq -r '.dropped_out[] | "- #\(.pr) \(.branch): \(.why)"' "$T/train.json"
             fi
             if [ "$(jq '.not_candidates // [] | length' "$T/train.json")" != 0 ]; then
               echo; echo "### Not candidates"
@@ -177,7 +188,7 @@ jobs:
             --policy auto --undo "Nothing to undo: staging has its own test record; production only changes from main." \
             --field "build=$short" --field "branch=$BRANCH" || echo "could not record the run (hub unreachable or no token)"
   notify-left-out:
-    # one comment per left-out PR, never repeated; runs no branch code, so it alone may write to PRs
+    # one comment per left-out or dropped-out PR, never repeated; runs no branch code, so it alone may write to PRs
     needs: staging
     if: always() && needs.staging.outputs.left_out != '' && needs.staging.outputs.left_out != '[]'
     runs-on: ubuntu-latest

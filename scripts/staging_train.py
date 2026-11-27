@@ -1,17 +1,20 @@
 """F-staging-one-branch: build the staging "train", so parallel chats stop overwriting each other on staging.
 
 The train starts from main and merges in, oldest first, every open non-draft PR from this repository (never a fork)
-whose required checks passed on its head SHA, plus the branch that triggered the deploy if its checks passed. A
+whose required checks passed on its head SHA, plus the branch that triggered the deploy if its checks passed. A draft
+PR labelled "try" is included too (F-staging-train-drafts, 20 Nov: a draft Nowed was trying fell off staging). A
 branch that conflicts is left out, and the PR gets one comment naming what it conflicts with. Merges are made with
 `git merge-tree --write-tree` and `git commit-tree`, so no working tree is touched until the caller checks out the
 result; nothing is pushed anywhere.
 
     python3 scripts/staging_train.py --repo R --base origin/main --prs prs.json --checks checks.json \
-        --trigger-branch B --trigger-sha S --out train.json [--single]
+        --trigger-branch B --trigger-sha S --out train.json [--single] [--prev previous-train.json]
 
 prs.json: the GitHub "list pull requests" array. checks.json: {sha: [{"name", "conclusion"}, ...]}.
 train.json: {"mode", "base", "head", "included": [{pr, branch, sha}], "left_out": [{pr, branch, sha, why,
-conflicts_with, comment}]}. The caller deploys "head".
+conflicts_with, comment}], "dropped_out": [{pr, branch, why, comment}]}. The caller deploys "head".
+dropped_out lists PRs that the previous deploy (--prev, its train.json) included but this one doesn't, while still
+open, so the caller can comment on each one instead of a PR silently vanishing from staging.
 """
 from __future__ import annotations
 
@@ -33,6 +36,13 @@ def git(cwd: str, *args: str, check: bool = True) -> subprocess.CompletedProcess
                           env={**os.environ, **IDENTITY})
 
 
+TRY_LABEL = "try"
+
+
+def _labels(p: dict) -> set[str]:
+    return {(x.get("name") if isinstance(x, dict) else x) for x in (p.get("labels") or [])}
+
+
 def conflict_comment(conflicts_with: list[str]) -> str:
     return "left out of the staging train: conflicts with " + ", ".join(conflicts_with)
 
@@ -51,7 +61,7 @@ def candidates(prs: list[dict], checks: dict, repo: str, trigger_branch: str = "
             skipped.append({**entry, "why": "from a fork"})
             continue
         is_trigger = branch == trigger_branch
-        if p.get("draft") and not is_trigger:
+        if p.get("draft") and not is_trigger and TRY_LABEL not in _labels(p):
             skipped.append({**entry, "why": "draft"})
             continue
         missing = [c for c in REQUIRED if c not in passed_checks(checks.get(sha, []))]
@@ -113,6 +123,34 @@ def build(cwd: str, base: str, cands: list[dict], base_name: str = "main") -> di
     return {"mode": "train", "base": base_sha, "head": cur, "included": included, "left_out": left_out}
 
 
+def dropped_out(prev: dict | None, train: dict, prs: list[dict]) -> list[dict]:
+    """PRs the previous deploy included that this one doesn't, while they are still open (one comment each)."""
+    if not prev or prev.get("mode") != "train" or train.get("mode") != "train":
+        return []
+    now = {e.get("pr") for e in train.get("included", []) if e.get("pr")}
+    open_prs = {p.get("number") for p in prs if p.get("state", "open") == "open"}
+    why = {}
+    for e in train.get("left_out", []) + train.get("not_candidates", []):
+        if e.get("pr"):
+            w = e.get("why", "")
+            if e.get("conflicts_with"):
+                w += " with " + ", ".join(e["conflicts_with"])
+            why[e["pr"]] = w
+    head = (train.get("head") or "")[:7]
+    prev_head = (prev.get("head") or "")[:7]
+    out = []
+    for e in prev.get("included", []):
+        n = e.get("pr")
+        if not n or n in now or n not in open_prs:
+            continue
+        w = why.get(n, "not offered to the train")
+        out.append({"pr": n, "branch": e.get("branch"), "why": w,
+                    "comment": f"dropped out of the staging train: staging {head} no longer includes this PR "
+                               f"(it was in {prev_head}). Why: {w}. To get it back: fix that, or mark the PR ready "
+                               f"for review (a draft needs the '{TRY_LABEL}' label)."})
+    return out
+
+
 def main() -> int:
     a = argparse.ArgumentParser()
     a.add_argument("--repo", required=True)
@@ -122,6 +160,7 @@ def main() -> int:
     a.add_argument("--trigger-branch", default="")
     a.add_argument("--trigger-sha", default="")
     a.add_argument("--single", action="store_true", help="old behaviour: deploy the trigger SHA alone")
+    a.add_argument("--prev", default="", help="the previous deploy's train.json, to list PRs that dropped out")
     a.add_argument("--out", required=True)
     a.add_argument("--cwd", default=".")
     o = a.parse_args()
@@ -134,6 +173,13 @@ def main() -> int:
         cands, skipped = candidates(prs, json.load(open(o.checks)), o.repo, o.trigger_branch, o.trigger_sha)
         train = build(o.cwd, o.base, cands)
         train["not_candidates"] = skipped
+        prev = None
+        if o.prev and os.path.exists(o.prev):
+            try:
+                prev = json.load(open(o.prev))
+            except ValueError:
+                prev = None
+        train["dropped_out"] = dropped_out(prev, train, prs)
     json.dump(train, open(o.out, "w"), indent=2)
     print(json.dumps(train, indent=2))
     return 0
