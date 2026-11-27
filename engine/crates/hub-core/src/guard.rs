@@ -38,6 +38,9 @@ pub struct Claim {
     pub released: Option<String>,
     /// the reply item (R-...) the session wrote, once released
     pub reply: Option<String>,
+    /// the Brief this session works for (BQ-in-flight-briefs); its pause or stop binds the session
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -102,6 +105,7 @@ impl State {
                     until_ms: b.get("until_ms").and_then(Value::as_i64).unwrap_or(0),
                     released: None,
                     reply: None,
+                    brief: Some(s(&b, "brief").to_string()).filter(|x| !x.is_empty()),
                 });
                 self.order.push(session);
             }
@@ -143,7 +147,9 @@ impl State {
     }
 
     /// May this write go ahead? Returns the branch to write to. `session` is the writer's claim, if it made one.
-    pub fn check_write(&self, session: Option<&str>, kind: &str, item: Option<&str>, body: &Value, now: i64) -> Result<String, String> {
+    /// `steer` marks a pause, stop, resume or redirect of a Brief: claims don't lock those, so whoever runs agents can
+    /// always stop one that holds its Brief (BQ-in-flight-briefs).
+    pub fn check_write(&self, session: Option<&str>, kind: &str, item: Option<&str>, body: &Value, now: i64, steer: bool) -> Result<String, String> {
         let mine = match session {
             None => None,
             Some(id) => {
@@ -166,7 +172,7 @@ impl State {
             }
         }
         let target = if kind == "item.create" { s(body, "id") } else { item.unwrap_or("") };
-        if !target.is_empty() && kind != "comment" {
+        if !target.is_empty() && kind != "comment" && !steer {
             if let Some((_, other)) = self.locked(&[target.to_string()], now, session).first() {
                 return Err(format!("{target} is claimed by session {} ({}) until {}; comment on it, or read its writes and wait",
                     other.session, other.role, crate::mcp::iso(other.until_ms)));
@@ -210,25 +216,27 @@ mod tests {
     #[test]
     fn claimed_items_take_only_comments_from_others() {
         let st = State::fold(&[claim("S-1", "builder", &["A-spec-identity"], "f1", NOW + 60_000, "")]);
-        let edit = st.check_write(Some("S-x"), "item.edit", Some("A-spec-identity"), &json!({}), NOW);
+        let edit = st.check_write(Some("S-x"), "item.edit", Some("A-spec-identity"), &json!({}), NOW, false);
         assert!(edit.unwrap_err().contains("doesn't exist"));
-        let anon = st.check_write(None, "item.edit", Some("A-spec-identity"), &json!({}), NOW).unwrap_err();
+        let anon = st.check_write(None, "item.edit", Some("A-spec-identity"), &json!({}), NOW, false).unwrap_err();
         assert!(anon.contains("claimed by session S-1 (builder)"));
-        assert!(st.check_write(None, "comment", Some("A-spec-identity"), &json!({"text": "x"}), NOW).is_ok());
-        assert!(st.check_write(None, "item.edit", Some("D-other"), &json!({}), NOW).is_ok(), "other items stay free");
-        assert!(st.check_write(Some("S-1"), "item.edit", Some("A-spec-identity"), &json!({}), NOW).is_ok(), "the owner of the claim may write");
-        let dup_create = st.check_write(None, "item.create", None, &json!({"id": "A-spec-identity"}), NOW);
+        assert!(st.check_write(None, "comment", Some("A-spec-identity"), &json!({"text": "x"}), NOW, false).is_ok());
+        assert!(st.check_write(None, "item.edit", Some("D-other"), &json!({}), NOW, false).is_ok(), "other items stay free");
+        assert!(st.check_write(Some("S-1"), "item.edit", Some("A-spec-identity"), &json!({}), NOW, false).is_ok(), "the owner of the claim may write");
+        let dup_create = st.check_write(None, "item.create", None, &json!({"id": "A-spec-identity"}), NOW, false);
         assert!(dup_create.is_err(), "creating a claimed id is blocked too");
+        // BQ-in-flight-briefs: a claim never stops someone pausing or stopping the Brief it holds
+        assert!(st.check_write(None, "status", Some("A-spec-identity"), &json!({"status": "paused"}), NOW, true).is_ok());
     }
 
     #[test]
     fn claims_end_on_release_or_expiry() {
         let st = State::fold(&[claim("S-1", "builder", &["X"], "f", NOW + 1000, ""), claim("S-2", "builder", &["Y"], "g", NOW + 60_000, ""), release("S-2", "R-1")]);
-        assert!(st.check_write(None, "status", Some("X"), &json!({}), NOW).is_err());
-        assert!(st.check_write(None, "status", Some("X"), &json!({}), NOW + 1000).is_ok(), "expired");
-        assert!(st.check_write(None, "status", Some("Y"), &json!({}), NOW).is_ok(), "released");
-        assert!(st.check_write(Some("S-2"), "status", Some("Y"), &json!({}), NOW).unwrap_err().contains("already ended"));
-        assert!(st.check_write(Some("S-1"), "status", Some("X"), &json!({}), NOW + 1000).unwrap_err().contains("expired"));
+        assert!(st.check_write(None, "status", Some("X"), &json!({}), NOW, false).is_err());
+        assert!(st.check_write(None, "status", Some("X"), &json!({}), NOW + 1000, false).is_ok(), "expired");
+        assert!(st.check_write(None, "status", Some("Y"), &json!({}), NOW, false).is_ok(), "released");
+        assert!(st.check_write(Some("S-2"), "status", Some("Y"), &json!({}), NOW, false).unwrap_err().contains("already ended"));
+        assert!(st.check_write(Some("S-1"), "status", Some("X"), &json!({}), NOW + 1000, false).unwrap_err().contains("expired"));
         assert_eq!(st.active(NOW).len(), 1);
     }
 
@@ -236,20 +244,20 @@ mod tests {
     fn auditors_disagree_by_comment_or_finding_never_by_edit() {
         let st = State::fold(&[claim("S-a", "auditor", &[], "f", NOW + 60_000, "")]);
         for k in ["comment", "answer", "link"] {
-            assert!(st.check_write(Some("S-a"), k, Some("D-1"), &json!({}), NOW).is_ok(), "{k}");
+            assert!(st.check_write(Some("S-a"), k, Some("D-1"), &json!({}), NOW, false).is_ok(), "{k}");
         }
-        assert!(st.check_write(Some("S-a"), "item.create", None, &json!({"id": "F-9", "type": "finding"}), NOW).is_ok());
+        assert!(st.check_write(Some("S-a"), "item.create", None, &json!({"id": "F-9", "type": "finding"}), NOW, false).is_ok());
         for k in ["item.edit", "status"] {
-            assert!(st.check_write(Some("S-a"), k, Some("D-1"), &json!({}), NOW).unwrap_err().contains("auditor"));
+            assert!(st.check_write(Some("S-a"), k, Some("D-1"), &json!({}), NOW, false).unwrap_err().contains("auditor"));
         }
-        assert!(st.check_write(Some("S-a"), "item.create", None, &json!({"id": "D-9", "type": "decision"}), NOW).is_err());
+        assert!(st.check_write(Some("S-a"), "item.create", None, &json!({"id": "D-9", "type": "decision"}), NOW, false).is_err());
     }
 
     #[test]
     fn explorers_write_to_their_own_branch() {
         let st = State::fold(&[claim("S-e", "explorer", &["D-work-lane"], "f", NOW + 60_000, "what-if-shifts-first")]);
-        assert_eq!(st.check_write(Some("S-e"), "item.edit", Some("D-work-lane"), &json!({}), NOW).unwrap(), "what-if-shifts-first");
-        assert_eq!(st.check_write(None, "comment", Some("D-1"), &json!({}), NOW).unwrap(), "main");
+        assert_eq!(st.check_write(Some("S-e"), "item.edit", Some("D-work-lane"), &json!({}), NOW, false).unwrap(), "what-if-shifts-first");
+        assert_eq!(st.check_write(None, "comment", Some("D-1"), &json!({}), NOW, false).unwrap(), "main");
         assert!(valid_branch("what-if-1") && !valid_branch("main") && !valid_branch("a b"));
     }
 

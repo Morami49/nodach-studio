@@ -9,7 +9,7 @@
 :root{
   --bg:#eef0ee; --surface:#f8f9f7; --raise:#ffffff; --ink:#18201f; --mute:#5c6966; --line:#d5dbd8;
   --accent:#1f5f8b; --accent-ink:#ffffff;
-  --t-decision:#1f5f8b; --t-question:#b5651d; --t-term:#2b7a6b; --t-story:#7b4b94; --t-asset:#4a5553; --t-idea:#3f7d2f; --t-finding:#a8332a; --t-lead:#8a6d00; --t-setting:#5b4fa8; --t-change:#0f766e;
+  --t-decision:#1f5f8b; --t-question:#b5651d; --t-term:#2b7a6b; --t-story:#7b4b94; --t-asset:#4a5553; --t-idea:#3f7d2f; --t-finding:#a8332a; --t-lead:#8a6d00; --t-setting:#5b4fa8; --t-change:#0f766e; --t-brief:#9c3d6b;
   --ok:#2e7d4f; --warn:#9a5212; --bad:#b03a2e; --band:#fff4e0; --band-ink:#5b3a10;
   --display:"Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
   --body:"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -18,12 +18,12 @@
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
   --bg:#111615; --surface:#171d1c; --raise:#1d2423; --ink:#e5ebe8; --mute:#93a19d; --line:#2b3533;
   --accent:#6fb0de; --accent-ink:#0d1517;
-  --t-decision:#6fb0de; --t-question:#e3a15f; --t-term:#5fc2ad; --t-story:#c39ad8; --t-asset:#a5b2af; --t-idea:#8fcf75; --t-finding:#ec7f72; --t-lead:#e2c45a; --t-setting:#a99cf0; --t-change:#4fd1c5;
+  --t-decision:#6fb0de; --t-question:#e3a15f; --t-term:#5fc2ad; --t-story:#c39ad8; --t-asset:#a5b2af; --t-idea:#8fcf75; --t-finding:#ec7f72; --t-lead:#e2c45a; --t-setting:#a99cf0; --t-change:#4fd1c5; --t-brief:#e48bb5;
   --ok:#6cc08d; --warn:#e3a15f; --bad:#ec7f72; --band:#2e2416; --band-ink:#f0d2a6; color-scheme:dark }}
 :root[data-theme="dark"]{
   --bg:#111615; --surface:#171d1c; --raise:#1d2423; --ink:#e5ebe8; --mute:#93a19d; --line:#2b3533;
   --accent:#6fb0de; --accent-ink:#0d1517;
-  --t-decision:#6fb0de; --t-question:#e3a15f; --t-term:#5fc2ad; --t-story:#c39ad8; --t-asset:#a5b2af; --t-idea:#8fcf75; --t-finding:#ec7f72; --t-lead:#e2c45a; --t-setting:#a99cf0; --t-change:#4fd1c5;
+  --t-decision:#6fb0de; --t-question:#e3a15f; --t-term:#5fc2ad; --t-story:#c39ad8; --t-asset:#a5b2af; --t-idea:#8fcf75; --t-finding:#ec7f72; --t-lead:#e2c45a; --t-setting:#a99cf0; --t-change:#4fd1c5; --t-brief:#e48bb5;
   --ok:#6cc08d; --warn:#e3a15f; --bad:#ec7f72; --band:#2e2416; --band-ink:#f0d2a6; color-scheme:dark }
 /* Brand tokens, mirrored from design/tokens.css (the hub embeds this one file, so it can't link that sheet). Only names
    that don't collide with Studio's own palette are copied; --nb-brand is the lockup colour: green, cream in the dark theme. */
@@ -300,7 +300,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
   </div>
   <div id="subnav" data-nodach-part="studio.subnav">
     <div class="sub" data-sub="private" role="toolbar" aria-label="Private">
-      <button data-sv="map">ActionMap</button><button data-sv="list">List</button><button data-sv="tree">Version tree</button><button data-sv="queue">My queue</button><button data-sv="ask">Ask</button><button data-sv="capture">Capture</button><button data-sv="pack">Pack</button>
+      <button data-sv="map">ActionMap</button><button data-sv="list">List</button><button data-sv="tree">Version tree</button><button data-sv="queue">My queue</button><button data-sv="flight">In flight</button><button data-sv="ask">Ask</button><button data-sv="capture">Capture</button><button data-sv="pack">Pack</button>
     </div>
     <div class="sub" data-sub="teams" role="toolbar" aria-label="Teamspaces" hidden>
       <button data-sv="spaces">Teamspaces</button><button data-sv="builders">Builders</button><button data-sv="money">Money</button><button data-sv="hub">Hub</button><span data-slot="live"></span><span data-slot="show"></span>
@@ -324,6 +324,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
     <button data-v="list">List</button>
     <button data-v="ask">Ask<span class="badge" id="askBadge" hidden></span></button>
     <button data-v="queue">My queue<span class="badge" id="queueBadge" hidden></span></button>
+    <button data-v="flight">In flight</button>
     <button data-v="capture">Capture</button>
     <button data-v="tree">Tree</button>
     <button data-v="pack">Pack</button>
@@ -397,6 +398,34 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
       <h2>My queue</h2>
       <p class="mute" style="margin:0">Only what waits on you, oldest first (G-async-lanes, AS3). Each is one sitting and can be done in any order. Answer with its code; anything Claude can decide alone never lands here.</p>
       <ol class="stack" id="queueList" style="padding-left:0;list-style:none"></ol>
+    </div>
+  </section>
+
+  <section class="view" id="v-flight" hidden data-nodach-part="studio.flight">
+    <div class="stack" style="max-width:860px">
+      <h2>In flight</h2>
+      <p class="mute" style="margin:0">Work handed to a person or an agent (Briefs), who holds each one now, and its last report. Whoever holds <b>Run agents</b> where a Brief lives can pause, stop, resume or redirect it; an agent stops at its next step.</p>
+      <details id="briefNew" class="card">
+        <summary><b>+ Brief</b> <span class="mute">hand a piece of work to a person or an agent</span></summary>
+        <div class="stack" style="margin-top:8px">
+          <label>Title <input id="bfTitle" placeholder="Fix the deploy check"></label>
+          <label>Goal <textarea id="bfGoal" rows="2" placeholder="What this work is for"></textarea></label>
+          <label>Done means <textarea id="bfDone" rows="2" placeholder="How anyone can tell it's finished"></textarea></label>
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <label>May touch <input id="bfTouch" placeholder="scripts/, studio/index.html"></label>
+            <label>Risk <select id="bfRisk"><option value="low">low</option><option value="high">high (waits for a person's click)</option></select></label>
+          </div>
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <label>Who <input id="bfHolder" placeholder="a login, or agent:claude-code"></label>
+            <label>Budget <input id="bfBudget" placeholder="2 hours, or 20% of today's usage"></label>
+            <label>Deadline <input id="bfDeadline" type="date"></label>
+            <label>Where <select id="bfSpace"></select></label>
+          </div>
+          <div class="row"><span class="mute" id="bfNote"></span><span class="spacer"></span><button id="bfCreate" class="primary">Create Brief</button></div>
+        </div>
+      </details>
+      <ol class="stack" id="flightList" style="padding-left:0;list-style:none"></ol>
+      <p class="mute" id="flightDone"></p>
     </div>
   </section>
 
@@ -588,7 +617,7 @@ pre.pack{white-space:pre-wrap;background:var(--raise);border:1px solid var(--lin
 
 <script>
 const VERSION = "v1.1";
-const TYPES = {decision:"Decision", question:"Question", term:"Term", story:"Story", asset:"Asset", idea:"Idea", finding:"Finding", lead:"Lead", setting:"Setting", change:"Change"};
+const TYPES = {decision:"Decision", question:"Question", term:"Term", story:"Story", asset:"Asset", idea:"Idea", finding:"Finding", lead:"Lead", setting:"Setting", change:"Change", brief:"Brief"};
 const BUILTIN_TYPES = new Set(Object.keys(TYPES));
 const PLURAL = {story:"Stories"};
 const OPEN = new Set(["proposed","open","default","challenged"]);
@@ -694,8 +723,9 @@ const SWITCHES = ["read","comment","add_nodes","link_move","invite","manage_role
 const SWITCH_LABEL = {read:"Read", comment:"Comment", add_nodes:"Add and change nodes", link_move:"Link and move nodes", invite:"Invite people",
   manage_roles:"Manage roles", run_agents:"Run agents", merge_low:"Merge low-risk changes", merge_high:"Merge high-risk changes", money:"Money",
   legal:"Terms and legal", change_rules:"Change rules", hand_on:"Hand on ownership"};
-// stored and shown, but nothing in Nodach does these yet (they move in with Briefs and safe rule changes, 226.6)
-const SWITCH_LATER = new Set(["run_agents","merge_low","merge_high","money","legal","change_rules","hand_on"]);
+// stored and shown, but nothing in Nodach does these yet (they move in with safe rule changes, 226.6); run_agents
+// steers Briefs (BQ-in-flight-briefs)
+const SWITCH_LATER = new Set(["merge_low","merge_high","money","legal","change_rules","hand_on"]);
 const BUILT_IN_ROLES = ["owner","member","guest","everyone"], OWNER_POS = 1000, AGENT_LIMITED = ["merge_high","hand_on"];
 const SHARE_SWITCHES = {viewer:["read"], commenter:["read","comment"], editor:["read","comment","add_nodes","link_move"]};
 const isAgentLogin = l => /^agent:/.test(String(l || "").trim().toLowerCase()) || String(l || "").trim().toLowerCase() === "service:deploy-check";
@@ -749,6 +779,8 @@ function foldTeams(evs){
     if (ts) return T.switchesAt(login, ts, null, node).has("read");
     return T.levelOf(login, node) ? true : null; };
   T.supportOpen = (login, ts, now = Date.now()) => T.support.filter(x => x.teamspace === ts && x.by === login && Date.parse(x.at) <= now && now < x.until).reduce((a, x) => Math.max(a, x.until), 0) || null;
+  // BQ-in-flight-briefs: pausing, stopping, resuming or redirecting a Brief needs run_agents where it lives
+  T.canSteer = (login, node) => { const ts = T.itemSpace.get(node); return ts ? T.switchesAt(login, ts, null, node).has("run_agents") : !!S.owner; };
   T.canWriteNode = (login, node, kind) => { const ts = T.itemSpace.get(node), l = T.levelOf(login, node);
     const need = kind === "comment" || kind === "retract" ? "comment" : kind === "link" || kind === "node.move" ? "link_move" : "add_nodes";
     return ts ? T.switchesAt(login, ts, null, node).has(need) : l === "editor" || (need === "comment" && LEVEL_RANK[l] >= 2); };
@@ -1341,6 +1373,89 @@ function renderAsk(){
     if (id){ toast("Recorded "+codeOf(it.id), [id]); if (/^(ok|yes|agreed?)$/i.test(inp.value.trim()) && it.type!=="question" && editor()) await write("status", it.id, {status:"agreed"}); } });
   $("#askList").querySelectorAll("[data-open]").forEach(b => b.onclick = () => select(b.dataset.open));
 }
+/* ---------------------------------------------------------------- In flight (BQ-in-flight-briefs; 215b a, 215c c, 221c a)
+   A Brief is an item of type brief: goal, done means, limits (may touch, risk), who, budget, deadline in its meta.
+   Pause, stop and resume are status events; a redirect and an agent's report are comments ({redirect:true},
+   {report:{did, why}}). The hub refuses a session tied to a paused or stopped Brief (hub_core::briefs); this page shows
+   the state and offers the controls only to whoever holds Run agents where the Brief lives. */
+const BRIEF_FINISHED = new Set(["done","stopped","withdrawn"]);
+const BRIEF_STATE = {open:"Open, not picked up", running:"Running", paused:"Paused", stopped:"Stopped", done:"Done"};
+function briefNotes(i){
+  const live = i.comments.filter(h => !h.gone && !h.reverted);
+  return {redirect: live.filter(h => h.body?.redirect === true).pop() || null, report: live.filter(h => h.body?.report).pop() || null,
+          reports: live.filter(h => h.body?.report).length};
+}
+// sessions working on a Brief now: claims that name it (begin_answer brief) or claim it, not released, not expired
+function briefClaims(id, now = Date.now()){
+  const released = new Set(S.events.filter(e => e.kind === "session.release").map(e => e.body?.session));
+  return S.events.filter(e => e.kind === "session.claim" && (e.body?.brief === id || (e.body?.items || []).includes(id))
+    && !released.has(e.body?.session) && Number(e.body?.until_ms || 0) > now);
+}
+const briefs = () => [...F.items.values()].filter(i => i.type === "brief");
+const briefWho = a => { const w = who(a); return w === "A member" || w === "Someone" ? (loginOf(a?.id) || w) : w; };
+function briefCard(i){
+  const m = i.meta || {}, n = briefNotes(i), claims = briefClaims(i.id), steer = TEAMS.canSteer(myLogin(), i.id) && S.canWrite !== false;
+  const lim = m.limits || {}, touch = Array.isArray(lim.touch) ? lim.touch.join(", ") : (lim.touch || "");
+  const holder = claims.length ? claims.map(c => `${esc(loginOf(c.author?.id))} <span class="mono mute">${esc(c.body.session)} · ${esc(c.body.role || "")} · since ${esc((c.ts || "").slice(11, 16))}</span>`).join("<br>")
+    : `<span class="mute">nobody right now</span>`;
+  const rep = n.report ? `<b>${esc(briefWho(n.report.author))}</b> <span class="mute mono">${esc((n.report.ts || "").slice(0, 16).replace("T", " "))}</span>: ${esc(n.report.body.text || "")}`
+    + (n.report.body.report?.did ? `<br><span class="mute">did:</span> ${esc(n.report.body.report.did)}` : "") + (n.report.body.report?.why ? ` <span class="mute">· why:</span> ${esc(n.report.body.report.why)}` : "")
+    : `<span class="mute">no report yet</span>`;
+  const st = i.status, paused = st === "paused";
+  return `<li class="card${S.sel === i.id ? " sel" : ""}" data-brief="${esc(i.id)}">
+    <div class="row"><span class="pill" data-bstate="${esc(st)}" style="color:${paused ? "var(--warn)" : st === "running" ? "var(--ok)" : "var(--mute)"}">${esc(BRIEF_STATE[st] || st)}</span>
+      <span class="eyebrow">Brief · ${esc(i.id)}${TEAMS.itemSpace.get(i.id) ? " · " + esc(TEAMS.spaces.get(TEAMS.itemSpace.get(i.id))?.label || TEAMS.itemSpace.get(i.id)) : ""}</span><span class="spacer"></span>
+      <span class="mute mono">${m.deadline ? "due " + esc(m.deadline) : ""}</span></div>
+    <h3>${esc(i.title)}</h3>
+    <dl class="kv" style="font-size:13px;display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;margin:0">
+      <dt class="mute">Goal</dt><dd>${esc(m.goal || i.body || "")}</dd>
+      <dt class="mute">Done means</dt><dd>${esc(m.done_means || "")}</dd>
+      <dt class="mute">Limits</dt><dd>${touch ? "may touch " + esc(touch) : "no limit set"} · risk ${esc(lim.risk || "not set")}</dd>
+      <dt class="mute">Who</dt><dd>${esc(m.holder || "anyone")}${m.budget ? " · budget " + esc(m.budget) : ""}</dd>
+      <dt class="mute">Holding it now</dt><dd data-bclaims>${holder}</dd>
+      <dt class="mute">Last report</dt><dd data-breport>${rep}${n.reports > 1 ? ` <span class="mute">(${n.reports} reports)</span>` : ""}</dd>
+      ${n.redirect ? `<dt class="mute">Redirected</dt><dd data-bredirect>${esc(n.redirect.body.text || "")} <span class="mute">· ${esc(briefWho(n.redirect.author))}, ${esc((n.redirect.ts || "").slice(0, 16).replace("T", " "))}</span></dd>` : ""}
+    </dl>
+    <div class="row" style="flex-wrap:wrap;gap:6px">
+      ${steer ? `${paused ? `<button data-bsteer="running">Resume</button>` : `<button data-bsteer="paused">Pause</button>`}<button data-bsteer="stopped">Stop</button><button data-bsteer="done">Mark done</button>
+        <input data-bredir placeholder="Redirect: the new direction" style="flex:1;min-width:180px"><button data-bredirgo>Redirect</button>`
+        : `<span class="mute" data-bnosteer>Pausing, stopping or redirecting needs Run agents here.</span>`}
+      <span class="spacer"></span><button data-bopen>Open</button>
+    </div></li>`;
+}
+function renderFlight(){
+  const all = briefs(), open = all.filter(i => !BRIEF_FINISHED.has(i.status)).reverse(), done = all.length - open.length;
+  $("#flightList").innerHTML = open.length ? open.map(briefCard).join("") : '<li class="empty">Nothing in flight. Write a Brief to hand work to a person or an agent.</li>';
+  $("#flightDone").textContent = done ? `${done} finished or stopped Brief${done > 1 ? "s" : ""} (List view, type Brief).` : "";
+  // where a new Brief may live: Home (owners) and every teamspace where I may add Briefs
+  const opts = [...TEAMS.spaces.values()].filter(t => TEAMS.switchesAt(myLogin(), t.id, "brief", null).has("add_nodes")).map(t => [t.id, t.label]);
+  if (S.owner) opts.unshift(["", "Home"]);
+  const sel = $("#bfSpace"), cur = sel.value; sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+  if (opts.some(([v]) => v === cur)) sel.value = cur; else if (S.ts && opts.some(([v]) => v === S.ts)) sel.value = S.ts;
+  $("#flightList").querySelectorAll("[data-brief]").forEach(li => {
+    const id = li.dataset.brief;
+    li.querySelector("[data-bopen]").onclick = () => select(id);
+    li.querySelectorAll("[data-bsteer]").forEach(b => b.onclick = async () => { const to = b.dataset.bsteer;
+      const w = await write("status", id, {status: to}); if (w){ toast({paused:"Paused: the agent stops at its next step.", running:"Resumed.", stopped:"Stopped: it won't resume.", done:"Marked done."}[to], [w]); refreshView(); } });
+    const go = li.querySelector("[data-bredirgo]");
+    if (go) go.onclick = async () => { const inp = li.querySelector("[data-bredir]"), text = inp.value.trim(); if (!text){ inp.focus(); return; }
+      const w = await write("comment", id, {text, redirect: true}); if (w){ toast("Redirected: the agent reads it at its next step.", [w]); refreshView(); } };
+  });
+}
+$("#bfCreate").onclick = async () => {
+  const title = $("#bfTitle").value.trim(), goal = $("#bfGoal").value.trim();
+  if (!title || !goal){ $("#bfNote").textContent = "A Brief needs a title and a goal."; return; }
+  const d = new Date(), stamp = d.toISOString().slice(2, 10).replaceAll("-", "") + "-" + Math.random().toString(36).slice(2, 6);
+  const id = "BRIEF-" + stamp, ts = $("#bfSpace").value;
+  const touch = $("#bfTouch").value.split(",").map(x => x.trim()).filter(Boolean);
+  const meta = {goal, done_means: $("#bfDone").value.trim(), limits: {touch, risk: $("#bfRisk").value}, holder: $("#bfHolder").value.trim(),
+                budget: $("#bfBudget").value.trim(), deadline: $("#bfDeadline").value};
+  const body = {id, type: "brief", title, body: goal, status: "open", refs: [], meta}; if (ts) body.teamspace = ts;
+  const w = await write("item.create", null, body);
+  if (w){ for (const k of ["#bfTitle","#bfGoal","#bfDone","#bfTouch","#bfHolder","#bfBudget","#bfDeadline"]) $(k).value = "";
+    $("#bfNote").textContent = `Created ${id}. An agent starts it with: begin_answer … brief: "${id}".`; toast(`Brief ${id} created`, [w]); refreshView(); }
+};
+
 /* ---------------------------------------------------------------- my queue (AS3) */
 // Waiting on Nowed: open questions and decision packs (Q-, Q-PACK-) and anything whose lane is "nowed", that have no
 // answer since they were last asked or edited. Settled statuses drop out. Read-only: it never writes.
@@ -2084,9 +2199,9 @@ $("#tyAdd").onclick = async () => {
   if (id){ for (const k of ["#tyKey","#tyLabel"]) $(k).value = ""; $("#tyNote").textContent = proposed ? `Proposed as ${proposed}. It applies only on staging.` : `Added ${label}.`; toast(proposed ? `Type ${label} proposed` : `Type ${label} added`, [id]); } };
 
 /* ---------------------------------------------------------------- views + time */
-const VIEWS = ["map","command","list","ask","queue","capture","tree","pack","money","hub","runs","builders","self","explore","spaces","usage"];
+const VIEWS = ["map","command","list","ask","queue","flight","capture","tree","pack","money","hub","runs","builders","self","explore","spaces","usage"];
 /* NAV-2: sections are saved filters over one graph. Private is home and reaches everything; each view has one section. */
-const SECTIONS = {private:["map","list","tree","queue","ask","capture","pack"], teams:["spaces","builders","money","hub"], settings:["runs","usage","self"],
+const SECTIONS = {private:["map","list","tree","queue","flight","ask","capture","pack"], teams:["spaces","builders","money","hub"], settings:["runs","usage","self"],
   search:["command"], explore:["explore"]};
 const SECTION_OF = Object.fromEntries(Object.entries(SECTIONS).flatMap(([k, vs]) => vs.map(v => [v, k])));
 function show(v){ if (!VIEWS.includes(v)) v = "map"; if (v === "spaces" && tsCanvasOk()) return teamsWorld(S.ts); S.view=v; document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-current", b.dataset.v===v));
@@ -2272,7 +2387,7 @@ $("#asof").oninput = e => { const evs=[...S.events].sort(byTsThenId); const v=+e
   S.asof = v>=evs.length ? null : (v===0 ? "0" : evs[v-1].ts); refresh(); };
 $("#theme").onclick = () => { const r=document.documentElement, dark=matchMedia("(prefers-color-scheme: dark)").matches;
   r.dataset.theme = (r.dataset.theme || (dark?"dark":"light"))==="dark" ? "light" : "dark"; renderMap(false); if (S.view==="tree") renderTree(); if (S.view==="capture") redraw(); };
-function refreshView(){ if (S.view==="map") renderMap(false); if (S.view==="list") renderList(); if (S.view==="ask") renderAsk(); if (S.view==="queue") renderQueue(); if (S.view==="tree") renderTree(); if (S.view==="pack") renderPack(); if (S.view==="money") renderMoney(); if (S.view==="hub") renderHub(); if (S.view==="runs") renderRuns(); if (S.view==="builders") renderBuilders(); if (S.view==="self") renderSelf(); if (S.view==="command") renderCommands(); if (S.view==="spaces") renderSpaces(); if (S.view==="usage") renderUsage(); }
+function refreshView(){ if (S.view==="map") renderMap(false); if (S.view==="list") renderList(); if (S.view==="ask") renderAsk(); if (S.view==="queue") renderQueue(); if (S.view==="flight") renderFlight(); if (S.view==="tree") renderTree(); if (S.view==="pack") renderPack(); if (S.view==="money") renderMoney(); if (S.view==="hub") renderHub(); if (S.view==="runs") renderRuns(); if (S.view==="builders") renderBuilders(); if (S.view==="self") renderSelf(); if (S.view==="command") renderCommands(); if (S.view==="spaces") renderSpaces(); if (S.view==="usage") renderUsage(); }
 function refresh(){
   if (S.bulk) return;   // a bulk action redraws once at the end
   CODES = stableCodes(); F = fold();

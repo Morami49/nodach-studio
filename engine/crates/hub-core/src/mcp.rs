@@ -106,7 +106,8 @@ fn tools() -> Value {
              "items": {"type": "array", "maxItems": 50, "items": {"type": "string"}},
              "minutes": {"type": "integer", "minimum": 1, "maximum": 60, "description": "how long the claim lasts (default 15)"},
              "branch": {"type": "string", "description": "explorer only: the Studio branch to write to"},
-             "resume": {"type": "boolean", "description": "true also returns the resume digest (rules, open questions, latest replies); a chat that hasn't called resume yet passes true. Default false keeps the reply short."}}},
+             "resume": {"type": "boolean", "description": "true also returns the resume digest (rules, open questions, latest replies); a chat that hasn't called resume yet passes true. Default false keeps the reply short."},
+             "brief": {"type": "string", "description": "the Brief (BRIEF-...) this session works for, if any. While it is paused or stopped every write is refused except a report on it; each write's result carries its state and any redirect"}}},
          "annotations": {"readOnlyHint": false, "destructiveHint": false}},
         {"name": "end_answer", "title": "Finish answering",
          "description": "Release your session's claims once your reply item (R-...) is written, so other sessions can edit those items.",
@@ -119,6 +120,10 @@ fn tools() -> Value {
          "annotations": {"readOnlyHint": true}},
         {"name": "read_claims", "title": "Who is working on what",
          "description": "Active session claims (session, role, items, until), so a new chat can see what other chats are doing before it starts.",
+         "inputSchema": {"type": "object", "properties": {}},
+         "annotations": {"readOnlyHint": true}},
+        {"name": "in_flight", "title": "Briefs in flight",
+         "description": "Every open Brief you can read (work handed to a person or an agent): goal, done-means, limits, holder, budget, deadline, status (open, running, paused), its latest redirect and report, and the sessions working on it now. Report under a Brief with write_event comment {text, report:{did, why, files, prs}}.",
          "inputSchema": {"type": "object", "properties": {}},
          "annotations": {"readOnlyHint": true}},
         {"name": "import_studio_events", "title": "Import Studio events",
@@ -188,6 +193,11 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
             text_result(json!({"active": g.active(now), "now": iso(now)}), false)
         }
         "begin_answer" => begin_answer(hub, login, key, args, now),
+        "in_flight" => {
+            let (docs, _, _, _) = hub.studio_events_for(login, 0, usize::MAX, now);
+            let briefs = crate::briefs::State::fold(docs.iter().filter_map(|d| d.get("event")));
+            text_result(briefs.in_flight(&hub.guard(), now, |_| true), false)
+        }
         "end_answer" => {
             let session = args.get("session").and_then(Value::as_str).unwrap_or("");
             let g = hub.guard();
@@ -226,6 +236,8 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
                 // BQ-1 step 2: a teamspace role or a node share can allow what the spaces alone don't; decided below
                 let probe = json!({"kind": kind, "item": item, "body": body, "author": {"id": format!("github:{login}")}});
                 if hub.access().check_event(login, &probe).is_err() || hub.access().teams_decide(&probe).is_none() {
+                    // say the teamspace's own reason when it has one (e.g. steering a Brief needs 'run agents')
+                    let e = match hub.access().teams_decide(&probe) { Some(Err(te)) => te, _ => e };
                     return text_result(json!({"error": e, "refused": true}), true);
                 }
             }
@@ -257,10 +269,21 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
             }
             // D-nodach-parallel-guard v2: claims by other sessions, the writer's role and its branch
             let session = args.get("session").and_then(Value::as_str);
-            let branch = match hub.guard().check_write(session, kind, item.as_str(), &body, now) {
+            let guard = hub.guard();
+            let briefs = hub.briefs();
+            let probe = json!({"kind": kind, "item": item, "body": body});
+            let steer = crate::briefs::is_steer(&probe, |id| briefs.get(id).map(|_| crate::briefs::TYPE.to_string()));
+            let branch = match guard.check_write(session, kind, item.as_str(), &body, now, steer) {
                 Ok(b) => b,
                 Err(reason) => return text_result(json!({"error": reason, "refused": true}), true),
             };
+            // BQ-in-flight-briefs: a session working for a paused or stopped Brief stops; it may only report under it
+            let my_brief = session.and_then(|sid| guard.claims.get(sid)).and_then(|c| c.brief.clone().map(|b| (b, c.since.clone())));
+            if let Some((b, _)) = &my_brief {
+                if let Err(reason) = briefs.check_session_write(b, kind, item.as_str()) {
+                    return text_result(json!({"error": reason, "refused": true, "brief": briefs.notice(b, "")}), true);
+                }
+            }
             // F-47: say when the target isn't known here, so a typo or an unsynced item doesn't pass silently
             let warning = match (kind, item.as_str()) {
                 ("item.create", _) => body.get("id").and_then(Value::as_str).filter(|id| hub.knows_item(id))
@@ -277,6 +300,7 @@ fn call(hub: &mut Hub, login: &str, key: &KeyPair, name: &str, args: &Value, now
                 Ok(made) => {
                     let mut r = json!({"written": studio_doc_id(&made.last().map(|e| e.id.clone()).unwrap_or_default())});
                     if let Some(w) = warning { r["warning"] = json!(w); }
+                    if let Some((b, since)) = &my_brief { r["brief"] = hub.briefs().notice(b, since); }
                     text_result(r, false)
                 }
                 Err(e) => text_result(json!({"error": format!("{e:?}")}), true),
@@ -341,6 +365,14 @@ fn begin_answer(hub: &mut Hub, login: &str, key: &KeyPair, args: &Value, now: i6
         ("explorer", _) => return text_result(json!({"error": "an explorer needs a branch name (letters, digits, - _ .; not main)"}), true),
         _ => "main".to_string(),
     };
+    let brief = args.get("brief").and_then(Value::as_str).map(str::trim).filter(|b| !b.is_empty()).map(String::from);
+    if let Some(b) = &brief {
+        // BQ-in-flight-briefs: don't start work on a Brief someone paused or stopped
+        if let Some(h) = hub.briefs().halted(b) {
+            return text_result(json!({"error": format!("{b} is {} (by {} at {}): don't start. Ask whoever runs agents to resume it.", h.status, h.status_by, h.status_ts),
+                "refused": true, "brief": hub.briefs().notice(b, "")}), true);
+        }
+    }
     let fp = guard::fingerprint(message);
     let g = hub.guard();
     let duplicate = g.duplicate_of(&fp).cloned();
@@ -353,12 +385,22 @@ fn begin_answer(hub: &mut Hub, login: &str, key: &KeyPair, args: &Value, now: i6
             return text_result(json!({"error": e}), true);
         }
     }
-    let body = json!({"session": session, "role": role, "items": mine, "fingerprint": fp, "branch": branch, "until_ms": now + minutes * 60_000});
+    let mut body = json!({"session": session, "role": role, "items": mine, "fingerprint": fp, "branch": branch, "until_ms": now + minutes * 60_000});
+    if let Some(b) = &brief { body["brief"] = json!(b); }
     if let Err(e) = write_studio(hub, login, key, "session.claim", Value::Null, body, "main", Some(&format!("{session}/claim")), now) {
         return text_result(json!({"error": e}), true);
     }
     // BQ-hub-short-mode (137b a): the digest is ~7k tokens, so it comes back only when asked for.
     let mut r = json!({"session": session, "role": role, "branch": branch, "claimed": mine, "until": iso(now + minutes * 60_000), "locked_by_others": locked});
+    if let Some(b) = &brief {
+        let mut n = hub.briefs().notice(b, "");
+        if let Some(x) = hub.briefs().get(b) {
+            n["goal"] = json!(x.goal); n["done_means"] = json!(x.done_means); n["limits"] = x.limits.clone();
+            n["budget"] = json!(x.budget); n["deadline"] = json!(x.deadline);
+            if let Some(r) = &x.redirect { n["redirect"] = json!({"text": r.text, "by": r.by, "at": r.ts}); }
+        }
+        r["brief"] = n;
+    }
     if args.get("resume").and_then(Value::as_bool).unwrap_or(false) {
         r["resume"] = hub.digest_for(login, now);
     } else {

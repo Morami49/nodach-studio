@@ -1564,7 +1564,7 @@ async def s57_esc_touch_keyboard(b):
 
 async def s58_classic_tabs(b):
     """NAV-2: the old tab row stays reachable under Settings → Classic tabs until each move is verified: turning it on
-    shows all 13 tabs and the old rail (each works), the choice survives a reload, and turning it off brings the bar back."""
+    shows all 14 tabs (In flight joined, BQ-in-flight-briefs) and the old rail (each works), the choice survives a reload, and turning it off brings the bar back."""
     st = Store(); p = await open_page(b, st, {"classic": False})
     await nav_open(p); await p.click("#sections [data-s=settings]"); await p.wait_for_timeout(100)
     await p.check("#classicTabs"); await p.wait_for_timeout(150)
@@ -1578,7 +1578,7 @@ async def s58_classic_tabs(b):
     kept = await p.evaluate("document.querySelector('#hdr').classList.contains('classic') && !!document.querySelector('#tabs').offsetParent")
     await p.uncheck("#classicTabs"); await p.wait_for_timeout(150)
     back = await p.evaluate("!document.querySelector('#tabs').offsetParent && !!document.querySelector('#subnav [data-sub=settings] #pointBtn') && !!document.querySelector('#v-map #asof')")
-    ok = len(tabs) == 13 and works == tabs and in_rail and kept and back and not p.errors
+    ok = len(tabs) == 14 and works == tabs and in_rail and kept and back and not p.errors
     return ok, f"tabs={len(tabs)}, working={len(works)}, old rail={in_rail}, kept after reload={kept}, off restores bar={back}, errors={p.errors[:1]}"
 
 
@@ -2756,6 +2756,74 @@ async def s99_roles_planet(b):
 
 
 SCENARIOS += [s99_roles_planet]
+
+
+# ---------------------------------------------------------------- BQ-in-flight-briefs: Briefs and In flight
+async def s100_brief_in_flight_pause_redirect(b):
+    """BQ-in-flight-briefs: Nowed opens In flight in Foundry and writes a Brief for the agent Sam: goal, done means,
+    may touch scripts/, low risk, a 2-hour budget, a deadline. Sam's session picks it up and reports what it did and
+    why. Nowed sees Sam holding it and the report, redirects it ('only touch smoke_hub.py') and pauses it; the card
+    then says Paused and offers Resume. Nassar, a member without Run agents, sees the Brief but no controls."""
+    H = team_hub(); H["authors"] = True
+    o = await open_teams_hub(b, H, "Morami49", True)
+    ts = await make_space(o, "Foundry")
+    for who in ("sam", "nassar"):
+        await o.fill("#tsInvProf", f"P-{who}"); await o.select_option("#tsInvRole", "member"); await o.click("#tsInvite"); await o.wait_for_timeout(350)
+        m = await open_teams_hub(b, H, who, False)
+        await to_spaces(m); await m.click("#tsInvList [data-tsjoin]"); await m.wait_for_timeout(400)
+    o = await open_teams_hub(b, H, "Morami49", True)
+    await o.evaluate("show('flight')"); await o.wait_for_timeout(200)
+    tab = await o.locator("#subnav [data-sv=flight]").count() == 1
+    empty = "Nothing in flight" in await o.inner_text("#flightList")
+    await o.click("#briefNew summary")
+    await o.fill("#bfTitle", "Fix the deploy check"); await o.fill("#bfGoal", "The deploy check goes green")
+    await o.fill("#bfDone", "RUNS-hub-deploy shows a pass"); await o.fill("#bfTouch", "scripts/")
+    await o.fill("#bfHolder", "agent:sam"); await o.fill("#bfBudget", "2 hours"); await o.fill("#bfDeadline", "2026-11-28")
+    await o.select_option("#bfSpace", ts)
+    await shot(o, "s100-1-new-brief")
+    await o.click("#bfCreate"); await o.wait_for_timeout(500)
+    made = next((x["event"] for x in H["posts"] if x["event"]["kind"] == "item.create" and x["event"]["body"].get("type") == "brief"), {})
+    bid = made.get("body", {}).get("id", "")
+    # Sam's session picks it up (begin_answer with brief) and reports under it
+    s = await open_teams_hub(b, H, "sam", False)
+    await s.evaluate(f"write('session.claim', null, {{session: 'S-sam00000001', role: 'builder', items: [], fingerprint: 'f', branch: 'main', brief: {json.dumps(bid)}, until_ms: Date.now() + 15 * 60000}})")
+    await s.wait_for_timeout(200)
+    await s.evaluate(f"write('comment', {json.dumps(bid)}, {{text: 'Ran the smoke test: it fails on the staging host', report: {{did: 'ran scripts/smoke_hub.py', why: 'baseline before changing it'}}}})")
+    await s.wait_for_timeout(300)
+    o = await open_teams_hub(b, H, "Morami49", True)
+    await o.evaluate("show('flight')"); await o.wait_for_timeout(300)
+    card = o.locator(f'#flightList [data-brief="{bid}"]')
+    held = await card.locator("[data-bclaims]").inner_text()
+    report = await card.locator("[data-breport]").inner_text()
+    await shot(o, "s100-2-in-flight-held-and-reported")
+    await card.locator("[data-bredir]").fill("Only touch smoke_hub.py"); await card.locator("[data-bredirgo]").click(); await o.wait_for_timeout(400)
+    await o.locator(f'#flightList [data-brief="{bid}"] [data-bsteer="paused"]').click(); await o.wait_for_timeout(400)
+    card = o.locator(f'#flightList [data-brief="{bid}"]')
+    state = await card.locator("[data-bstate]").inner_text()
+    resume = await card.locator('[data-bsteer="running"]').count() == 1
+    redirect_shown = "Only touch smoke_hub.py" in await card.locator("[data-bredirect]").inner_text()
+    await shot(o, "s100-3-redirected-and-paused")
+    steer = [x["event"] for x in H["posts"] if x["event"].get("item") == bid and x["event"]["kind"] in ("status", "comment")]
+    n = await open_teams_hub(b, H, "nassar", False)
+    await n.evaluate("show('flight')"); await n.wait_for_timeout(300)
+    n_card = n.locator(f'#flightList [data-brief="{bid}"]')
+    n_sees = await n_card.count() == 1
+    n_no_controls = n_sees and await n_card.locator("[data-bsteer]").count() == 0 and await n_card.locator("[data-bnosteer]").count() == 1
+    await shot(n, "s100-4-member-sees-no-controls")
+    meta = made.get("body", {}).get("meta", {})
+    ok = (tab and empty and bid.startswith("BRIEF-") and made["body"].get("teamspace") == ts
+          and meta == {"goal": "The deploy check goes green", "done_means": "RUNS-hub-deploy shows a pass", "limits": {"touch": ["scripts/"], "risk": "low"},
+                       "holder": "agent:sam", "budget": "2 hours", "deadline": "2026-11-28"}
+          and "sam" in held and "S-sam00000001" in held and "ran scripts/smoke_hub.py" in report and "baseline" in report
+          and [(e["kind"], e["body"].get("redirect"), e["body"].get("status")) for e in steer][-2:] == [("comment", True, None), ("status", None, "paused")]
+          and state == "Paused" and resume and redirect_shown and n_no_controls
+          and not H["refused"] and not (o.errors + s.errors + n.errors))
+    return ok, (f"tab={tab}, empty first={empty}, brief={bid} in {made.get('body', {}).get('teamspace')}, meta={meta}, held={held!r}, report={report[:60]!r}, "
+                f"steer={[(e['kind'], e['body'].get('redirect'), e['body'].get('status')) for e in steer]}, state={state}, resume offered={resume}, "
+                f"redirect shown={redirect_shown}, member sees/no controls={n_sees}/{n_no_controls}, refused={H['refused']}, errors={(o.errors + s.errors + n.errors)[:1]}")
+
+
+SCENARIOS += [s100_brief_in_flight_pause_redirect]
 
 
 async def main():

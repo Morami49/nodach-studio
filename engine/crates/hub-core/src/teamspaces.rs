@@ -538,6 +538,13 @@ impl State {
         if let Some(ts) = self.item_space.get(&node) {
             // BQ-access-model: the switch this kind of write needs, at this node (roles, overrides, then shares)
             let need = match kind { "comment" | "retract" => "comment", "link" | "node.move" => "link_move", _ => "add_nodes" };
+            // BQ-in-flight-briefs: pausing, stopping, resuming or redirecting a Brief needs run_agents (215c c)
+            if crate::briefs::is_steer(ev, |id| self.item_type.get(id).cloned()) {
+                let mine = self.switches_at(&login, ts, None, Some(&node));
+                return Some(if mine.has("run_agents") { Ok(()) } else {
+                    Err(format!("pausing, stopping, resuming or redirecting {node} needs the 'run agents' switch in {ts}; you can still comment on it or report under it. Nothing was saved."))
+                });
+            }
             if self.switches_at(&login, ts, None, Some(&node)).has(need) { return Some(Ok(())); }
             let why = match (self.role_of(&login, ts), lvl) {
                 (Some(Role::Owner | Role::Member), _) => format!("your roles in {ts} don't allow {} on {node}. Nothing was saved.",

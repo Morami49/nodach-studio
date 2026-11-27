@@ -26,6 +26,7 @@ pub mod drill;
 pub mod private;
 pub mod profiles;
 pub mod guard;
+pub mod briefs;
 pub mod access;
 pub mod digest;
 pub mod authorship;
@@ -262,6 +263,12 @@ impl Hub {
     pub fn guard(&self) -> guard::State {
         let (docs, _, _, _) = self.studio_events(0, usize::MAX);
         guard::State::fold(docs.iter().filter_map(|d| d.get("event")))
+    }
+
+    /// Briefs (BQ-in-flight-briefs), folded over the same Studio events.
+    pub fn briefs(&self) -> briefs::State {
+        let (docs, _, _, _) = self.studio_events(0, usize::MAX);
+        briefs::State::fold(docs.iter().filter_map(|d| d.get("event")))
     }
 
     pub fn has_imported(&self, doc_id: &str) -> bool {

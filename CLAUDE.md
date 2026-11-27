@@ -18,6 +18,12 @@ used. The hub is the memory, so nothing has to live in a long session.
 4. Call `begin_answer` with role `builder`. Pass every item you expect to change, including your reply id. Pass the
    returned session to every `write_event`.
 5. Build on a branch and open a PR (below). Post progress as comments on the BQ item.
+   **Working for a Brief** (`BRIEF-…`, BQ-in-flight-briefs): pass `brief` to `begin_answer`; it returns the Brief's goal,
+   done-means, limits, budget and any redirect. Stay inside its limits. After each step, report under it:
+   `write_event` comment `{text, report: {did, why, files, prs}}`. Every write returns `brief` with its state: on a
+   `redirect`, follow it from the next step; on `paused` or `stopped`, stop at once, post one report saying where you
+   stopped, and end the session. Never change a Brief's status yourself: pausing, stopping, resuming and redirecting
+   belong to whoever holds Run agents (In flight in Studio).
 6. Record each code Nowed sends (`200a a`) as an `answer` event on the item it answers (G-chat-graph).
 7. Write your reply as `R-YYMMDD-NNN` (`item.create`, type `reply`), then call `end_answer` with that reply id.
 
