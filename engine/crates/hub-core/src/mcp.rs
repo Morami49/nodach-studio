@@ -22,10 +22,10 @@ use serde_json::{json, Value};
 pub const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Commit the node was built from (set by the deploy as BUILD_SHA), so a test knows which code answered.
 pub const BUILD: &str = match option_env!("BUILD_SHA") { Some(b) => b, None => "dev" };
-pub const WRITE_KINDS: [&str; 28] = ["answer", "comment", "status", "item.create", "item.edit", "link",
+pub const WRITE_KINDS: [&str; 29] = ["answer", "comment", "status", "item.create", "item.edit", "link",
     "account.link", "profile.create", "profile.revoke", "profile.assign", "connection.create", "connection.revoke", "access.grant", "access.revoke", "access.invite", "access.uninvite",
     "teamspace.create", "member.invite", "member.join", "member.role", "member.remove", "node.share", "support.access",
-    "role.create", "role.edit", "role.assign", "override.set", "agent.allow"];
+    "role.create", "role.edit", "role.assign", "override.set", "agent.allow", "node.move"];
 
 /// Milliseconds since 1970 → `YYYY-MM-DDTHH:MM:SS.mmmZ` (Studio's timestamp shape).
 pub fn iso(ms: i64) -> String {
