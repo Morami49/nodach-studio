@@ -181,7 +181,7 @@ fn mcp_initialize_list_and_tools() {
     assert!(handle(&mut hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), T0).is_none());
     let tools = handle(&mut hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), T0).unwrap();
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["hub_status", "read_events", "hub_log", "read_private", "write_private", "write_private_batch", "send_invite", "link_sign_in", "read_profiles", "begin_answer", "end_answer", "resume", "read_claims", "import_studio_events", "write_event"]);
+    assert_eq!(names, ["hub_status", "read_events", "hub_log", "read_private", "write_private", "write_private_batch", "send_invite", "link_sign_in", "read_profiles", "begin_answer", "end_answer", "resume", "read_claims", "in_flight", "import_studio_events", "write_event"]);
 
     let call = |hub: &mut Hub, name: &str, args: Value| handle(hub, "Morami49", &key, &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": name, "arguments": args}}), T0 + 60_000).unwrap()["result"].clone();
     let w = call(&mut hub, "write_event", json!({"kind": "answer", "item": "Q-duress", "body": {"code": "Q86", "text": "A"}}));
@@ -401,4 +401,62 @@ fn link_sign_in_hashes_the_address_and_is_owner_only() {
     let r = call(&mut hub, "Morami49", json!({"email": "owner.test@gmail.com", "unlink": true}));
     assert_eq!(r["isError"], false, "{r}");
     assert_eq!(hub.profiles().sign_in_login_for_email_hash(&h), hub_core::session::login_for_hash(&h));
+}
+
+#[test]
+fn a_brief_pauses_redirects_and_resumes_an_agent() {
+    // BQ-in-flight-briefs (215b a, 215c c): Nowed briefs an agent account; it works under a session tied to the Brief.
+    // Pausing it stops the agent's next write (a report still goes through); a member without 'run agents' can't steer.
+    let mut hub = Hub::new();
+    hub.set_owners(vec!["Morami49".into()]);
+    let key = KeyPair::from_seed([9u8; 32]);
+    let call = |hub: &mut Hub, who: &str, name: &str, args: Value, t: i64| handle(hub, who, &key, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": name, "arguments": args}}), t).unwrap()["result"].clone();
+    let ok = |r: &Value| assert_eq!(r["isError"], false, "{r}");
+    ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "teamspace.create", "item": "TS-f", "body": {"id": "TS-f", "label": "Foundry"}}), T0));
+    for who in ["sam", "nassar"] {
+        ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "member.invite", "item": "TS-f", "body": {"teamspace": "TS-f", "profile": format!("P-{who}"), "role": "member"}}), T0));
+        ok(&call(&mut hub, who, "write_event", json!({"kind": "member.join", "item": "TS-f", "body": {"teamspace": "TS-f"}}), T0));
+    }
+    ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "item.create", "item": null, "body": {"id": "BRIEF-deploy", "type": "brief", "title": "Fix the deploy check",
+        "status": "open", "teamspace": "TS-f", "meta": {"goal": "Green deploy check", "done_means": "RUNS-hub-deploy passes", "limits": {"touch": ["scripts/"], "risk": "low"},
+        "holder": "sam", "budget": "2 h", "deadline": "2026-11-28"}}}), T0));
+    ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "item.create", "item": null, "body": {"id": "N-check", "type": "idea", "title": "Deploy check", "teamspace": "TS-f"}}), T0));
+
+    let b = call(&mut hub, "sam", "begin_answer", json!({"message": "work BRIEF-deploy", "role": "builder", "items": ["N-check"], "brief": "BRIEF-deploy"}), T0 + 1000)["structuredContent"].clone();
+    let sid = b["session"].as_str().unwrap().to_string();
+    assert_eq!((b["brief"]["status"].as_str(), b["brief"]["goal"].as_str()), (Some("open"), Some("Green deploy check")), "{b}");
+    let flight = call(&mut hub, "Morami49", "in_flight", json!({}), T0 + 2000)["structuredContent"].clone();
+    assert_eq!(flight["in_flight"][0]["id"], "BRIEF-deploy");
+    assert_eq!(flight["in_flight"][0]["claims"][0]["session"], json!(sid), "In flight shows who holds it now");
+    let w = call(&mut hub, "sam", "write_event", json!({"kind": "item.edit", "item": "N-check", "session": sid, "body": {"title": "Deploy check v2"}}), T0 + 3000);
+    ok(&w);
+    assert_eq!(w["structuredContent"]["brief"]["status"], "open");
+
+    // a member can't steer; the Owner can, even though the agent's session is live
+    let r = call(&mut hub, "nassar", "write_event", json!({"kind": "status", "item": "BRIEF-deploy", "body": {"status": "paused"}}), T0 + 4000);
+    assert_eq!(r["structuredContent"]["refused"], true, "{r}");
+    assert!(r.to_string().contains("run agents"), "{r}");
+    ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "comment", "item": "BRIEF-deploy", "body": {"text": "Only touch smoke_hub.py", "redirect": true}}), T0 + 5000));
+    let w = call(&mut hub, "sam", "write_event", json!({"kind": "item.edit", "item": "N-check", "session": sid, "body": {"title": "v3"}}), T0 + 6000);
+    assert_eq!(w["structuredContent"]["brief"]["redirect"]["text"], "Only touch smoke_hub.py", "the next write tells the agent: {w}");
+    ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "status", "item": "BRIEF-deploy", "body": {"status": "paused"}}), T0 + 7000));
+
+    // paused: the agent's next step is refused; its report is not; it can't resume itself or start a new session
+    let w = call(&mut hub, "sam", "write_event", json!({"kind": "item.edit", "item": "N-check", "session": sid, "body": {"title": "v4"}}), T0 + 8000);
+    assert_eq!(w["structuredContent"]["refused"], true);
+    assert!(w["structuredContent"]["error"].as_str().unwrap().contains("paused by Morami49"), "{w}");
+    ok(&call(&mut hub, "sam", "write_event", json!({"kind": "comment", "item": "BRIEF-deploy", "session": sid,
+        "body": {"text": "Stopped after the title edit", "report": {"did": "renamed N-check", "why": "the brief's goal"}}}), T0 + 9000));
+    assert_eq!(call(&mut hub, "sam", "write_event", json!({"kind": "status", "item": "BRIEF-deploy", "session": sid, "body": {"status": "running"}}), T0 + 9500)["isError"], true);
+    assert_eq!(call(&mut hub, "sam", "begin_answer", json!({"message": "again", "role": "builder", "brief": "BRIEF-deploy"}), T0 + 10_000)["isError"], true);
+    let flight = call(&mut hub, "Morami49", "in_flight", json!({}), T0 + 11_000)["structuredContent"].clone();
+    assert_eq!(flight["in_flight"][0]["status"], "paused");
+    assert_eq!(flight["in_flight"][0]["last_report"]["report"]["did"], "renamed N-check");
+
+    // resumed: work goes on; stopped: it leaves In flight
+    ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "status", "item": "BRIEF-deploy", "body": {"status": "running"}}), T0 + 12_000));
+    ok(&call(&mut hub, "sam", "write_event", json!({"kind": "item.edit", "item": "N-check", "session": sid, "body": {"title": "v5"}}), T0 + 13_000));
+    ok(&call(&mut hub, "Morami49", "write_event", json!({"kind": "status", "item": "BRIEF-deploy", "body": {"status": "stopped"}}), T0 + 14_000));
+    assert_eq!(call(&mut hub, "Morami49", "in_flight", json!({}), T0 + 15_000)["structuredContent"]["in_flight"], json!([]));
 }
