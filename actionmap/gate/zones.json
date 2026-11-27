@@ -1,0 +1,330 @@
+{
+ "_comment": "Nodach Gate trust zones. JSON has no comments, so every key starting with _ is a comment and is ignored. Edit your copy at %USERPROFILE%\\nodach-gate\\zones.json (Gate reloads it when it changes and keeps each version it has seen in zones-history\\). Bump 'revision' and add a line to '_changes' when you edit, so the log shows which rules were in force. Words match whole words, case-insensitive. Process names match with or without .exe.",
+ "schema": "gate.zones.v1",
+ "revision": 3,
+ "_changes": [
+  "1 (2026-11-20): first version, approved by Nowed (never-list and zones as built).",
+  {
+   "revision": 2,
+   "date": "2026-11-21",
+   "by": "Claude",
+   "what": "added never group 'secrets in files' after Gate read a recovery-codes file in Notepad"
+  },
+  {
+   "revision": 3,
+   "date": "2026-11-21",
+   "by": "Claude",
+   "what": "Nowed: never touch Desktop\\Nodach\\nodach_sec. Added nodach_sec and client_secret; element names or values naming a secret are now hidden in every window (Gate showed a file name inside nodach_sec in an Explorer window)."
+  }
+ ],
+ "_never": "NEVER: refused with a reason, no popup, no grant can open it. Checked against the window the action lands in (process name and title) and the target element's name. applies_to 'all' also hides reads (Snapshot/Screenshot are refused while it's in front, and its elements are cut out of any Snapshot); 'input' only stops clicks/keys/typing.",
+ "never": [
+  {
+   "name": "password manager",
+   "applies_to": "all",
+   "processes": [
+    "Bitwarden",
+    "1Password",
+    "KeePass",
+    "KeePassXC",
+    "LastPass",
+    "Dashlane",
+    "Keeper",
+    "NordPass",
+    "RoboForm",
+    "Enpass"
+   ],
+   "title_words": [
+    "Bitwarden",
+    "1Password",
+    "KeePass",
+    "KeePassXC",
+    "LastPass",
+    "Dashlane"
+   ],
+   "element_words": []
+  },
+  {
+   "name": "secrets in files",
+   "applies_to": "all",
+   "processes": [],
+   "title_words": [
+    "recovery codes",
+    "recovery-codes",
+    "recovery_codes",
+    "backup codes",
+    "backup-codes",
+    "2fa",
+    "seed phrase",
+    "mnemonic",
+    "private key",
+    "id_rsa",
+    "id_ed25519",
+    ".env",
+    "password",
+    "passwords",
+    "secret",
+    "secrets",
+    "api key",
+    "api-key",
+    "apikey",
+    "credentials",
+    "wallet",
+    "passphrase",
+    "kek",
+    "seed",
+    "nodach_sec",
+    "client_secret",
+    "client-secret"
+   ],
+   "element_words": [],
+   "note": "21 Nov: Notepad reopened github-recovery-codes.txt and Gate passed its text to Claude. Windows whose title names a secret are never read or touched.",
+   "redact_elements": true
+  },
+  {
+   "name": "banking or payment",
+   "applies_to": "all",
+   "processes": [],
+   "title_words": [
+    "bank",
+    "banking",
+    "PayPal",
+    "Revolut",
+    "Monzo",
+    "Starling",
+    "Barclays",
+    "HSBC",
+    "Lloyds",
+    "NatWest",
+    "Santander",
+    "Nationwide",
+    "Halifax",
+    "Chase",
+    "Wise",
+    "Klarna",
+    "Stripe",
+    "checkout",
+    "payment",
+    "payments",
+    "card number"
+   ],
+   "element_words": [
+    "card number",
+    "cvv",
+    "cvc",
+    "security code",
+    "sort code",
+    "account number",
+    "expiry date"
+   ]
+  },
+  {
+   "name": "Windows Security or UAC",
+   "applies_to": "all",
+   "processes": [
+    "consent",
+    "CredentialUIBroker",
+    "SecHealthUI",
+    "LockApp",
+    "LogonUI",
+    "SecurityHealthSystray"
+   ],
+   "title_words": [
+    "User Account Control",
+    "Windows Security"
+   ],
+   "element_words": []
+  },
+  {
+   "name": "Settings > Accounts or Privacy",
+   "applies_to": "all",
+   "processes": [],
+   "title_words": [],
+   "element_words": [],
+   "only_in_processes": [
+    "SystemSettings"
+   ],
+   "_scoped": "Inside the Settings app only: the page header, the window title or the element clicked naming one of these pages. This also stops Claude clicking the Accounts / Privacy & security entries in the Settings sidebar.",
+   "scoped_words": [
+    "Accounts",
+    "Your info",
+    "Sign-in options",
+    "Email & accounts",
+    "Family",
+    "Other users",
+    "Windows backup",
+    "Privacy & security",
+    "Privacy",
+    "Passkeys",
+    "Access work or school"
+   ]
+  },
+  {
+   "name": "Claude's own window",
+   "applies_to": "input",
+   "_why": "Claude may read its own window (so it can switch away from it) but never click or type into it: that's where its own permission prompts are.",
+   "processes": [
+    "Claude"
+   ],
+   "title_words": [],
+   "element_words": []
+  }
+ ],
+ "_gate_titles": "Gate's own windows (the popup and the Gate window). Always never, so Claude can't press Allow on itself.",
+ "gate_titles": [
+  "Nodach Gate"
+ ],
+ "_shell_apps": "Shells and system editors: launching them through App is never (it would be a way round the hidden PowerShell tool); input into one already open needs your OK.",
+ "shell_apps": {
+  "processes": [
+   "powershell",
+   "pwsh",
+   "cmd",
+   "WindowsTerminal",
+   "wt",
+   "conhost",
+   "OpenConsole",
+   "regedit",
+   "mmc",
+   "wsl",
+   "bash"
+  ],
+  "names": [
+   "PowerShell",
+   "Windows PowerShell",
+   "Command Prompt",
+   "cmd",
+   "Terminal",
+   "Windows Terminal",
+   "Registry Editor",
+   "regedit",
+   "WSL",
+   "Ubuntu"
+  ]
+ },
+ "_confirm": "CONFIRM: a small popup on your PC (Allow once / Allow for 10 min in this app / Block); after 60 s it counts as Block.",
+ "confirm": {
+  "element_words": [
+   "send",
+   "post",
+   "publish",
+   "submit",
+   "delete",
+   "remove",
+   "uninstall",
+   "install",
+   "pay",
+   "pay now",
+   "buy",
+   "buy now",
+   "place order",
+   "confirm",
+   "sign out",
+   "log out",
+   "format",
+   "empty recycle bin",
+   "reset",
+   "erase",
+   "transfer"
+  ],
+  "enter_after_typing_words": [
+   "message",
+   "comment",
+   "reply",
+   "chat",
+   "write a message",
+   "type a message",
+   "compose",
+   "post"
+  ],
+  "key_combos": [
+   "delete",
+   "shift+delete"
+  ],
+  "popup_timeout_s": 60,
+  "grant_minutes": 10
+ },
+ "_confirm_apps": "Apps where every click, key and typed text needs your OK (scrolling and reading stay automatic).",
+ "confirm_apps": [
+  {
+   "name": "Windows Settings",
+   "processes": [
+    "SystemSettings"
+   ]
+  }
+ ],
+ "_auto_apps": "AUTO launch list: App launch of anything else asks first. Use the Start Menu name or the exe name.",
+ "auto_apps": [
+  "Notepad",
+  "notepad",
+  "Calculator",
+  "calc",
+  "Paint",
+  "mspaint",
+  "File Explorer",
+  "explorer",
+  "Microsoft Edge",
+  "msedge",
+  "Google Chrome",
+  "chrome",
+  "Firefox",
+  "Visual Studio Code",
+  "Code",
+  "Snipping Tool",
+  "Sticky Notes",
+  "Microsoft Word",
+  "WINWORD",
+  "Microsoft Excel",
+  "EXCEL",
+  "Microsoft PowerPoint",
+  "POWERPNT",
+  "Outlook",
+  "OUTLOOK",
+  "OneNote",
+  "Microsoft Teams",
+  "ms-teams",
+  "Spotify"
+ ],
+ "_capture": "Pictures stay on this PC (%USERPROFILE%\\nodach-gate\\shots and clips). screenshots: a cropped PNG of the target (element + margin) when it has no name or is custom-drawn/web content, before a confirm popup (shown in it), after an error or when the window looks unchanged, or when Claude calls capture_view. clips: the last clip_seconds of the window in front, kept in memory only at clip_fps, saved on an error, a glitch (the UI changed with no action while Claude was driving) or 'Keep last 10 s'. Never while a never-zone window is in front (a blank frame and the reason instead). The Gate window's toggles override screenshots/clips.",
+ "capture": {
+  "screenshots": true,
+  "clips": true,
+  "shot_margin": 40,
+  "unchanged_bits": 0,
+  "clip_seconds": 10,
+  "clip_fps": 2,
+  "clip_max_width": 480,
+  "clip_format": "gif",
+  "glitch": {
+   "on": true,
+   "min_bits": 20,
+   "quiet_s": 2.0,
+   "active_s": 20.0,
+   "cooldown_s": 30,
+   "per_hour": 6
+  }
+ },
+ "_auto_reports": "Automatic reports to Studio (needs Sign in in the Gate window; owner only). send_automatically is the master switch. Each report is the filtered report (counts, zones, element names; never typed text or window titles) as a comment on the day's item GATE-yymmdd. Pictures (PNG/GIF, zipped folders up to attach_max_mb) go only to your encrypted Private tier, never to the shared record; the comment carries just their reference. never_block reports are text only. Limits: max per_hour an hour, a gap of min_gap_s between reports (never-zone blocks skip the gap), max per_day a day. Offline or signed out: queued in outbox\\ and sent later. The Gate window's checkboxes override these.",
+ "auto_reports": {
+  "send_automatically": true,
+  "hub": "staging",
+  "never_block": true,
+  "error_or_glitch": true,
+  "repeat_fail": true,
+  "confirm_timeout": true,
+  "run_end": true,
+  "session_summary": true,
+  "daily_summary": false,
+  "daily_at": "21:00",
+  "run_end_idle_s": 300,
+  "session_idle_s": 1800,
+  "per_hour": 6,
+  "min_gap_s": 300,
+  "per_day": 20,
+  "attach_pictures": true,
+  "attach_max_mb": 10
+ },
+ "gui": {
+  "autostart": true
+ }
+}

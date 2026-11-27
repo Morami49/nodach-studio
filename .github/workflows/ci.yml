@@ -28,6 +28,16 @@ jobs:
         with: {python-version: "3.12"}
       - run: pip install -r requirements.txt
       - run: python -m tests.test_core
+      - run: pip install jsonschema pillow && python pointer/test_pointer.py   # desktop pointer (F-pointer-webview), runs off Windows
+  gate:
+    # Nodach Gate: zones, log masking, captures, automatic reports, installer config merge, and the MCP proxy end to
+    # end against a fake Windows-MCP (no Windows needed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with: {python-version: "3.13"}
+      - run: pip install pytest "mcp>=2.3,<3" pillow && python -m pytest -q actionmap/gate/tests
   scripts:
     runs-on: ubuntu-latest
     steps:
@@ -63,6 +73,15 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with: {name: studio-scenarios, path: studio/tests/out}
+  desktop:
+    # Nodach Desktop: shell reload / crash backoff against a fake worker, Gate + Pointer through the real worker
+    # (fake Windows-MCP), update verify / swap / rollback, Claude config migration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with: {python-version: "3.13"}
+      - run: pip install pytest "mcp>=2.3,<3" pillow && python -m pytest -q actionmap/desktop/tests
   live-client:
     # B-live-session: the desktop Live client's pure logic (task lines, event shapes, points); no microphone
     runs-on: ubuntu-latest

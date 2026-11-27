@@ -1,0 +1,7 @@
+# Nodach Gate (Windows). install-gate.bat installs these with pip --user.
+mcp>=2.3,<3
+windows-mcp>=0.8.9,<0.9
+pywin32
+uiautomation
+pillow
+psutil
