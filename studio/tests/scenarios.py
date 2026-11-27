@@ -1564,7 +1564,7 @@ async def s57_esc_touch_keyboard(b):
 
 async def s58_classic_tabs(b):
     """NAV-2: the old tab row stays reachable under Settings → Classic tabs until each move is verified: turning it on
-    shows all 13 tabs and the old rail (each works), the choice survives a reload, and turning it off brings the bar back."""
+    shows all 14 tabs (In flight joined, BQ-in-flight-briefs) and the old rail (each works), the choice survives a reload, and turning it off brings the bar back."""
     st = Store(); p = await open_page(b, st, {"classic": False})
     await nav_open(p); await p.click("#sections [data-s=settings]"); await p.wait_for_timeout(100)
     await p.check("#classicTabs"); await p.wait_for_timeout(150)
@@ -1578,7 +1578,7 @@ async def s58_classic_tabs(b):
     kept = await p.evaluate("document.querySelector('#hdr').classList.contains('classic') && !!document.querySelector('#tabs').offsetParent")
     await p.uncheck("#classicTabs"); await p.wait_for_timeout(150)
     back = await p.evaluate("!document.querySelector('#tabs').offsetParent && !!document.querySelector('#subnav [data-sub=settings] #pointBtn') && !!document.querySelector('#v-map #asof')")
-    ok = len(tabs) == 13 and works == tabs and in_rail and kept and back and not p.errors
+    ok = len(tabs) == 14 and works == tabs and in_rail and kept and back and not p.errors
     return ok, f"tabs={len(tabs)}, working={len(works)}, old rail={in_rail}, kept after reload={kept}, off restores bar={back}, errors={p.errors[:1]}"
 
 
